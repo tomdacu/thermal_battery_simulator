@@ -166,7 +166,18 @@ Dove $\alpha = k/(\rho c_p)$ = diffusività termica [m²/s]
 
 ## 7. Applicazione alla Sand Battery
 
-### 7.1 Bilancio Energetico Globale
+### 7.1 Architettura della Batteria
+
+La batteria è modellata come un cilindro verticale composto da diverse zone radiali concentriche:
+
+1.  **Zona Tubi Centrali**: Area dedicata agli scambiatori di calore per l'estrazione dell'energia.
+2.  **Sabbia Interna**: Primo strato di accumulo termico.
+3.  **Zona Resistenze**: Area dove sono posizionati gli elementi riscaldanti elettrici.
+4.  **Sabbia Esterna**: Secondo strato di accumulo termico.
+5.  **Isolamento**: Strato di materiale a bassa conducibilità (es. lana di roccia) per minimizzare le perdite.
+6.  **Guscio**: Rivestimento esterno in acciaio per protezione strutturale.
+
+### 7.2 Bilancio Energetico Globale
 
 **Stato di carica:**
 $$\dot{E}_{in} = \dot{E}_{stored} + \dot{E}_{losses}$$
@@ -178,19 +189,29 @@ $$\dot{E}_{stored} = \dot{E}_{out} + \dot{E}_{losses}$$
 
 $$\frac{d}{dt}(m \cdot c_p \cdot \bar{T}) = P_{tubi} + P_{dispersione}$$
 
-### 7.2 Potenza delle Resistenze
+### 7.3 Potenza delle Resistenze
+
+La potenza termica generata per unità di volume ($Q$) è distribuita nella zona delle resistenze:
 
 $$P_{res} = \sum_i Q_i \cdot V_i$$
 
-Dove $V_i$ = volume della cella i-esima
+Dove $V_i$ è il volume della cella i-esima appartenente alla zona riscaldante.
 
-### 7.3 Potenza Estratta dai Tubi
+### 7.4 Potenza Estratta dai Tubi
 
-$$P_{tubi} = \dot{m} \cdot c_{p,fluido} \cdot (T_{out} - T_{in})$$
+Lo scambio termico con il fluido nei tubi è modellato tramite una condizione di convezione interna:
 
-### 7.4 Potenza Dispersa
+$$q_{tubi} = h_{fluido} (T_{parete} - T_{fluido})$$
 
-$$P_{disp} = \oint h(T_s - T_\infty) \, dA + \text{(irraggiamento)}$$
+### 7.5 Potenza Dispersa
+
+La dispersione verso l'ambiente avviene per convezione sulle superfici esterne:
+
+$$P_{disp} = \oint h(T_s - T_\infty) \, dA$$
+
+E per conduzione verso il terreno alla base:
+
+$$q_{base} = -k \frac{\partial T}{\partial z}\bigg|_{z=0}$$
 
 ---
 

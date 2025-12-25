@@ -98,20 +98,17 @@ L'equazione del nodo di bordo usa il valore riflesso.
 
 ### 5.3 Robin (Convezione)
 
-Per convezione sul bordo:
+Per convezione sul bordo, il bilancio energetico sul volume di controllo dimezzato al contorno porta a un coefficiente di scambio effettivo che tiene conto sia della resistenza conduttiva (metà cella) che di quella convettiva:
 
-$$-k \frac{\partial T}{\partial n}\bigg|_{bordo} = h(T_{bordo} - T_\infty)$$
+$$R_{tot} = R_{cond} + R_{conv} = \frac{\Delta/2}{k} + \frac{1}{h}$$
 
-Approssimando la derivata:
+Il flusso di calore è quindi:
+$$q = \frac{T_{interno} - T_\infty}{R_{tot}} = \frac{T_{interno} - T_\infty}{\frac{\Delta}{2k} + \frac{1}{h}}$$
 
-$$-k \frac{T_{bordo} - T_{interno}}{\Delta/2} = h(T_{bordo} - T_\infty)$$
+In forma di coefficiente per la matrice:
+$$a_{bc} = \frac{1}{R_{tot} \cdot \Delta} = \frac{2kh}{2k + h\Delta} \cdot \frac{1}{\Delta}$$
 
-Risolvendo per $T_{bordo}$:
-
-$$T_{bordo} = \frac{k \cdot T_{interno} + h \cdot \frac{\Delta}{2} \cdot T_\infty}{k + h \cdot \frac{\Delta}{2}}$$
-
-**Schema matriciale:**
-$$\left(1 + \frac{h \Delta}{2k}\right) T_{bordo} - T_{interno} = \frac{h \Delta}{2k} T_\infty$$
+Questo approccio garantisce una maggiore precisione rispetto alla semplice approssimazione della derivata prima al bordo.
 
 ---
 
@@ -119,30 +116,13 @@ $$\left(1 + \frac{h \Delta}{2k}\right) T_{bordo} - T_{interno} = \frac{h \Delta}
 
 ### 6.1 Metodo Backward Euler (Implicito)
 
-$$\rho c_p \frac{T^{n+1} - T^n}{\Delta t} = k \nabla^2 T^{n+1} + Q$$
+$$\rho c_p \frac{T^{n+1} - T^n}{\Delta t} = \nabla \cdot (k \nabla T^{n+1}) + Q$$
 
-Riarrangiando:
+Riarrangiando in forma matriciale:
 
-$$T^{n+1} - \frac{k \Delta t}{\rho c_p} \nabla^2 T^{n+1} = T^n + \frac{Q \Delta t}{\rho c_p}$$
+$$(\mathbf{M} + \Delta t \mathbf{L}) \mathbf{T}^{n+1} = \mathbf{M} \mathbf{T}^n + \Delta t \mathbf{Q}$$
 
-Definendo $\alpha = k/(\rho c_p)$ e $Fo = \alpha \Delta t / \Delta^2$:
-
-$$T_P^{n+1}(1 + 6 Fo) - Fo(T_E^{n+1} + T_W^{n+1} + ...) = T_P^n + \frac{Q_P \Delta t}{\rho c_p}$$
-
-**Vantaggi:**
-- Incondizionatamente stabile
-- Permette $\Delta t$ grandi
-
-**Svantaggi:**
-- Richiede soluzione di sistema lineare ad ogni step
-
-### 6.2 Metodo Crank-Nicolson
-
-$$\rho c_p \frac{T^{n+1} - T^n}{\Delta t} = \frac{k}{2}(\nabla^2 T^{n+1} + \nabla^2 T^n) + Q$$
-
-**Vantaggi:**
-- Accuratezza $O(\Delta t^2)$
-- Incondizionatamente stabile
+Dove $\mathbf{M}$ è la matrice di massa (capacità termica) e $\mathbf{L}$ è il Laplaciano negativo.
 
 ---
 
@@ -161,7 +141,7 @@ Dove:
 
 ### 7.2 Struttura della Matrice A
 
-Per una griglia 3D con $N_x \times N_y \times N_z$ nodi:
+Per una griglia 3D con $N_x \times N_y \times N_z$ nodi, la matrice è costruita in ordine **Fortran (column-major)**, dove l'indice $i$ (X) è il più veloce, seguito da $j$ (Y) e infine $k$ (Z).
 
 - Dimensione: $N \times N$ dove $N = N_x \cdot N_y \cdot N_z$
 - Struttura a bande con 7 diagonali (3D)
@@ -169,31 +149,33 @@ Per una griglia 3D con $N_x \times N_y \times N_z$ nodi:
 
 **Pattern delle diagonali:**
 - Diagonale principale: coefficiente del nodo P
-- Diagonali ±1: coefficienti E/W
-- Diagonali ±$N_x$: coefficienti N/S
-- Diagonali ±$N_x N_y$: coefficienti U/D
+- Diagonali ±1: coefficienti E/W (direzione X)
+- Diagonali ±$N_x$: coefficienti N/S (direzione Y)
+- Diagonali ±$N_x N_y$: coefficienti U/D (direzione Z)
 
 ### 7.3 Esempio di Riga della Matrice
 
 Per un nodo interno con indice lineare $p$:
 
 ```
-A[p, p-Nx*Ny] = -k_D / Δ²     (contributo Down)
-A[p, p-Nx]    = -k_S / Δ²     (contributo South)
-A[p, p-1]     = -k_W / Δ²     (contributo West)
-A[p, p]       = (k_E+k_W+k_N+k_S+k_U+k_D) / Δ²  (diagonale)
-A[p, p+1]     = -k_E / Δ²     (contributo East)
-A[p, p+Nx]    = -k_N / Δ²     (contributo North)
-A[p, p+Nx*Ny] = -k_U / Δ²     (contributo Up)
+A[p, p-Nx*Ny] = -k_d / Δ²     (contributo Down)
+A[p, p-Nx]    = -k_s / Δ²     (contributo South)
+A[p, p-1]     = -k_w / Δ²     (contributo West)
+A[p, p]       = (k_e+k_w+k_n+k_s+k_u+k_d) / Δ²  (diagonale)
+A[p, p+1]     = -k_e / Δ²     (contributo East)
+A[p, p+Nx]    = -k_n / Δ²     (contributo North)
+A[p, p+Nx*Ny] = -k_u / Δ²     (contributo Up)
 
 b[p] = Q_p
 ```
+
+Dove $k_e, k_w, ...$ sono le conducibilità medie armoniche alle interfacce.
 
 ---
 
 ## 8. Linearizzazione degli Indici
 
-### 8.1 Da 3D a 1D
+### 8.1 Da 3D a 1D (Ordine Fortran)
 
 Per passare da indici $(i, j, k)$ a indice lineare $p$:
 
@@ -204,8 +186,8 @@ $$p = i + j \cdot N_x + k \cdot N_x \cdot N_y$$
 Per il passaggio inverso:
 
 $$k = p // (N_x \cdot N_y)$$
-$$j = (p - k \cdot N_x \cdot N_y) // N_x$$
-$$i = p - k \cdot N_x \cdot N_y - j \cdot N_x$$
+$$j = (p \% (N_x \cdot N_y)) // N_x$$
+$$i = p \% N_x$$
 
 ---
 
