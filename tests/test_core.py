@@ -193,6 +193,27 @@ class TestGeometry:
         # Verifica sorgenti di calore nella zona resistenze
         assert np.any(mesh.Q > 0)
 
+    def test_tubes_inactive_do_not_set_internal_convection(self):
+        """Se i tubi sono inattivi, le celle-tubo non devono diventare CONVECTION con h>0."""
+        geom = create_small_test_geometry()
+        geom.tubes.active = False
+        manager = MaterialManager()
+
+        mesh = Mesh3D(Lx=6, Ly=6, Lz=5, Nx=20, Ny=20, Nz=15)
+        geom.apply_to_mesh(mesh, manager)
+
+        # Non devono esserci celle interne CONVECTION con h>0
+        internal = np.ones(mesh.boundary_type.shape, dtype=bool)
+        internal[0, :, :] = False
+        internal[-1, :, :] = False
+        internal[:, 0, :] = False
+        internal[:, -1, :] = False
+        internal[:, :, 0] = False
+        internal[:, :, -1] = False
+
+        conv_internal = (mesh.boundary_type == BoundaryType.CONVECTION) & internal
+        assert not np.any(conv_internal & (mesh.bc_h > 0))
+
 
 class TestSliceExtraction:
     """Test estrazione sezioni"""

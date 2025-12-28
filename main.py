@@ -1,12 +1,35 @@
 """
-main.py - Script principale per simulazione Sand Battery
+main.py - Script CLI per testing/scripting (NON PRODUCTION)
 
-Esempio di workflow completo:
-1. Crea mesh 3D
-2. Applica geometria e materiali
-3. Risolve caso stazionario
-4. Analizza bilancio energetico
-5. Visualizza risultati
+=============================================================================
+⚠️  WARNING: THIS FILE IS FOR TESTING AND DEVELOPMENT ONLY
+=============================================================================
+
+This script contains HARDCODED VALUES for quick testing of the simulation
+engine from the command line. It does NOT respect the GUI-driven design.
+
+FOR PRODUCTION USE:
+    Run the GUI with: python run_gui.py
+    
+    The GUI reads ALL parameters from user input widgets - no hardcoded values.
+    See docs/05_ARCHITECTURE.md for the proper data flow.
+
+WHY THIS FILE EXISTS:
+    - Quick testing of solver changes without launching GUI
+    - Automated regression testing
+    - Scripted batch simulations
+    - Development and debugging
+
+The values in create_test_battery() and run_simulation() are examples only
+and do NOT represent real production configurations.
+=============================================================================
+
+Workflow:
+1. Create 3D mesh
+2. Apply geometry and materials
+3. Solve steady-state heat equation
+4. Analyze energy balance
+5. Visualize results (optional)
 """
 
 import numpy as np

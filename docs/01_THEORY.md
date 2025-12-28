@@ -1,8 +1,17 @@
 # Teoria dello Scambio Termico - Sand Battery Simulation
 
-## 1. Equazioni Fondamentali
+## 1. Obiettivi della Simulazione
 
-### 1.1 Equazione del Calore (Generale)
+La simulazione mira a prevedere la distribuzione spaziale della temperatura all'interno di un accumulatore termico a sabbia. Questo permette di:
+- Identificare zone di ristagno termico o perdite eccessive.
+- Calcolare la capacità energetica reale basata sulla distribuzione di temperatura non uniforme.
+- Valutare l'efficacia dei sistemi di estrazione (tubi) e riscaldamento (resistenze).
+
+---
+
+## 2. Equazioni Fondamentali
+
+### 2.1 Equazione del Calore (Generale)
 
 L'equazione che governa la distribuzione della temperatura in un solido è:
 

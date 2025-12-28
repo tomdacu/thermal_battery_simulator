@@ -622,7 +622,8 @@ class BatteryGeometry:
         else:
             # Elementi discreti - calcola Q per ogni elemento
             if heater_elements:
-                V_single = np.pi * self.heaters.heater_radius**2 * cyl.height
+                heater_length = self.heaters.heater_length if self.heaters.heater_length else cyl.height
+                V_single = np.pi * self.heaters.heater_radius**2 * heater_length
                 Q_heaters = (self.heaters.power_per_heater * 1000) / V_single
             else:
                 Q_heaters = 0.0
@@ -668,9 +669,15 @@ class BatteryGeometry:
                                     dist = np.sqrt((x - tube.x)**2 + (y - tube.y)**2)
                                     if dist <= tube.radius:
                                         is_in_tube = True
-                                        mesh.bc_h[i, j, k] = tube.h_fluid
-                                        mesh.bc_T_inf[i, j, k] = tube.T_fluid
-                                        mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
+                                        # Applica lo scambio solo se i tubi sono attivi (scarica).
+                                        # Se non attivi, i tubi restano come regione materiale senza sink convettivo.
+                                        if self.tubes.active:
+                                            mesh.bc_h[i, j, k] = tube.h_fluid
+                                            mesh.bc_T_inf[i, j, k] = tube.T_fluid
+                                            mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
+                                        else:
+                                            mesh.bc_h[i, j, k] = 0.0
+                                            mesh.boundary_type[i, j, k] = BoundaryType.INTERNAL
                                         break
                         
                         if is_in_heater:

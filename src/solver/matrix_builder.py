@@ -1,9 +1,38 @@
 """
 matrix_builder.py - Costruzione della matrice FDM
 
-Costruisce il sistema lineare A*T = b per l'equazione del calore:
-- ∇·(k∇T) + Q = 0  (stazionario)
-- ρcp ∂T/∂t = ∇·(k∇T) + Q  (transitorio)
+=============================================================================
+MODULE OVERVIEW
+=============================================================================
+
+This module assembles the sparse linear system A·T = b for solving the 
+heat equation using the Finite Difference Method (FDM).
+
+KEY EQUATIONS:
+    Steady-state:   -∇·(k∇T) + Q = 0
+    Transient:      ρcp ∂T/∂t = ∇·(k∇T) + Q  (future)
+
+DISCRETIZATION:
+    Uses a 7-point stencil on a uniform 3D Cartesian grid (dx = dy = dz = d).
+    For each node P with neighbors W, E, S, N, D, U:
+    
+        a_P·T_P + a_W·T_W + a_E·T_E + a_S·T_S + a_N·T_N + a_D·T_D + a_U·T_U = b_P
+    
+    The coefficients depend on:
+    - Thermal conductivity k (harmonic mean at faces)
+    - Boundary type (Dirichlet, Neumann, Convection, Internal)
+    - Heat source Q
+
+INDEXING CONVENTION:
+    Uses Fortran-order (column-major) linear indexing:
+        p = i + j*Nx + k*Nx*Ny
+    
+    This ensures contiguous memory access when iterating z-first.
+    
+ALL PARAMETERS FROM GUI:
+    All thermal properties (k, rho, cp, Q) come from the mesh object,
+    which is populated by BatteryGeometry.apply_to_mesh() based on GUI input.
+=============================================================================
 """
 
 import numpy as np
@@ -63,7 +92,7 @@ def build_steady_state_matrix(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarr
                     col_indices.append(p)
                     data.append(1.0)
                     b[p] = mesh.bc_T_inf[i, j, k]
-                    
+
                 elif bc_type == BoundaryType.INTERNAL:
                     # Nodo interno - schema a 7 punti
                     # Bilancio: Σ k_eff/d² * (T_neighbor - T_P) + Q = 0
@@ -95,7 +124,58 @@ def build_steady_state_matrix(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarr
                                 data.append(coeffs[direction])
                     
                     b[p] = rhs
-                    
+
+                elif bc_type == BoundaryType.CONVECTION:
+                    # Nodo con convezione.
+                    # - Se è sul bordo del dominio: usa schema Robin di bordo.
+                    # - Se è interno (es. celle-tubo): aggiunge un termine di scambio
+                    #   locale verso T_inf (sink/source) mantenendo i contributi conduttivi.
+                    is_domain_boundary = (
+                        i == 0 or i == Nx - 1 or
+                        j == 0 or j == Ny - 1 or
+                        k == 0 or k == Nz - 1
+                    )
+
+                    if is_domain_boundary:
+                        coeffs, rhs = _get_boundary_coefficients(mesh, i, j, k, d, d2)
+                    else:
+                        coeffs, rhs = _get_internal_coefficients_v2(mesh, i, j, k, d, d2)
+
+                        h_local = float(mesh.bc_h[i, j, k])
+                        T_inf_local = float(mesh.bc_T_inf[i, j, k])
+
+                        # Modello semplice di scambio interno:
+                        # aggiunge a_conv = h * A/V con A≈d^2 e V=d^3 => a_conv = h/d
+                        if h_local > 0:
+                            a_conv = h_local / d
+                            coeffs['P'] = coeffs.get('P', 0.0) + a_conv
+                            rhs += a_conv * T_inf_local
+
+                    # Diagonale principale
+                    row_indices.append(p)
+                    col_indices.append(p)
+                    data.append(coeffs['P'])
+
+                    # Vicini (solo quelli interni al dominio)
+                    neighbors = [
+                        (i-1, j, k, 'W'),
+                        (i+1, j, k, 'E'),
+                        (i, j-1, k, 'S'),
+                        (i, j+1, k, 'N'),
+                        (i, j, k-1, 'D'),
+                        (i, j, k+1, 'U'),
+                    ]
+
+                    for ni, nj, nk, direction in neighbors:
+                        if 0 <= ni < Nx and 0 <= nj < Ny and 0 <= nk < Nz:
+                            if direction in coeffs:
+                                p_neighbor = mesh.ijk_to_linear(ni, nj, nk)
+                                row_indices.append(p)
+                                col_indices.append(p_neighbor)
+                                data.append(coeffs[direction])
+
+                    b[p] = rhs
+
                 else:
                     # Nodo di bordo con condizione convettiva o mista
                     coeffs, rhs = _get_boundary_coefficients(mesh, i, j, k, d, d2)
@@ -372,7 +452,9 @@ def build_transient_matrix(mesh: Mesh3D, dt: float, theta: float = 1.0
     d3 = mesh.dx * mesh.dy * mesh.dz
     
     # Capacità termica volumetrica per ogni nodo
-    rho_cp = (mesh.rho * mesh.cp).ravel()
+    # IMPORTANT: la matrice L è costruita usando l'indicizzazione lineare della mesh
+    # (equivalente a Fortran order). Manteniamo lo stesso ordine anche qui.
+    rho_cp = (mesh.rho * mesh.cp).ravel(order='F')
     
     # Coefficiente temporale
     mass_diag = rho_cp / dt

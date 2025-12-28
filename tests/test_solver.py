@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.mesh import Mesh3D, BoundaryType
-from src.solver.matrix_builder import build_steady_state_matrix
+from src.solver.matrix_builder import build_steady_state_matrix, build_transient_matrix
 from src.solver.steady_state import SteadyStateSolver, SolverConfig, solve_steady_state
 
 
@@ -56,6 +56,56 @@ class TestMatrixBuilder:
         # Almeno l'80% dei nodi dovrebbe essere diagonalmente dominante
         dominant = np.sum(diag >= off_diag_sum - 1e-10)
         assert dominant >= 0.8 * mesh.N_total
+
+    def test_internal_convection_adds_term(self):
+        """Verifica che la convezione interna (celle-tubo) aggiunga un termine su diagonale e RHS."""
+        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
+        # Seleziona una cella interna
+        i = j = k = 2
+        p = mesh.ijk_to_linear(i, j, k)
+
+        # Caso base: interno
+        mesh.boundary_type[i, j, k] = BoundaryType.INTERNAL
+        mesh.bc_h[i, j, k] = 0.0
+        mesh.bc_T_inf[i, j, k] = 20.0
+        A0, b0 = build_steady_state_matrix(mesh)
+        a0 = A0[p, p]
+        rhs0 = b0[p]
+
+        # Caso con convezione interna
+        h = 10.0
+        T_inf = 5.0
+        mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
+        mesh.bc_h[i, j, k] = h
+        mesh.bc_T_inf[i, j, k] = T_inf
+        A1, b1 = build_steady_state_matrix(mesh)
+        a1 = A1[p, p]
+        rhs1 = b1[p]
+
+        # Il modello implementato usa a_conv = h / d
+        a_conv = h / mesh.d
+        assert a1 == pytest.approx(a0 + a_conv, rel=1e-9, abs=1e-12)
+        assert rhs1 == pytest.approx(rhs0 + a_conv * T_inf, rel=1e-9, abs=1e-12)
+
+    def test_transient_mass_matrix_ordering(self):
+        """Verifica che la matrice di massa usi lo stesso ordine di flattening della mesh."""
+        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=4, Ny=3, Nz=2)
+
+        # Crea un campo non uniforme per distinguere l'ordine
+        mesh.rho[:] = 1.0
+        mesh.cp[:] = 1.0
+        mesh.rho[1, 0, 0] = 7.0
+        mesh.cp[1, 0, 0] = 11.0
+        dt = 2.0
+        theta = 1.0
+
+        A, B = build_transient_matrix(mesh, dt=dt, theta=theta)
+
+        # Per theta=1: A = M + L, B = M
+        # quindi M.diag = B.diag
+        mass_diag_expected = (mesh.rho * mesh.cp).ravel(order='F') / dt
+        mass_diag_actual = B.diagonal()
+        assert np.allclose(mass_diag_actual, mass_diag_expected)
 
 
 class TestSteadyStateSolver:
@@ -201,6 +251,24 @@ class TestEnergyBalance:
         # Il bilancio dovrebbe chiudersi con errore < 10%
         # (errore maggiore accettabile per mesh grossolana)
         assert balance.imbalance_pct < 20.0
+
+    def test_internal_convection_counts_as_output(self):
+        """Verifica che la convezione interna venga conteggiata come P_output nel bilancio."""
+        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
+
+        # Imposta un'unica cella interna come "tubo" convettivo
+        i = j = k = 2
+        mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
+        mesh.bc_h[i, j, k] = 10.0
+        mesh.bc_T_inf[i, j, k] = 20.0
+        mesh.T[i, j, k] = 30.0
+
+        from src.analysis.power_balance import PowerBalanceAnalyzer
+        analyzer = PowerBalanceAnalyzer(mesh)
+        balance = analyzer.compute_power_balance()
+
+        expected = 10.0 * (30.0 - 20.0) * (mesh.d ** 2)
+        assert balance.P_output == pytest.approx(expected)
 
 
 # =============================================================================

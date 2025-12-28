@@ -1,6 +1,30 @@
 """
 main_window.py - Finestra principale della GUI
 
+=============================================================================
+ARCHITECTURE NOTE: GUI-DRIVEN CONFIGURATION
+=============================================================================
+
+This file is the SINGLE SOURCE OF TRUTH for all simulation parameters.
+The simulation engine (solver, analysis) receives ALL its parameters from
+the GUI widgets defined here. There are NO hardcoded simulation values in
+the core modules.
+
+KEY DESIGN PRINCIPLE:
+    Widget values → _build_battery_geometry_from_inputs() → BatteryGeometry
+    BatteryGeometry → apply_to_mesh() → Mesh3D fields
+    Mesh3D → SteadyStateSolver → Temperature solution
+
+PARAMETER FLOW:
+    1. User configures widgets in tabs (Geometria, Resistenze, Tubi, Solver)
+    2. _build_battery_geometry_from_inputs() reads ALL widgets
+    3. Creates BatteryGeometry, HeaterConfig, TubeConfig objects
+    4. apply_to_mesh() maps analytic geometry to mesh fields
+    5. Solver uses mesh fields (k, rho, cp, Q, boundary_type, etc.)
+
+See docs/05_ARCHITECTURE.md and docs/06_GUI_CONFIGURATION.md for details.
+=============================================================================
+
 Interfaccia grafica completa per la simulazione Sand Battery:
 - Pannello sinistro: Input parametri e controlli
 - Pannello centrale: Visualizzazione 3D PyVista
@@ -225,6 +249,11 @@ class SandBatteryGUI(QMainWindow):
         self.build_mesh_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 8px;")
         self.build_mesh_btn.clicked.connect(self.build_mesh)
         btn_layout.addWidget(self.build_mesh_btn)
+
+        # Pulsante Anteprima Geometria (senza mesh)
+        self.preview_geom_btn = QPushButton("👁 Anteprima Geometria")
+        self.preview_geom_btn.clicked.connect(self.preview_geometry)
+        btn_layout.addWidget(self.preview_geom_btn)
         
         # Pulsante Esegui Simulazione
         self.run_btn = QPushButton("▶ Esegui Simulazione")
@@ -1049,72 +1078,13 @@ class SandBatteryGUI(QMainWindow):
         self.status_label.setText("Stato: Creazione mesh...")
         
         try:
-            # Crea geometria
-            d = self.spacing_spin.value()
-            Lx, Ly, Lz = self.lx_spin.value(), self.ly_spin.value(), self.lz_spin.value()
-            
+            d, Lx, Ly, Lz, geom = self._build_battery_geometry_from_inputs()
+            self.battery_geometry = geom
             self.log(f"Dominio: {Lx}×{Ly}×{Lz} m, spaziatura: {d} m")
-            
+
             # Crea mesh uniforme
             self.mesh = Mesh3D(Lx=Lx, Ly=Ly, Lz=Lz, target_spacing=d)
-            
             self.log(f"Mesh creata: {self.mesh.Nx}×{self.mesh.Ny}×{self.mesh.Nz} celle")
-            
-            # Crea geometria cilindrica
-            center_x, center_y = Lx / 2, Ly / 2
-            radius = self.radius_spin.value()
-            height = self.height_spin.value()
-            
-            cylinder = CylinderGeometry(
-                center_x=center_x,
-                center_y=center_y,
-                base_z=0.3,
-                height=height,
-                r_tubes=0.3,
-                r_sand_inner=radius * 0.4,
-                r_heaters=radius * 0.5,
-                r_sand_outer=radius * 0.85,
-                r_insulation=radius,
-                r_shell=radius + 0.02,
-            )
-            
-            # Crea configurazione resistenze dal tab
-            heater_config = HeaterConfig(
-                power_total=self.power_spin.value(),
-                n_heaters=self.n_heaters_spin.value(),
-                pattern=self._get_heater_pattern_enum(),
-                heater_radius=self.heater_radius_spin.value(),
-                grid_rows=self.heater_grid_rows.value(),
-                grid_cols=self.heater_grid_cols.value(),
-                grid_spacing=self.heater_grid_spacing.value(),
-                n_rings=self.heater_n_rings.value()
-            )
-            
-            # Crea configurazione tubi dal tab
-            tube_config = TubeConfig(
-                n_tubes=self.n_tubes_spin.value(),
-                diameter=self.tube_diameter_spin.value(),
-                h_fluid=self.tube_h_fluid_spin.value(),
-                T_fluid=self.tube_t_fluid_spin.value(),
-                active=self.tubes_active_check.isChecked(),
-                pattern=self._get_tube_pattern_enum(),
-                grid_rows=self.tube_grid_rows.value(),
-                grid_cols=self.tube_grid_cols.value(),
-                grid_spacing=self.tube_grid_spacing.value(),
-                n_rings=self.tube_n_rings.value()
-            )
-            
-            self.log(f"Heater pattern: {heater_config.pattern}")
-            self.log(f"Tube pattern: {tube_config.pattern}")
-            
-            self.battery_geometry = BatteryGeometry(
-                cylinder=cylinder,
-                heaters=heater_config,
-                tubes=tube_config,
-                storage_material=self.storage_combo.currentText(),
-                insulation_material=self.insulation_combo.currentText(),
-                packing_fraction=self.packing_spin.value() / 100.0,
-            )
             
             self.progress_bar.setValue(50)
             self.status_label.setText("Stato: Applicazione geometria...")
@@ -1124,11 +1094,11 @@ class SandBatteryGUI(QMainWindow):
             
             self.log("Geometria applicata")
             
-            # Log numero elementi discreti
-            if heater_config.elements:
-                self.log(f"  Resistenze discrete: {len(heater_config.elements)}")
-            if tube_config.elements:
-                self.log(f"  Tubi discreti: {len(tube_config.elements)}")
+            # Log numero elementi discreti (accedi tramite l'oggetto geom)
+            if geom.heaters.elements:
+                self.log(f"  Resistenze discrete: {len(geom.heaters.elements)}")
+            if geom.tubes.elements:
+                self.log(f"  Tubi discreti: {len(geom.tubes.elements)}")
             
             self.update_material_info()
             
@@ -1148,6 +1118,179 @@ class SandBatteryGUI(QMainWindow):
             self.status_label.setText(f"Errore: {e}")
             QMessageBox.critical(self, "Errore", str(e))
             self.run_btn.setEnabled(False)
+
+    def _build_battery_geometry_from_inputs(self):
+        """
+        CENTRAL CONFIGURATION FUNCTION - Reads ALL GUI widgets and creates config objects.
+        
+        This is the single function that bridges GUI widgets to simulation parameters.
+        It reads every relevant widget and creates:
+        - CylinderGeometry: radial zone definitions
+        - HeaterConfig: heater pattern, power, positions
+        - TubeConfig: tube pattern, h_fluid, T_fluid, positions
+        - BatteryGeometry: combines all above with material selections
+        
+        Returns:
+            tuple: (spacing, Lx, Ly, Lz, BatteryGeometry)
+        
+        NOTE: This function does NOT create the mesh - it only builds the configuration.
+        The actual mesh creation happens in build_mesh() or is skipped in preview_geometry().
+        """
+        # ==========================================================================
+        # STEP 1: Read domain and mesh parameters from GUI
+        # ==========================================================================
+        d = self.spacing_spin.value()
+        Lx, Ly, Lz = self.lx_spin.value(), self.ly_spin.value(), self.lz_spin.value()
+
+        center_x, center_y = Lx / 2, Ly / 2
+        radius = self.radius_spin.value()
+        height = self.height_spin.value()
+
+        cylinder = CylinderGeometry(
+            center_x=center_x,
+            center_y=center_y,
+            base_z=0.3,
+            height=height,
+            r_tubes=0.3,
+            r_sand_inner=radius * 0.4,
+            r_heaters=radius * 0.5,
+            r_sand_outer=radius * 0.85,
+            r_insulation=radius,
+            r_shell=radius + 0.02,
+        )
+
+        heater_config = HeaterConfig(
+            power_total=self.power_spin.value(),
+            n_heaters=self.n_heaters_spin.value(),
+            pattern=self._get_heater_pattern_enum(),
+            heater_radius=self.heater_radius_spin.value(),
+            grid_rows=self.heater_grid_rows.value(),
+            grid_cols=self.heater_grid_cols.value(),
+            grid_spacing=self.heater_grid_spacing.value(),
+            n_rings=self.heater_n_rings.value()
+        )
+
+        tube_config = TubeConfig(
+            n_tubes=self.n_tubes_spin.value(),
+            diameter=self.tube_diameter_spin.value(),
+            h_fluid=self.tube_h_fluid_spin.value(),
+            T_fluid=self.tube_t_fluid_spin.value(),
+            active=self.tubes_active_check.isChecked(),
+            pattern=self._get_tube_pattern_enum(),
+            grid_rows=self.tube_grid_rows.value(),
+            grid_cols=self.tube_grid_cols.value(),
+            grid_spacing=self.tube_grid_spacing.value(),
+            n_rings=self.tube_n_rings.value()
+        )
+
+        self.log(f"Heater pattern: {heater_config.pattern}")
+        self.log(f"Tube pattern: {tube_config.pattern}")
+
+        geom = BatteryGeometry(
+            cylinder=cylinder,
+            heaters=heater_config,
+            tubes=tube_config,
+            storage_material=self.storage_combo.currentText(),
+            insulation_material=self.insulation_combo.currentText(),
+            packing_fraction=self.packing_spin.value() / 100.0,
+        )
+
+        return d, Lx, Ly, Lz, geom
+
+    def preview_geometry(self):
+        """Visualizza la geometria analitica (senza costruire la mesh)."""
+        self.log("=" * 50)
+        self.log("Anteprima geometria (senza mesh)...")
+
+        try:
+            _, Lx, Ly, Lz, geom = self._build_battery_geometry_from_inputs()
+            self.battery_geometry = geom
+
+            cyl = geom.cylinder
+
+            self.plotter.clear()
+            self.plotter.add_text(
+                "Anteprima Geometria (no mesh)\n"
+                "- Strati cilindrici\n"
+                "- Tubi / resistenze (se presenti)",
+                position='upper_left',
+                font_size=12,
+                color='gray'
+            )
+
+            # Outline del dominio
+            domain = pv.Cube(
+                center=(Lx / 2, Ly / 2, Lz / 2),
+                x_length=Lx,
+                y_length=Ly,
+                z_length=Lz
+            )
+            self.plotter.add_mesh(domain.outline(), color='gray', line_width=1)
+
+            # Strati: mostra solo i contorni dei raggi principali
+            z_center = cyl.base_z + cyl.height / 2
+            radii = [
+                cyl.r_tubes,
+                cyl.r_sand_inner,
+                cyl.r_heaters,
+                cyl.r_sand_outer,
+                cyl.r_insulation,
+                cyl.r_shell,
+            ]
+            for r in radii:
+                c = pv.Cylinder(
+                    center=(cyl.center_x, cyl.center_y, z_center),
+                    direction=(0, 0, 1),
+                    radius=float(r),
+                    height=float(cyl.height),
+                    resolution=72
+                )
+                self.plotter.add_mesh(c, color='gray', style='wireframe', line_width=1)
+
+            # Elementi discreti: heaters
+            heater_elems = []
+            if geom.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
+                heater_elems = geom.heaters.generate_positions(
+                    cyl.center_x, cyl.center_y,
+                    cyl.r_sand_inner, cyl.r_heaters,
+                    cyl.base_z, cyl.top_z
+                )
+            for htr in heater_elems:
+                h_center = (htr.x, htr.y, (htr.z_bottom + htr.z_top) / 2)
+                h_cyl = pv.Cylinder(
+                    center=h_center,
+                    direction=(0, 0, 1),
+                    radius=float(htr.radius),
+                    height=float(htr.z_top - htr.z_bottom),
+                    resolution=36
+                )
+                self.plotter.add_mesh(h_cyl, color='gray', opacity=0.6)
+
+            # Elementi discreti: tubes
+            tube_elems = geom.tubes.generate_positions(
+                cyl.center_x, cyl.center_y,
+                cyl.r_tubes,
+                cyl.base_z, cyl.top_z
+            )
+            for tube in tube_elems:
+                t_center = (tube.x, tube.y, (tube.z_bottom + tube.z_top) / 2)
+                t_cyl = pv.Cylinder(
+                    center=t_center,
+                    direction=(0, 0, 1),
+                    radius=float(tube.radius),
+                    height=float(tube.z_top - tube.z_bottom),
+                    resolution=36
+                )
+                self.plotter.add_mesh(t_cyl, color='gray', opacity=0.3)
+
+            self.plotter.reset_camera()
+            self.plotter.render()
+            self.status_label.setText("Stato: Anteprima geometria pronta")
+
+        except Exception as e:
+            self.log(f"ERRORE anteprima geometria: {e}")
+            self.status_label.setText(f"Errore: {e}")
+            QMessageBox.critical(self, "Errore", str(e))
         
     def run_simulation(self):
         """Esegue la simulazione termica sulla mesh esistente"""

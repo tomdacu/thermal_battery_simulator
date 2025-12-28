@@ -1,10 +1,45 @@
 """
 steady_state.py - Solutore per il caso stazionario
 
-Risolve l'equazione del calore stazionaria:
-∇·(k∇T) + Q = 0
+=============================================================================
+MODULE OVERVIEW
+=============================================================================
 
-con appropriate condizioni al contorno.
+This module solves the steady-state heat equation:
+    -∇·(k∇T) + Q = 0
+
+with appropriate boundary conditions (Dirichlet, Neumann, Convection).
+
+SOLVER METHODS AVAILABLE:
+    - "direct": LU factorization via scipy.sparse.linalg.spsolve (best for small/medium systems)
+    - "cg": Conjugate Gradient (for symmetric positive definite matrices)
+    - "gmres": Generalized Minimal Residual (general sparse systems)
+    - "bicgstab": BiConjugate Gradient Stabilized (general sparse systems)
+
+PRECONDITIONERS:
+    - "none": No preconditioning
+    - "jacobi": Diagonal scaling (fast, weak)
+    - "ilu": Incomplete LU factorization (robust, slower)
+
+DATA FLOW:
+    GUI widgets
+        → _build_battery_geometry_from_inputs()
+        → BatteryGeometry.apply_to_mesh()
+        → Mesh3D (k, rho, cp, Q, boundary conditions)
+        → SteadyStateSolver.solve()
+        → Temperature field T
+
+ALL PARAMETERS FROM GUI:
+    The mesh object contains all thermal properties and boundary conditions
+    that were configured through the GUI. This solver has NO hardcoded
+    thermal parameters.
+
+USAGE:
+    config = SolverConfig(method="direct", verbose=True)
+    solver = SteadyStateSolver(mesh, config)
+    result = solver.solve()
+    # result.T contains the temperature field in Fortran order
+=============================================================================
 """
 
 import numpy as np
@@ -121,7 +156,8 @@ class SteadyStateSolver:
             T = splinalg.spsolve(self._A, self._b)
             
             # Calcola residuo
-            residual = np.linalg.norm(self._A @ T - self._b)
+            r = self._A @ T - self._b
+            residual = np.linalg.norm(r) / max(np.linalg.norm(self._b), 1e-12)
             
             return SolverResult(
                 T=T,
@@ -149,7 +185,9 @@ class SteadyStateSolver:
         M = self._get_preconditioner()
         
         # Punto iniziale (temperatura corrente o uniforme)
-        x0 = self.mesh.T.ravel()
+        # NOTE: la matrice è costruita con l'indicizzazione lineare della mesh
+        # (equivalente a ravel(order='F')). Manteniamo coerenza.
+        x0 = self.mesh.flatten_field(self.mesh.T)
         
         # Callback per contare iterazioni
         self._iter_count = 0
@@ -159,35 +197,52 @@ class SteadyStateSolver:
         # Seleziona metodo
         method = self.config.method.lower()
         
-        try:
+        def run_solver(M_prec):
             if method == "cg":
-                # Conjugate Gradient (richiede matrice SPD)
-                T, info = splinalg.cg(
-                    self._A, self._b, x0=x0, M=M,
+                return splinalg.cg(
+                    self._A, self._b, x0=x0, M=M_prec,
                     tol=self.config.tolerance,
                     maxiter=self.config.max_iterations,
                     callback=callback
                 )
             elif method == "gmres":
-                T, info = splinalg.gmres(
-                    self._A, self._b, x0=x0, M=M,
+                return splinalg.gmres(
+                    self._A, self._b, x0=x0, M=M_prec,
                     rtol=self.config.tolerance,
                     maxiter=self.config.max_iterations,
                     callback=callback
                 )
             elif method == "bicgstab":
-                T, info = splinalg.bicgstab(
-                    self._A, self._b, x0=x0, M=M,
+                return splinalg.bicgstab(
+                    self._A, self._b, x0=x0, M=M_prec,
                     rtol=self.config.tolerance,
                     maxiter=self.config.max_iterations,
                     callback=callback
                 )
             else:
                 raise ValueError(f"Metodo non supportato: {method}")
+
+        try:
+            T, info = run_solver(M)
             
             # Calcola residuo
-            residual = np.linalg.norm(self._A @ T - self._b)
+            r = self._A @ T - self._b
+            residual = np.linalg.norm(r) / max(np.linalg.norm(self._b), 1e-12)
             converged = (info == 0)
+
+            # Fallback: in alcuni casi ILU può causare breakdown/non-convergenza.
+            # In tal caso, ritenta con Jacobi per robustezza.
+            if (not converged) and (self.config.preconditioner.lower() == "ilu"):
+                try:
+                    self._iter_count = 0
+                    M_retry = self._get_preconditioner_jacobi()
+                    T_retry, info_retry = run_solver(M_retry)
+                    r_retry = self._A @ T_retry - self._b
+                    residual_retry = np.linalg.norm(r_retry) / max(np.linalg.norm(self._b), 1e-12)
+                    if info_retry == 0:
+                        T, info, residual, converged = T_retry, info_retry, residual_retry, True
+                except Exception:
+                    pass
             
             return SolverResult(
                 T=T,
@@ -227,7 +282,11 @@ class SteadyStateSolver:
         elif prec_type == "ilu":
             # Incomplete LU
             try:
-                ilu = splinalg.spilu(self._A.tocsc())
+                ilu = splinalg.spilu(
+                    self._A.tocsc(),
+                    drop_tol=1e-4,
+                    fill_factor=10
+                )
                 M = splinalg.LinearOperator(
                     self._A.shape, 
                     matvec=ilu.solve
@@ -254,8 +313,9 @@ class SteadyStateSolver:
     def compute_residual(self, T: Optional[np.ndarray] = None) -> float:
         """Calcola il residuo ||A*T - b||"""
         if T is None:
-            T = self.mesh.T.ravel()
-        return np.linalg.norm(self._A @ T - self._b)
+            T = self.mesh.flatten_field(self.mesh.T)
+        r = self._A @ T - self._b
+        return np.linalg.norm(r) / max(np.linalg.norm(self._b), 1e-12)
     
     def get_temperature_stats(self) -> Dict[str, float]:
         """Restituisce statistiche sul campo di temperatura"""
