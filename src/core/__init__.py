@@ -9,7 +9,7 @@ from .geometry import (
     HeaterConfig, TubeConfig,
     HeaterPattern, TubePattern,
     HeaterElement, TubeElement,
-    create_small_test_geometry, create_pornainen_geometry
+    create_small_test_geometry
 )
 
 __all__ = [
@@ -29,5 +29,4 @@ __all__ = [
     'HeaterElement',
     'TubeElement',
     'create_small_test_geometry',
-    'create_pornainen_geometry',
 ]

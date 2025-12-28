@@ -6,7 +6,7 @@ from .core import (
     Mesh3D, MaterialID, BoundaryType, NodeProperties,
     MaterialManager, ThermalProperties,
     BatteryGeometry, CylinderGeometry,
-    create_small_test_geometry, create_pornainen_geometry
+    create_small_test_geometry
 )
 
 from .solver import (

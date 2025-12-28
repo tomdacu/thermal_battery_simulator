@@ -394,50 +394,6 @@ def solve_steady_state(mesh: Mesh3D,
     config = SolverConfig(method=method, verbose=verbose)
     solver = SteadyStateSolver(mesh, config)
     return solver.solve()
-
-
-# =============================================================================
-# TEST
-# =============================================================================
-if __name__ == "__main__":
-    from ..core.mesh import Mesh3D
-    from ..core.materials import MaterialManager
-    from ..core.geometry import create_small_test_geometry
-    
-    print("=" * 60)
-    print("TEST STEADY STATE SOLVER")
-    print("=" * 60)
-    
-    # Crea mesh
-    mesh = Mesh3D(Lx=6.0, Ly=6.0, Lz=5.0, Nx=30, Ny=30, Nz=25)
-    
-    # Applica geometria
-    mat_manager = MaterialManager()
-    geom = create_small_test_geometry()
-    geom.apply_to_mesh(mesh, mat_manager)
-    
-    print(f"\nMesh: {mesh.Nx}x{mesh.Ny}x{mesh.Nz} = {mesh.N_total} nodi")
-    print(f"Memoria stimata: {mesh._estimate_memory()/1e6:.1f} MB")
-    
-    # Test solutore diretto
-    print("\n--- Test Solutore Diretto ---")
-    result = solve_steady_state(mesh, method="direct")
-    
-    stats = SteadyStateSolver(mesh).get_temperature_stats()
-    print(f"\nStatistiche temperatura:")
-    for key, val in stats.items():
-        print(f"  {key}: {val:.1f} °C")
-    
-    # Test solutore iterativo
-    print("\n--- Test Solutore Iterativo (BiCGSTAB) ---")
-    config = SolverConfig(method="bicgstab", tolerance=1e-6, verbose=True)
-    solver = SteadyStateSolver(mesh, config)
-    result2 = solver.solve(rebuild=True)
-    
-    # Confronta soluzioni
-    if result.converged and result2.converged:
-        diff = np.abs(result.T - result2.T).max()
-        print(f"\nDifferenza max tra metodi: {diff:.2e} °C")
     
     print("\n" + "=" * 60)
     print("TEST COMPLETATO")

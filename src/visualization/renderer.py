@@ -168,14 +168,3 @@ def quick_slice(mesh, axis: str = "z", position: float = None, **kwargs):
         raise ImportError("PyVista non è installato")
     renderer = BatteryRenderer()
     renderer.plot_slice(mesh, axis=axis, position=position, **kwargs)
-
-
-# =============================================================================
-# TEST
-# =============================================================================
-if __name__ == "__main__":
-    if not PYVISTA_AVAILABLE:
-        print("PyVista non disponibile, test saltato")
-    else:
-        print("=== Test Renderer ===")
-        print("Eseguire da main.py per test completo.")

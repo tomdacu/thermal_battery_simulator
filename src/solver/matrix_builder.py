@@ -212,13 +212,6 @@ def build_steady_state_matrix(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarr
     return A, b
 
 
-def _get_internal_coefficients(mesh: Mesh3D, i: int, j: int, k: int, d2: float) -> dict:
-    """
-    DEPRECATO - Usa _get_internal_coefficients_v2
-    """
-    return _get_internal_coefficients_v2(mesh, i, j, k, np.sqrt(d2), d2)[0]
-
-
 def _get_internal_coefficients_v2(mesh: Mesh3D, i: int, j: int, k: int, 
                                    d: float, d2: float) -> Tuple[dict, float]:
     """

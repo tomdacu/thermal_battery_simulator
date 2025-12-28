@@ -860,41 +860,6 @@ class BatteryGeometry:
 # FACTORY FUNCTIONS
 # =============================================================================
 
-def create_pornainen_geometry() -> BatteryGeometry:
-    """
-    Crea geometria basata sull'impianto di Pornainen (100 MWh).
-    
-    Dati reali:
-    - Capacità: 100 MWh
-    - Massa steatite: ~2000 t
-    - ΔT: 290°C (380→90°C)
-    """
-    # Stima dimensioni per 2000 t di steatite
-    # Con ρ_eff ≈ 1700 kg/m³, V ≈ 1176 m³
-    # Assumendo D/H ≈ 1, H ≈ 9 m, R ≈ 6.5 m
-    
-    cylinder = CylinderGeometry(
-        center_x=7.0,
-        center_y=7.0,
-        base_z=0.5,
-        height=9.0,
-        r_tubes=1.0,
-        r_sand_inner=4.0,
-        r_heaters=4.5,
-        r_sand_outer=6.0,
-        r_insulation=6.5,
-        r_shell=6.52,
-    )
-    
-    return BatteryGeometry(
-        cylinder=cylinder,
-        heaters=HeaterConfig(power_total=1000),  # 1 MW
-        tubes=TubeConfig(n_tubes=20),
-        storage_material="steatite",
-        packing_fraction=0.63,
-    )
-
-
 def create_small_test_geometry() -> BatteryGeometry:
     """Crea geometria piccola per test (8 MWh circa)"""
     
@@ -918,38 +883,3 @@ def create_small_test_geometry() -> BatteryGeometry:
         storage_material="steatite",
         packing_fraction=0.63,
     )
-
-
-# =============================================================================
-# TEST
-# =============================================================================
-if __name__ == "__main__":
-    from .materials import MaterialManager
-    
-    print("=== Test Geometria Small ===")
-    geom = create_small_test_geometry()
-    mat_manager = MaterialManager()
-    
-    volumes = geom.get_zone_volumes()
-    print("\nVolumi:")
-    for name, vol in volumes.items():
-        print(f"  {name}: {vol:.2f} m³")
-    
-    masses = geom.get_zone_masses(mat_manager)
-    print("\nMasse:")
-    for name, mass in masses.items():
-        print(f"  {name}: {mass/1000:.2f} t")
-    
-    energy = geom.estimate_energy_capacity(mat_manager)
-    print("\nEnergia:")
-    for name, value in energy.items():
-        print(f"  {name}: {value:.2f}")
-    
-    print("\n=== Test Geometria Pornainen ===")
-    geom_p = create_pornainen_geometry()
-    
-    masses_p = geom_p.get_zone_masses(mat_manager)
-    print(f"\nMassa sabbia: {masses_p['sand_total']/1000:.0f} t (target: 2000 t)")
-    
-    energy_p = geom_p.estimate_energy_capacity(mat_manager)
-    print(f"Energia utilizzabile: {energy_p['E_usable_MWh']:.1f} MWh (target: 100 MWh)")

@@ -21,20 +21,6 @@ python run_gui.py
 
 This is the **recommended** way to run the application. All parameters are configured through the graphical interface.
 
-### 2.2 `main.py` - CLI Testing Script (⚠️ Development Only)
-
-**Purpose**: Command-line script for testing and development.
-
-```python
-# Quick test
-python main.py --quick
-
-# Full simulation with visualization
-python main.py --visualize
-```
-
-**⚠️ WARNING**: This script contains **hardcoded test values** and does NOT follow the GUI-driven design. Use only for development and testing.
-
 ---
 
 ## 3. Core Modules (`src/core/`)
