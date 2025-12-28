@@ -1,4 +1,4 @@
-# Teoria dello Scambio Termico - Sand Battery Simulation
+# Teoria dello Scambio Termico - Thermal Battery Simulation
 
 ## 1. Obiettivi della Simulazione
 
@@ -76,7 +76,7 @@ Dove:
 - $\epsilon$ = emissività della superficie (0-1)
 - $\sigma$ = 5.67 × 10⁻⁸ W/(m²·K⁴)
 
-**Nota:** Per le temperature tipiche della Sand Battery (< 600°C), l'irraggiamento 
+**Nota:** Per le temperature tipiche della Thermal Battery (< 600°C), l'irraggiamento 
 è significativo ma spesso linearizzato o incluso nel coefficiente h effettivo.
 
 ---
@@ -173,7 +173,7 @@ Dove $\alpha = k/(\rho c_p)$ = diffusività termica [m²/s]
 
 ---
 
-## 7. Applicazione alla Sand Battery
+## 7. Applicazione alla Thermal Battery
 
 ### 7.1 Architettura della Batteria
 

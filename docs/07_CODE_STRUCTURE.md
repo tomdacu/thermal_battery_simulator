@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-This document provides a deep dive into the code structure of the Sand Battery simulation project. It explains what each module does, its key functions, and how they interact.
+This document provides a deep dive into the code structure of the Thermal Battery simulation project. It explains what each module does, its key functions, and how they interact.
 
 **IMPORTANT**: This project follows a **GUI-driven design**. All simulation parameters originate from GUI widgets - there are no hardcoded values in the core modules.
 
@@ -246,7 +246,7 @@ r, T = analyzer.compute_radial_temperature_profile(x_c, y_c, z)
 
 | Class | Purpose |
 |-------|---------|
-| `SandBatteryGUI` | Main window with all widgets |
+| `ThermalBatteryGUI` | Main window with all widgets |
 | `SimulationThread` | Background thread for solver |
 
 **Critical Method - `_build_battery_geometry_from_inputs()`**:

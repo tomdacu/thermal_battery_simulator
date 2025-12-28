@@ -1,5 +1,5 @@
 """
-geometry.py - Definizione della geometria della Sand Battery
+geometry.py - Definizione della geometria della Thermal Battery
 
 Gestisce:
 - Geometria cilindrica con zone radiali
@@ -17,54 +17,173 @@ from .materials import MaterialManager, ThermalProperties
 @dataclass
 class CylinderGeometry:
     """
-    Geometria del cilindro della batteria.
+    Geometria del cilindro della batteria termica.
     
-    La batteria è modellata come un cilindro con zone radiali concentriche:
-    1. Zona tubi centrali (scambiatori)
-    2. Sabbia interna
-    3. Zona resistenze (riscaldatori)
-    4. Sabbia esterna
-    5. Isolamento
-    6. Guscio in acciaio
+    STRUTTURA COMPLETA CON ISOLAMENTO E TETTO:
+    
+    Dal basso verso l'alto:
+    - FONDAZIONE (calcestruzzo, sotto base_z)
+    - SLAB ISOLANTE INFERIORE (sotto lo storage)
+    - STORAGE (materiale di accumulo + tubi + resistenze)
+    - SLAB ISOLANTE SUPERIORE (sopra lo storage)
+    - SLAB ACCIAIO (opzionale, sotto il tetto)
+    - RIEMPIMENTO SABBIA CONO (opzionale)
+    - TETTO CONICO (acciaio, inclinato)
+    
+    Radialmente (dal centro verso l'esterno):
+    1. STORAGE + SLAB ISOLANTI (r < r_storage)
+    2. INSULATION radiale (r_storage < r < r_insulation)
+    3. STEEL shell (r_insulation < r < r_shell)
+    4. AIR (r > r_shell)
+    
+    L'acciaio laterale (shell) copre tutta l'altezza:
+    da slab_inf a tetto (inclusi gli slab di isolamento).
     """
     
     # Centro del cilindro
     center_x: float = 5.0
     center_y: float = 5.0
     
-    # Dimensioni verticali
-    base_z: float = 0.5      # Quota base (sopra fondazione)
-    height: float = 7.0      # Altezza sabbia
+    # Dimensioni verticali dello STORAGE
+    base_z: float = 0.5      # Quota base della struttura (sopra fondazione)
+    height: float = 7.0      # Altezza della zona STORAGE (sabbia)
     
     # Raggi delle zone (dall'interno verso l'esterno)
-    r_tubes: float = 0.5         # Raggio zona tubi centrali
-    r_sand_inner: float = 2.0    # Raggio sabbia interna
-    r_heaters: float = 2.3       # Raggio zona resistenze
-    r_sand_outer: float = 3.5    # Raggio sabbia esterna
-    r_insulation: float = 4.0    # Raggio isolamento
-    r_shell: float = 4.01        # Raggio guscio esterno
+    r_storage: float = 2.0        # Raggio zona storage
+    insulation_thickness: float = 0.3   # Spessore isolamento radiale [m]
+    shell_thickness: float = 0.02       # Spessore guscio acciaio [m]
+    
+    # === NUOVI PARAMETRI: SLAB ISOLANTI ===
+    insulation_slab_bottom: float = 0.2   # Altezza slab isolante inferiore [m]
+    insulation_slab_top: float = 0.2      # Altezza slab isolante superiore [m]
+    
+    # === NUOVI PARAMETRI: TETTO ===
+    roof_angle_deg: float = 15.0          # Inclinazione tetto [gradi] (0 = piatto)
+    steel_slab_top: float = 0.0           # Spessore slab acciaio sotto tetto [m] (0 = disabilitato)
+    fill_cone_with_sand: bool = False     # Riempie il volume sotto il cono con sabbia
+    enable_cone_roof: bool = True         # Abilita tetto conico (False = tetto piatto con steel_slab)
+    
+    # Sfasamento angolare tra tubi e resistenze [gradi]
+    phase_offset_deg: float = 15.0
+    
+    # === PROPRIETÀ CALCOLATE ===
     
     @property
+    def r_insulation(self) -> float:
+        """Raggio esterno dell'isolamento"""
+        return self.r_storage + self.insulation_thickness
+    
+    @property
+    def r_shell(self) -> float:
+        """Raggio esterno del guscio (raggio totale batteria)"""
+        return self.r_insulation + self.shell_thickness
+    
+    @property
+    def roof_angle_rad(self) -> float:
+        """Inclinazione tetto in radianti"""
+        return np.radians(self.roof_angle_deg)
+    
+    @property
+    def roof_height(self) -> float:
+        """Altezza del cono del tetto al centro"""
+        if not self.enable_cone_roof or self.roof_angle_deg <= 0:
+            return 0.0
+        return self.r_shell * np.tan(self.roof_angle_rad)
+    
+    @property
+    def z_tubes_top(self) -> float:
+        """Quota superiore dei tubi (sopra steel_slab o slab_top)"""
+        return self.z_steel_slab_end
+    
+    # === QUOTE Z (dal basso verso l'alto) ===
+    
+    @property
+    def z_slab_bottom_start(self) -> float:
+        """Inizio slab isolante inferiore"""
+        return self.base_z
+    
+    @property
+    def z_slab_bottom_end(self) -> float:
+        """Fine slab isolante inferiore = inizio storage"""
+        return self.base_z + self.insulation_slab_bottom
+    
+    @property
+    def z_storage_start(self) -> float:
+        """Inizio zona storage"""
+        return self.z_slab_bottom_end
+    
+    @property
+    def z_storage_end(self) -> float:
+        """Fine zona storage"""
+        return self.z_storage_start + self.height
+    
+    @property
+    def z_slab_top_start(self) -> float:
+        """Inizio slab isolante superiore"""
+        return self.z_storage_end
+    
+    @property
+    def z_slab_top_end(self) -> float:
+        """Fine slab isolante superiore"""
+        return self.z_slab_top_start + self.insulation_slab_top
+    
+    @property
+    def z_steel_slab_end(self) -> float:
+        """Fine slab acciaio (se presente)"""
+        return self.z_slab_top_end + self.steel_slab_top
+    
+    @property
+    def z_cone_base(self) -> float:
+        """Base del cono (tetto)"""
+        return self.z_steel_slab_end
+    
+    @property
+    def z_cone_apex(self) -> float:
+        """Apice del cono (punto più alto)"""
+        return self.z_cone_base + self.roof_height
+    
+    @property
+    def z_shell_top(self) -> float:
+        """Quota superiore del guscio laterale (base del cono)"""
+        return self.z_cone_base
+    
+    @property
+    def total_height(self) -> float:
+        """Altezza totale della struttura (escluso terreno)"""
+        return self.z_cone_apex - self.base_z
+    
+    # Proprietà legacy per compatibilità
+    @property
     def top_z(self) -> float:
-        """Quota superiore della sabbia"""
-        return self.base_z + self.height
+        """Quota superiore della zona storage (compatibilità)"""
+        return self.z_storage_end
+    
+    @property
+    def phase_offset_rad(self) -> float:
+        """Sfasamento angolare in radianti"""
+        return np.radians(self.phase_offset_deg)
     
     def get_zone_at_radius(self, r: float) -> str:
         """Restituisce il nome della zona per un dato raggio"""
-        if r < self.r_tubes:
-            return "tubes"
-        elif r < self.r_sand_inner:
-            return "sand_inner"
-        elif r < self.r_heaters:
-            return "heaters"
-        elif r < self.r_sand_outer:
-            return "sand_outer"
+        if r < self.r_storage:
+            return "storage"
         elif r < self.r_insulation:
             return "insulation"
         elif r < self.r_shell:
             return "shell"
         else:
             return "exterior"
+    
+    def is_inside_cone(self, r: float, z: float) -> bool:
+        """Verifica se un punto (r, z) è dentro il cono del tetto"""
+        if z < self.z_cone_base or z > self.z_cone_apex:
+            return False
+        if self.roof_height <= 0:
+            return False
+        # Raggio del cono a quota z
+        z_rel = z - self.z_cone_base
+        r_cone_at_z = self.r_shell * (1 - z_rel / self.roof_height)
+        return r < r_cone_at_z
 
 
 class HeaterPattern:
@@ -124,6 +243,9 @@ class HeaterConfig:
     - spiral: Pattern a spirale
     - concentric_rings: Anelli concentrici
     - custom: Posizioni definite manualmente
+    
+    Le resistenze stanno SOLO nella zona STORAGE.
+    Gli offset permettono di farle partire/finire prima dei bordi dello storage.
     """
     power_total: float = 100.0              # kW - Potenza totale
     n_heaters: int = 12                     # Numero di resistenze
@@ -132,6 +254,10 @@ class HeaterConfig:
     # Parametri geometrici
     heater_radius: float = 0.02             # Raggio singola resistenza [m]
     heater_length: float = None             # Lunghezza (None = altezza batteria)
+    
+    # === OFFSET VERTICALI (rispetto ai bordi dello storage) ===
+    offset_bottom: float = 0.0              # Distanza dalla fine dello slab inferiore [m]
+    offset_top: float = 0.0                 # Distanza prima dell'inizio dello slab superiore [m]
     
     # Per pattern radiale/grid
     n_rings: int = 2                        # Numero di anelli (per radial)
@@ -164,14 +290,16 @@ class HeaterConfig:
     
     def generate_positions(self, center_x: float, center_y: float,
                            r_inner: float, r_outer: float,
-                           z_bottom: float, z_top: float) -> List[HeaterElement]:
+                           z_bottom: float, z_top: float,
+                           phase_offset: float = 0.0) -> List[HeaterElement]:
         """
         Genera le posizioni delle resistenze secondo il pattern selezionato.
         
         Args:
             center_x, center_y: Centro della batteria
-            r_inner, r_outer: Raggi interno ed esterno della zona resistenze
+            r_inner, r_outer: Raggi interno ed esterno della zona dove posizionare
             z_bottom, z_top: Altezza della zona resistenze
+            phase_offset: Sfasamento angolare in radianti (per evitare sovrapposizioni con tubi)
             
         Returns:
             Lista di HeaterElement con posizioni calcolate
@@ -199,7 +327,7 @@ class HeaterConfig:
         elif self.pattern == HeaterPattern.RADIAL_ARRAY:
             # Array radiale come in foto
             positions = self._generate_radial_positions(
-                center_x, center_y, r_inner, r_outer
+                center_x, center_y, r_inner, r_outer, phase_offset
             )
             
         elif self.pattern == HeaterPattern.SPIRAL:
@@ -275,10 +403,16 @@ class HeaterConfig:
         return positions
     
     def _generate_radial_positions(self, cx: float, cy: float,
-                                    r_in: float, r_out: float) -> List[Tuple[float, float]]:
+                                    r_in: float, r_out: float,
+                                    phase_offset: float = 0.0) -> List[Tuple[float, float]]:
         """
         Genera posizioni in array radiale (come elementi tubolari in foto).
         Le resistenze sono disposte su anelli concentrici.
+        
+        Args:
+            cx, cy: Centro
+            r_in, r_out: Raggi interno ed esterno
+            phase_offset: Sfasamento angolare in radianti
         """
         positions = []
         
@@ -303,11 +437,11 @@ class HeaterConfig:
                     counts.append(max(1, n))
                     remaining -= counts[-1]
         
-        # Genera posizioni per ogni anello
+        # Genera posizioni per ogni anello con sfasamento
         for radius, n_elements in zip(radii, counts):
             if n_elements > 0:
                 for i in range(n_elements):
-                    angle = 2 * np.pi * i / n_elements
+                    angle = 2 * np.pi * i / n_elements + phase_offset
                     x = cx + radius * np.cos(angle)
                     y = cy + radius * np.sin(angle)
                     positions.append((x, y))
@@ -557,7 +691,7 @@ class TubeConfig:
 @dataclass
 class BatteryGeometry:
     """
-    Geometria completa della Sand Battery.
+    Geometria completa della Thermal Battery.
     
     Combina cilindro, resistenze e tubi in una configurazione completa.
     """
@@ -581,7 +715,21 @@ class BatteryGeometry:
         """
         Applica la geometria alla mesh, assegnando materiali e proprietà.
         
-        Supporta sia zone uniformi che elementi discreti (resistenze e tubi).
+        VERSIONE VETTORIZZATA - 10-100x più veloce del loop Python.
+        
+        STRUTTURA COMPLETA:
+        - FONDAZIONE (sotto base_z)
+        - SLAB ISOLANTE INFERIORE
+        - STORAGE (sabbia + tubi + resistenze)
+        - SLAB ISOLANTE SUPERIORE
+        - SLAB ACCIAIO (opzionale)
+        - RIEMPIMENTO SABBIA SOTTO CONO (opzionale)
+        - TETTO CONICO (acciaio) - opzionale, controllato da enable_cone_roof
+        - ACCIAIO LATERALE (shell) che copre tutta l'altezza
+        - ISOLAMENTO RADIALE attorno a storage + slab
+        
+        TUBI: vanno da z_slab_bottom_start a z_steel_slab_end (attraversano tutto)
+        RESISTENZE: vanno da z_storage_start + offset_bottom a z_storage_end - offset_top
         
         Args:
             mesh: Mesh3D da configurare
@@ -590,166 +738,222 @@ class BatteryGeometry:
         cyl = self.cylinder
         
         # Ottieni proprietà materiali
-        sand_props = mat_manager.compute_packed_bed_properties(
+        storage_props = mat_manager.compute_packed_bed_properties(
             self.storage_material, self.packing_fraction
         )
         insul_props = mat_manager.get(self.insulation_material)
         steel_props = mat_manager.get(self.shell_material)
         air_props = mat_manager.get("air")
+        concrete_props = mat_manager.get("concrete")
         
-        # Genera posizioni elementi se pattern discreto
+        # =================================================================
+        # POSIZIONI ELEMENTI DISCRETI
+        # =================================================================
         heater_elements = []
         tube_elements = []
+        
+        # RESISTENZE: nella zona storage con offset
+        # Partono da: z_storage_start + offset_bottom
+        # Arrivano a: z_storage_end - offset_top
+        heater_z_start = cyl.z_storage_start + self.heaters.offset_bottom
+        heater_z_end = cyl.z_storage_end - self.heaters.offset_top
         
         if self.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
             heater_elements = self.heaters.generate_positions(
                 cyl.center_x, cyl.center_y,
-                cyl.r_sand_inner, cyl.r_heaters,
-                cyl.base_z, cyl.top_z
+                0, cyl.r_storage * 0.9,
+                heater_z_start, heater_z_end,
+                phase_offset=cyl.phase_offset_rad
             )
+        
+        # TUBI: attraversano tutto, da slab bottom start a steel slab end
+        # Vanno: slab_bottom -> storage -> slab_top -> steel_slab
+        tube_z_start = cyl.z_slab_bottom_start
+        tube_z_end = cyl.z_steel_slab_end  # = z_tubes_top
         
         tube_elements = self.tubes.generate_positions(
             cyl.center_x, cyl.center_y,
-            cyl.r_tubes,
-            cyl.base_z, cyl.top_z
+            cyl.r_storage * 0.9,
+            tube_z_start, tube_z_end
         )
         
         # Calcola sorgente di calore per le resistenze
         if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            # Zona anulare uniforme
-            V_heaters = (np.pi * (cyl.r_heaters**2 - cyl.r_sand_inner**2) * cyl.height)
-            Q_heaters = self.heaters.power_total * 1000 / V_heaters  # W/m³
+            V_storage = np.pi * cyl.r_storage**2 * cyl.height
+            Q_heaters = self.heaters.power_total * 1000 / V_storage
         else:
-            # Elementi discreti - calcola Q per ogni elemento
             if heater_elements:
-                heater_length = self.heaters.heater_length if self.heaters.heater_length else cyl.height
+                heater_length = heater_z_end - heater_z_start
                 V_single = np.pi * self.heaters.heater_radius**2 * heater_length
                 Q_heaters = (self.heaters.power_per_heater * 1000) / V_single
             else:
                 Q_heaters = 0.0
         
-        heater_node_props = NodeProperties(
-            k=sand_props.k,
-            rho=sand_props.rho,
-            cp=sand_props.cp,
-            Q=Q_heaters
-        )
+        # =================================================================
+        # VERSIONE VETTORIZZATA - usa NumPy broadcasting
+        # =================================================================
         
-        # Itera su tutte le celle della mesh
-        for i in range(mesh.Nx):
-            for j in range(mesh.Ny):
-                x, y = mesh.x[i], mesh.y[j]
+        # Crea griglie 3D di coordinate
+        X, Y, Z = np.meshgrid(mesh.x, mesh.y, mesh.z, indexing='ij')
+        
+        # Distanza radiale dal centro del cilindro
+        R = np.sqrt((X - cyl.center_x)**2 + (Y - cyl.center_y)**2)
+        
+        # =====================================================================
+        # 1. Inizializza tutto come AIR (default)
+        # =====================================================================
+        mesh.material_id[:] = MaterialID.AIR
+        mesh.k[:] = air_props.k
+        mesh.rho[:] = air_props.rho
+        mesh.cp[:] = air_props.cp
+        mesh.Q[:] = 0.0
+        
+        # =====================================================================
+        # 2. Fondazione (sotto la struttura)
+        # =====================================================================
+        below_structure = Z < cyl.base_z
+        mesh.material_id[below_structure] = MaterialID.CONCRETE
+        mesh.k[below_structure] = concrete_props.k
+        mesh.rho[below_structure] = concrete_props.rho
+        mesh.cp[below_structure] = concrete_props.cp
+        
+        # =====================================================================
+        # 3. ACCIAIO LATERALE (shell) - copre tutta l'altezza della struttura
+        # =====================================================================
+        in_shell_height = (Z >= cyl.base_z) & (Z <= cyl.z_shell_top)
+        mask_shell = in_shell_height & (R >= cyl.r_insulation) & (R < cyl.r_shell)
+        mesh.material_id[mask_shell] = MaterialID.STEEL
+        mesh.k[mask_shell] = steel_props.k
+        mesh.rho[mask_shell] = steel_props.rho
+        mesh.cp[mask_shell] = steel_props.cp
+        
+        # =====================================================================
+        # 4. ISOLAMENTO RADIALE - attorno a storage e slab isolanti
+        # =====================================================================
+        in_insul_height = (Z >= cyl.base_z) & (Z <= cyl.z_slab_top_end)
+        mask_insul_radial = in_insul_height & (R >= cyl.r_storage) & (R < cyl.r_insulation)
+        mesh.material_id[mask_insul_radial] = MaterialID.INSULATION
+        mesh.k[mask_insul_radial] = insul_props.k
+        mesh.rho[mask_insul_radial] = insul_props.rho
+        mesh.cp[mask_insul_radial] = insul_props.cp
+        
+        # =====================================================================
+        # 5. SLAB ISOLANTE INFERIORE
+        # =====================================================================
+        in_slab_bottom = (Z >= cyl.z_slab_bottom_start) & (Z < cyl.z_slab_bottom_end)
+        mask_slab_bottom = in_slab_bottom & (R < cyl.r_storage)
+        mesh.material_id[mask_slab_bottom] = MaterialID.INSULATION
+        mesh.k[mask_slab_bottom] = insul_props.k
+        mesh.rho[mask_slab_bottom] = insul_props.rho
+        mesh.cp[mask_slab_bottom] = insul_props.cp
+        
+        # =====================================================================
+        # 6. STORAGE (zona principale con sabbia)
+        # =====================================================================
+        in_storage = (Z >= cyl.z_storage_start) & (Z < cyl.z_storage_end)
+        mask_storage = in_storage & (R < cyl.r_storage)
+        mesh.material_id[mask_storage] = MaterialID.SAND
+        mesh.k[mask_storage] = storage_props.k
+        mesh.rho[mask_storage] = storage_props.rho
+        mesh.cp[mask_storage] = storage_props.cp
+        
+        # Se pattern uniforme, applica Q a tutto lo storage
+        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
+            mesh.Q[mask_storage] = Q_heaters
+        
+        # =====================================================================
+        # 7. SLAB ISOLANTE SUPERIORE
+        # =====================================================================
+        in_slab_top = (Z >= cyl.z_slab_top_start) & (Z < cyl.z_slab_top_end)
+        mask_slab_top = in_slab_top & (R < cyl.r_storage)
+        mesh.material_id[mask_slab_top] = MaterialID.INSULATION
+        mesh.k[mask_slab_top] = insul_props.k
+        mesh.rho[mask_slab_top] = insul_props.rho
+        mesh.cp[mask_slab_top] = insul_props.cp
+        
+        # =====================================================================
+        # 8. SLAB ACCIAIO (opzionale, sotto il tetto)
+        # =====================================================================
+        if cyl.steel_slab_top > 0:
+            in_steel_slab = (Z >= cyl.z_slab_top_end) & (Z < cyl.z_steel_slab_end)
+            mask_steel_slab = in_steel_slab & (R < cyl.r_insulation)
+            mesh.material_id[mask_steel_slab] = MaterialID.STEEL
+            mesh.k[mask_steel_slab] = steel_props.k
+            mesh.rho[mask_steel_slab] = steel_props.rho
+            mesh.cp[mask_steel_slab] = steel_props.cp
+        
+        # =====================================================================
+        # 9. TETTO CONICO (acciaio) e riempimento sabbia opzionale
+        # Solo se enable_cone_roof è True e roof_height > 0
+        # =====================================================================
+        if cyl.enable_cone_roof and cyl.roof_height > 0:
+            # Calcola raggio del cono per ogni punto Z
+            in_cone_region = (Z >= cyl.z_cone_base) & (Z <= cyl.z_cone_apex)
+            
+            # Raggio del cono a ogni quota: r_cone(z) = r_shell * (1 - (z - z_base) / h_cone)
+            Z_rel = np.clip(Z - cyl.z_cone_base, 0, cyl.roof_height)
+            R_cone = cyl.r_shell * (1 - Z_rel / cyl.roof_height)
+            
+            # Interno del cono
+            inside_cone = in_cone_region & (R < R_cone)
+            
+            # Riempimento sabbia sotto il cono (opzionale)
+            if cyl.fill_cone_with_sand:
+                # La sabbia riempie tutto l'interno del cono
+                mesh.material_id[inside_cone] = MaterialID.SAND
+                mesh.k[inside_cone] = storage_props.k
+                mesh.rho[inside_cone] = storage_props.rho
+                mesh.cp[inside_cone] = storage_props.cp
+            
+            # Tetto conico in acciaio (guscio sottile sulla superficie del cono)
+            # Approssimiamo come le celle sul bordo del cono
+            cone_shell_thickness = cyl.shell_thickness
+            R_cone_inner = cyl.r_shell * (1 - Z_rel / cyl.roof_height) - cone_shell_thickness
+            R_cone_inner = np.maximum(R_cone_inner, 0)
+            
+            mask_cone_shell = in_cone_region & (R >= R_cone_inner) & (R < R_cone)
+            mesh.material_id[mask_cone_shell] = MaterialID.STEEL
+            mesh.k[mask_cone_shell] = steel_props.k
+            mesh.rho[mask_cone_shell] = steel_props.rho
+            mesh.cp[mask_cone_shell] = steel_props.cp
+        
+        # =====================================================================
+        # 10. Elementi discreti (tubi e resistenze) - loop solo sugli elementi
+        # =====================================================================
+        
+        # Resistenze discrete
+        if heater_elements:
+            for heater in heater_elements:
+                dist_xy = np.sqrt((X - heater.x)**2 + (Y - heater.y)**2)
+                mask_heater = (dist_xy <= heater.radius) & \
+                              (Z >= heater.z_bottom) & (Z <= heater.z_top)
                 
-                # Calcola distanza radiale dal centro
-                r = np.sqrt((x - cyl.center_x)**2 + (y - cyl.center_y)**2)
+                mesh.material_id[mask_heater] = MaterialID.HEATERS
+                mesh.k[mask_heater] = storage_props.k
+                mesh.rho[mask_heater] = storage_props.rho
+                mesh.cp[mask_heater] = storage_props.cp
+                mesh.Q[mask_heater] = Q_heaters
+        
+        # Tubi discreti
+        if tube_elements:
+            for tube in tube_elements:
+                dist_xy = np.sqrt((X - tube.x)**2 + (Y - tube.y)**2)
+                mask_tube = (dist_xy <= tube.radius) & \
+                            (Z >= tube.z_bottom) & (Z <= tube.z_top)
                 
-                for k in range(mesh.Nz):
-                    z = mesh.z[k]
-                    
-                    # Verifica se siamo nell'altezza della batteria
-                    if cyl.base_z <= z <= cyl.top_z:
-                        
-                        # Prima controlla se siamo in un elemento discreto
-                        is_in_heater = False
-                        is_in_tube = False
-                        
-                        # Controlla resistenze discrete
-                        if heater_elements:
-                            for heater in heater_elements:
-                                if heater.z_bottom <= z <= heater.z_top:
-                                    dist = np.sqrt((x - heater.x)**2 + (y - heater.y)**2)
-                                    if dist <= heater.radius:
-                                        is_in_heater = True
-                                        break
-                        
-                        # Controlla tubi discreti
-                        if tube_elements:
-                            for tube in tube_elements:
-                                if tube.z_bottom <= z <= tube.z_top:
-                                    dist = np.sqrt((x - tube.x)**2 + (y - tube.y)**2)
-                                    if dist <= tube.radius:
-                                        is_in_tube = True
-                                        # Applica lo scambio solo se i tubi sono attivi (scarica).
-                                        # Se non attivi, i tubi restano come regione materiale senza sink convettivo.
-                                        if self.tubes.active:
-                                            mesh.bc_h[i, j, k] = tube.h_fluid
-                                            mesh.bc_T_inf[i, j, k] = tube.T_fluid
-                                            mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
-                                        else:
-                                            mesh.bc_h[i, j, k] = 0.0
-                                            mesh.boundary_type[i, j, k] = BoundaryType.INTERNAL
-                                        break
-                        
-                        if is_in_heater:
-                            # Nodo nella resistenza
-                            mesh.material_id[i, j, k] = MaterialID.HEATERS
-                            mesh.k[i, j, k] = heater_node_props.k
-                            mesh.rho[i, j, k] = heater_node_props.rho
-                            mesh.cp[i, j, k] = heater_node_props.cp
-                            mesh.Q[i, j, k] = heater_node_props.Q
-                            
-                        elif is_in_tube:
-                            # Nodo nel tubo
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.TUBES, sand_props)
-                        
-                        # Altrimenti usa le zone radiali
-                        elif r < cyl.r_tubes:
-                            # Zona tubi centrale (se non elementi discreti)
-                            self._set_node_properties(mesh, i, j, k, 
-                                                     MaterialID.TUBES, sand_props)
-                            if self.tubes.active and not tube_elements:
-                                mesh.bc_h[i, j, k] = self.tubes.h_fluid
-                                mesh.bc_T_inf[i, j, k] = self.tubes.T_fluid
-                                mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
-                                
-                        elif r < cyl.r_sand_inner:
-                            # Sabbia interna
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.SAND, sand_props)
-                            
-                        elif r < cyl.r_heaters:
-                            # Zona resistenze (uniforme o con elementi discreti)
-                            if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-                                mesh.material_id[i, j, k] = MaterialID.HEATERS
-                                mesh.k[i, j, k] = heater_node_props.k
-                                mesh.rho[i, j, k] = heater_node_props.rho
-                                mesh.cp[i, j, k] = heater_node_props.cp
-                                mesh.Q[i, j, k] = heater_node_props.Q
-                            else:
-                                # Con elementi discreti, la zona è sabbia
-                                self._set_node_properties(mesh, i, j, k,
-                                                         MaterialID.SAND, sand_props)
-                            
-                        elif r < cyl.r_sand_outer:
-                            # Sabbia esterna
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.SAND, sand_props)
-                            
-                        elif r < cyl.r_insulation:
-                            # Isolamento
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.INSULATION, insul_props)
-                            
-                        elif r < cyl.r_shell:
-                            # Guscio in acciaio
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.STEEL, steel_props)
-                        else:
-                            # Aria esterna
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.AIR, air_props)
-                    else:
-                        # Sopra o sotto la batteria
-                        if z < cyl.base_z:
-                            # Fondazione (calcestruzzo)
-                            concrete_props = mat_manager.get("concrete")
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.CONCRETE, concrete_props)
-                        else:
-                            # Aria sopra
-                            self._set_node_properties(mesh, i, j, k,
-                                                     MaterialID.AIR, air_props)
+                mesh.material_id[mask_tube] = MaterialID.TUBES
+                mesh.k[mask_tube] = storage_props.k
+                mesh.rho[mask_tube] = storage_props.rho
+                mesh.cp[mask_tube] = storage_props.cp
+                
+                # Condizioni al contorno per i tubi
+                if self.tubes.active:
+                    mesh.bc_h[mask_tube] = tube.h_fluid
+                    mesh.bc_T_inf[mask_tube] = tube.T_fluid
+                    mesh.boundary_type[mask_tube] = BoundaryType.CONVECTION
+                else:
+                    mesh.bc_h[mask_tube] = 0.0
+                    mesh.boundary_type[mask_tube] = BoundaryType.INTERNAL
         
         # Imposta condizioni al contorno
         self._apply_boundary_conditions(mesh)
@@ -784,19 +988,46 @@ class BatteryGeometry:
     def get_zone_volumes(self) -> dict:
         """Calcola i volumi di ogni zona [m³]"""
         cyl = self.cylinder
-        h = cyl.height
+        
+        # Volumi principali
+        h_storage = cyl.z_storage_end - cyl.z_storage_start
+        h_slab_bottom = cyl.insulation_slab_bottom
+        h_slab_top = cyl.insulation_slab_top
+        h_shell = cyl.z_shell_top - cyl.base_z
         
         volumes = {
-            'tubes': np.pi * cyl.r_tubes**2 * h,
-            'sand_inner': np.pi * (cyl.r_sand_inner**2 - cyl.r_tubes**2) * h,
-            'heaters': np.pi * (cyl.r_heaters**2 - cyl.r_sand_inner**2) * h,
-            'sand_outer': np.pi * (cyl.r_sand_outer**2 - cyl.r_heaters**2) * h,
-            'insulation': np.pi * (cyl.r_insulation**2 - cyl.r_sand_outer**2) * h,
-            'shell': np.pi * (cyl.r_shell**2 - cyl.r_insulation**2) * h,
+            'storage': np.pi * cyl.r_storage**2 * h_storage,
+            'slab_bottom': np.pi * cyl.r_storage**2 * h_slab_bottom,
+            'slab_top': np.pi * cyl.r_storage**2 * h_slab_top,
+            'insulation_radial': np.pi * (cyl.r_insulation**2 - cyl.r_storage**2) * h_shell,
+            'shell': np.pi * (cyl.r_shell**2 - cyl.r_insulation**2) * h_shell,
         }
         
-        volumes['sand_total'] = volumes['sand_inner'] + volumes['sand_outer'] + volumes['heaters']
-        volumes['total'] = np.pi * cyl.r_shell**2 * h
+        # Volume del tetto conico (V = 1/3 * π * r² * h)
+        if cyl.roof_height > 0:
+            volumes['cone'] = (1/3) * np.pi * cyl.r_shell**2 * cyl.roof_height
+        else:
+            volumes['cone'] = 0.0
+            
+        # Slab acciaio opzionale
+        if cyl.steel_slab_top > 0:
+            volumes['steel_slab'] = np.pi * cyl.r_insulation**2 * cyl.steel_slab_top
+        else:
+            volumes['steel_slab'] = 0.0
+        
+        volumes['insulation_total'] = (
+            volumes['slab_bottom'] + 
+            volumes['slab_top'] + 
+            volumes['insulation_radial']
+        )
+        
+        volumes['total'] = (
+            volumes['storage'] + 
+            volumes['insulation_total'] + 
+            volumes['shell'] + 
+            volumes['cone'] + 
+            volumes['steel_slab']
+        )
         
         return volumes
     
@@ -804,19 +1035,30 @@ class BatteryGeometry:
         """Calcola le masse di ogni zona [kg]"""
         volumes = self.get_zone_volumes()
         
-        sand_props = mat_manager.compute_packed_bed_properties(
+        storage_props = mat_manager.compute_packed_bed_properties(
             self.storage_material, self.packing_fraction
         )
         insul_props = mat_manager.get(self.insulation_material)
         steel_props = mat_manager.get(self.shell_material)
         
         masses = {
-            'sand_total': volumes['sand_total'] * sand_props.rho,
-            'insulation': volumes['insulation'] * insul_props.rho,
+            'storage': volumes['storage'] * storage_props.rho,
+            'slab_bottom': volumes['slab_bottom'] * insul_props.rho,
+            'slab_top': volumes['slab_top'] * insul_props.rho,
+            'insulation_radial': volumes['insulation_radial'] * insul_props.rho,
             'shell': volumes['shell'] * steel_props.rho,
+            'cone': volumes['cone'] * steel_props.rho,
+            'steel_slab': volumes['steel_slab'] * steel_props.rho,
         }
         
-        masses['total'] = sum(masses.values())
+        masses['insulation_total'] = (
+            masses['slab_bottom'] + 
+            masses['slab_top'] + 
+            masses['insulation_radial']
+        )
+        
+        masses['total'] = sum(v for k, v in masses.items() 
+                              if k not in ['insulation_total'])
         
         return masses
     
@@ -831,14 +1073,14 @@ class BatteryGeometry:
             dict con energia termica e utilizzabile [kWh e MWh]
         """
         masses = self.get_zone_masses(mat_manager)
-        sand_props = mat_manager.compute_packed_bed_properties(
+        storage_props = mat_manager.compute_packed_bed_properties(
             self.storage_material, self.packing_fraction
         )
         
         delta_T = T_high - T_low
         
         # Energia termica totale
-        E_thermal_J = masses['sand_total'] * sand_props.cp * delta_T
+        E_thermal_J = masses['storage'] * storage_props.cp * delta_T
         E_thermal_kWh = E_thermal_J / 3.6e6
         E_thermal_MWh = E_thermal_kWh / 1000
         
@@ -861,19 +1103,24 @@ class BatteryGeometry:
 # =============================================================================
 
 def create_small_test_geometry() -> BatteryGeometry:
-    """Crea geometria piccola per test (8 MWh circa)"""
+    """
+    Crea geometria piccola per test (8 MWh circa).
+    
+    Usa la nuova struttura a 4 zone:
+    - STORAGE: r=2.0m (materiale di accumulo con tubi e resistenze)
+    - INSULATION: spessore 0.3m
+    - STEEL: spessore 0.02m
+    """
     
     cylinder = CylinderGeometry(
         center_x=3.0,
         center_y=3.0,
         base_z=0.3,
         height=4.0,
-        r_tubes=0.3,
-        r_sand_inner=1.0,
-        r_heaters=1.2,
-        r_sand_outer=2.0,
-        r_insulation=2.3,
-        r_shell=2.32,
+        r_storage=2.0,
+        insulation_thickness=0.3,
+        shell_thickness=0.02,
+        phase_offset_deg=15.0,
     )
     
     return BatteryGeometry(

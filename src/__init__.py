@@ -1,5 +1,5 @@
 """
-Package src - Sand Battery Thermal Simulation
+Package src - Thermal Battery Simulation
 """
 
 from .core import (
@@ -28,4 +28,4 @@ except ImportError:
     PYVISTA_AVAILABLE = False
 
 __version__ = "0.1.0"
-__author__ = "Sand Battery Simulation Team"
+__author__ = "Thermal Battery Simulation Team"

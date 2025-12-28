@@ -4,7 +4,7 @@
 
 ## Overview
 
-This document summarizes the documentation additions, code comments, and code review performed on the Sand Battery simulation project. The goal was to clarify the **GUI-driven architecture** and make the codebase more understandable.
+This document summarizes the documentation additions, code comments, and code review performed on the Thermal Battery simulation project. The goal was to clarify the **GUI-driven architecture** and make the codebase more understandable.
 
 ---
 

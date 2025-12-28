@@ -1,11 +1,11 @@
-# DATABASE MATERIALI - SAND BATTERY SIMULATION
+# DATABASE MATERIALI - THERMAL BATTERY SIMULATION
 # ==============================================
 # Estratto dal preliminary_dimensioning per uso nella simulazione termica
 # Data: 14 Dicembre 2025
 
 """
 Questo file contiene tutti i dati dei materiali necessari per la simulazione
-termica 3D della Sand Battery. I dati sono stati validati con impianti reali
+termica 3D della Thermal Battery. I dati sono stati validati con impianti reali
 di Polar Night Energy.
 
 FONTE DEI DATI:

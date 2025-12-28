@@ -1,5 +1,5 @@
 """
-run_gui.py - Script per avviare la GUI Sand Battery
+run_gui.py - Script per avviare la GUI Thermal Battery Simulation
 
 Utilizzo:
     python run_gui.py

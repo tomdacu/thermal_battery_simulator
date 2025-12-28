@@ -21,6 +21,11 @@ PRECONDITIONERS:
     - "jacobi": Diagonal scaling (fast, weak)
     - "ilu": Incomplete LU factorization (robust, slower)
 
+PERFORMANCE OPTIMIZATION:
+    - n_threads: Number of threads for parallel operations (0 = auto)
+    - Uses Intel MKL/OpenBLAS multi-threading when available
+    - Numba JIT acceleration for matrix construction
+
 DATA FLOW:
     GUI widgets
         → _build_battery_geometry_from_inputs()
@@ -35,7 +40,7 @@ ALL PARAMETERS FROM GUI:
     thermal parameters.
 
 USAGE:
-    config = SolverConfig(method="direct", verbose=True)
+    config = SolverConfig(method="direct", verbose=True, n_threads=4)
     solver = SteadyStateSolver(mesh, config)
     result = solver.solve()
     # result.T contains the temperature field in Fortran order
@@ -48,18 +53,96 @@ from scipy.sparse import linalg as splinalg
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 import time
+import os
 
 from ..core.mesh import Mesh3D
 from .matrix_builder import build_steady_state_matrix
 
+# Prova a importare PyAMG per multigrid
+try:
+    import pyamg
+    HAS_PYAMG = True
+except ImportError:
+    HAS_PYAMG = False
+    pyamg = None
+
+
+def set_num_threads(n_threads: int):
+    """
+    Imposta il numero di thread per operazioni parallele.
+    
+    Args:
+        n_threads: Numero di thread. 
+                   0 = auto (tutti i core)
+                   -1 = tutti - 1
+                   N = esattamente N thread
+    """
+    import multiprocessing
+    n_cpu = multiprocessing.cpu_count()
+    
+    if n_threads == 0:
+        actual_threads = n_cpu
+    elif n_threads == -1:
+        actual_threads = max(1, n_cpu - 1)
+    else:
+        actual_threads = max(1, min(n_threads, n_cpu))
+    
+    # Imposta variabili d'ambiente per vari backend
+    os.environ['OMP_NUM_THREADS'] = str(actual_threads)
+    os.environ['MKL_NUM_THREADS'] = str(actual_threads)
+    os.environ['OPENBLAS_NUM_THREADS'] = str(actual_threads)
+    os.environ['NUMEXPR_NUM_THREADS'] = str(actual_threads)
+    
+    # Per Numba (se disponibile)
+    try:
+        import numba
+        numba.set_num_threads(actual_threads)
+    except (ImportError, AttributeError):
+        pass
+    
+    return actual_threads
+
 
 @dataclass
 class SolverConfig:
-    """Configurazione del solutore"""
-    method: str = "direct"          # "direct", "cg", "gmres", "bicgstab"
+    """Configurazione del solutore
+    
+    Attributes:
+        method: Metodo di soluzione
+            - "direct": Soluzione diretta LU. Robusto ma lento per mesh grandi (>50k celle).
+            - "cg": Gradiente Coniugato. Il più veloce per matrici simmetriche (il nostro caso!).
+            - "bicgstab": BiCGSTAB. Robusto per matrici generali, buon compromesso.
+            - "gmres": GMRES. Ottima convergenza ma usa più memoria.
+            
+        tolerance: Tolleranza relativa per convergenza.
+            - 1e-10: Alta precisione, più iterazioni
+            - 1e-8: Default, buon compromesso
+            - 1e-6: Veloce, sufficiente per visualizzazione
+            - 1e-4: Molto veloce, solo stime grossolane
+            
+        max_iterations: Limite iterazioni per metodi iterativi.
+            - Tipicamente 1000-10000
+            - Se non converge entro max_iter, restituisce risultato parziale
+            
+        preconditioner: Precondizionatore per accelerare convergenza.
+            - "jacobi": Diagonale. CONSIGLIATO! Veloce e multi-threaded.
+            - "none": Nessuno. CG puro, sorprendentemente veloce per eq. calore.
+            - "ilu": Incomplete LU. Single-threaded, può essere LENTO!
+            - "amg": Algebraic Multigrid (PyAMG). OTTIMO per mesh grandi (>100k celle).
+                     Complessità O(N), riduce iterazioni a ~10-20.
+            
+        n_threads: Numero di thread per parallelismo.
+            - 0: Auto (tutti i core)
+            - -1: Tutti i core meno uno (lascia il sistema reattivo)
+            - N: Esattamente N thread
+            
+        verbose: Se True, stampa informazioni di progresso.
+    """
+    method: str = "bicgstab"        # "bicgstab", "cg", "gmres", "direct"
     tolerance: float = 1e-8         # Tolleranza per metodi iterativi
     max_iterations: int = 10000     # Max iterazioni
-    preconditioner: str = "ilu"     # "none", "jacobi", "ilu"
+    preconditioner: str = "jacobi"  # "jacobi", "none", "ilu"
+    n_threads: int = 0              # 0=auto, -1=all-1, N=N threads
     verbose: bool = True            # Stampa info
 
 
@@ -92,6 +175,9 @@ class SteadyStateSolver:
         self.mesh = mesh
         self.config = config if config is not None else SolverConfig()
         
+        # Imposta numero di thread
+        self._actual_threads = set_num_threads(self.config.n_threads)
+        
         # Matrice e RHS (costruiti al primo solve)
         self._A: Optional[sparse.csr_matrix] = None
         self._b: Optional[np.ndarray] = None
@@ -100,7 +186,7 @@ class SteadyStateSolver:
     def build_system(self):
         """Costruisce il sistema lineare A*T = b"""
         if self.config.verbose:
-            print("Costruzione sistema lineare...")
+            print(f"Costruzione sistema lineare (usando {self._actual_threads} thread)...")
         
         t_start = time.time()
         self._A, self._b = build_steady_state_matrix(self.mesh)
@@ -201,7 +287,7 @@ class SteadyStateSolver:
             if method == "cg":
                 return splinalg.cg(
                     self._A, self._b, x0=x0, M=M_prec,
-                    tol=self.config.tolerance,
+                    rtol=self.config.tolerance,
                     maxiter=self.config.max_iterations,
                     callback=callback
                 )
@@ -294,6 +380,35 @@ class SteadyStateSolver:
                 return M
             except Exception as e:
                 print(f"Errore ILU, uso Jacobi: {e}")
+                return self._get_preconditioner_jacobi()
+        
+        elif prec_type == "amg":
+            # Algebraic Multigrid (PyAMG)
+            if not HAS_PYAMG:
+                print("PyAMG non installato. Installa con: pip install pyamg")
+                print("Fallback a Jacobi...")
+                return self._get_preconditioner_jacobi()
+            
+            try:
+                if self.config.verbose:
+                    print("  Costruzione gerarchia AMG...")
+                
+                # Smoothed Aggregation è il più robusto per equazioni ellittiche
+                ml = pyamg.smoothed_aggregation_solver(
+                    self._A,
+                    max_coarse=500,  # Dimensione minima mesh grossolana
+                    max_levels=10    # Massimo livelli di gerarchia
+                )
+                
+                if self.config.verbose:
+                    print(f"  AMG: {ml.levels} livelli, coarse size: {ml.levels[-1].A.shape[0]}")
+                
+                # Restituisci come precondizionatore
+                M = ml.aspreconditioner(cycle='V')  # V-cycle è il più comune
+                return M
+                
+            except Exception as e:
+                print(f"Errore AMG, uso Jacobi: {e}")
                 return self._get_preconditioner_jacobi()
         
         else:

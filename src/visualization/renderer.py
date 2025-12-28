@@ -40,7 +40,7 @@ class VisualizationConfig:
 
 class BatteryRenderer:
     """
-    Renderer 3D per la visualizzazione della Sand Battery.
+    Renderer 3D per la visualizzazione della Thermal Battery.
     
     Utilizza PyVista per il rendering interattivo.
     """

@@ -25,11 +25,11 @@ PARAMETER FLOW:
 See docs/05_ARCHITECTURE.md and docs/06_GUI_CONFIGURATION.md for details.
 =============================================================================
 
-Interfaccia grafica completa per la simulazione Sand Battery:
+Interfaccia grafica completa per la simulazione Thermal Battery:
 - Pannello sinistro: Input parametri e controlli
 - Pannello centrale: Visualizzazione 3D PyVista
 - Pannello inferiore: Risultati e statistiche
-- Controlli slicing interattivi
+- Controlli visualizzazione 3D interattivi
 """
 
 import sys
@@ -91,7 +91,7 @@ class SimulationThread(QThread):
             self.error.emit(str(e))
 
 
-class SandBatteryGUI(QMainWindow):
+class ThermalBatteryGUI(QMainWindow):
     """Finestra principale dell'applicazione"""
     
     def __init__(self):
@@ -108,7 +108,7 @@ class SandBatteryGUI(QMainWindow):
         
     def init_ui(self):
         """Inizializza l'interfaccia utente"""
-        self.setWindowTitle("Sand Battery Thermal Simulation")
+        self.setWindowTitle("Thermal Battery Simulation")
         self.setGeometry(100, 100, 1600, 900)
         
         # Menu bar
@@ -195,26 +195,6 @@ class SandBatteryGUI(QMainWindow):
         run_btn.triggered.connect(self.run_simulation)
         toolbar.addAction(run_btn)
         
-        toolbar.addSeparator()
-        
-        slice_x = QAction("Sezione X", self)
-        slice_x.triggered.connect(lambda: self.show_slice('x'))
-        toolbar.addAction(slice_x)
-        
-        slice_y = QAction("Sezione Y", self)
-        slice_y.triggered.connect(lambda: self.show_slice('y'))
-        toolbar.addAction(slice_y)
-        
-        slice_z = QAction("Sezione Z", self)
-        slice_z.triggered.connect(lambda: self.show_slice('z'))
-        toolbar.addAction(slice_z)
-        
-        toolbar.addSeparator()
-        
-        view_3d = QAction("Vista 3D", self)
-        view_3d.triggered.connect(self.show_3d_view)
-        toolbar.addAction(view_3d)
-        
     def create_left_panel(self) -> QWidget:
         """Crea il pannello sinistro con i controlli input usando tab scrollabili"""
         panel = QWidget()
@@ -239,6 +219,10 @@ class SandBatteryGUI(QMainWindow):
         solver_tab = self._create_solver_tab()
         tabs.addTab(solver_tab, "Solver")
         
+        # === TAB 5: GUIDA ===
+        help_tab = self._create_help_tab()
+        tabs.addTab(help_tab, "📖 Guida")
+        
         main_layout.addWidget(tabs)
         
         # === PULSANTI (sempre visibili) ===
@@ -250,9 +234,9 @@ class SandBatteryGUI(QMainWindow):
         self.build_mesh_btn.clicked.connect(self.build_mesh)
         btn_layout.addWidget(self.build_mesh_btn)
 
-        # Pulsante Anteprima Geometria (senza mesh)
-        self.preview_geom_btn = QPushButton("👁 Anteprima Geometria")
-        self.preview_geom_btn.clicked.connect(self.preview_geometry)
+        # Pulsante Costruisci Geometria (senza mesh)
+        self.preview_geom_btn = QPushButton("🔧 Costruisci Geometria")
+        self.preview_geom_btn.clicked.connect(self.build_geometry)
         btn_layout.addWidget(self.preview_geom_btn)
         
         # Pulsante Esegui Simulazione
@@ -287,47 +271,155 @@ class SandBatteryGUI(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         
-        # === GEOMETRIA ===
-        geom_group = QGroupBox("Geometria Batteria")
-        geom_layout = QGridLayout()
+        # === GEOMETRIA DOMINIO ===
+        domain_group = QGroupBox("Dominio Simulazione")
+        domain_layout = QGridLayout()
         
-        # Dimensioni dominio
-        geom_layout.addWidget(QLabel("Lx [m]:"), 0, 0)
+        domain_layout.addWidget(QLabel("Lx [m]:"), 0, 0)
         self.lx_spin = QDoubleSpinBox()
         self.lx_spin.setRange(1, 50)
         self.lx_spin.setValue(6.0)
         self.lx_spin.setDecimals(1)
-        geom_layout.addWidget(self.lx_spin, 0, 1)
+        domain_layout.addWidget(self.lx_spin, 0, 1)
         
-        geom_layout.addWidget(QLabel("Ly [m]:"), 1, 0)
+        domain_layout.addWidget(QLabel("Ly [m]:"), 1, 0)
         self.ly_spin = QDoubleSpinBox()
         self.ly_spin.setRange(1, 50)
         self.ly_spin.setValue(6.0)
         self.ly_spin.setDecimals(1)
-        geom_layout.addWidget(self.ly_spin, 1, 1)
+        domain_layout.addWidget(self.ly_spin, 1, 1)
         
-        geom_layout.addWidget(QLabel("Lz [m]:"), 2, 0)
+        domain_layout.addWidget(QLabel("Lz [m]:"), 2, 0)
         self.lz_spin = QDoubleSpinBox()
         self.lz_spin.setRange(1, 50)
         self.lz_spin.setValue(5.0)
         self.lz_spin.setDecimals(1)
-        geom_layout.addWidget(self.lz_spin, 2, 1)
+        domain_layout.addWidget(self.lz_spin, 2, 1)
         
-        # Raggio cilindro
-        geom_layout.addWidget(QLabel("Raggio [m]:"), 3, 0)
+        domain_group.setLayout(domain_layout)
+        layout.addWidget(domain_group)
+        
+        # === GEOMETRIA BATTERIA (4 zone concentriche) ===
+        geom_group = QGroupBox("Geometria Batteria (4 Zone)")
+        geom_layout = QGridLayout()
+        
+        # Descrizione zone
+        zone_desc = QLabel(
+            "Zone concentriche:\n"
+            "1. STORAGE: materiale + tubi/resistenze\n"
+            "2. INSULATION: isolamento termico\n"
+            "3. STEEL: guscio acciaio\n"
+            "4. AIR: aria esterna"
+        )
+        zone_desc.setStyleSheet("color: gray; font-size: 9px;")
+        zone_desc.setWordWrap(True)
+        geom_layout.addWidget(zone_desc, 0, 0, 1, 2)
+        
+        # Raggio storage (zona centrale con sabbia + tubi + resistenze)
+        geom_layout.addWidget(QLabel("Raggio Storage [m]:"), 1, 0)
         self.radius_spin = QDoubleSpinBox()
         self.radius_spin.setRange(0.5, 20)
-        self.radius_spin.setValue(2.3)
+        self.radius_spin.setValue(2.0)
         self.radius_spin.setDecimals(2)
-        geom_layout.addWidget(self.radius_spin, 3, 1)
+        self.radius_spin.setToolTip("Raggio della zona di accumulo termico (sabbia con tubi e resistenze)")
+        geom_layout.addWidget(self.radius_spin, 1, 1)
         
-        # Altezza
+        # Spessore isolamento
+        geom_layout.addWidget(QLabel("Spessore Isolamento [m]:"), 2, 0)
+        self.insulation_thickness_spin = QDoubleSpinBox()
+        self.insulation_thickness_spin.setRange(0.05, 1.0)
+        self.insulation_thickness_spin.setValue(0.3)
+        self.insulation_thickness_spin.setDecimals(2)
+        self.insulation_thickness_spin.setSingleStep(0.05)
+        self.insulation_thickness_spin.setToolTip("Spessore dell'isolamento termico attorno allo storage")
+        geom_layout.addWidget(self.insulation_thickness_spin, 2, 1)
+        
+        # Spessore guscio acciaio
+        geom_layout.addWidget(QLabel("Spessore Acciaio [m]:"), 3, 0)
+        self.shell_thickness_spin = QDoubleSpinBox()
+        self.shell_thickness_spin.setRange(0.005, 0.1)
+        self.shell_thickness_spin.setValue(0.02)
+        self.shell_thickness_spin.setDecimals(3)
+        self.shell_thickness_spin.setSingleStep(0.005)
+        self.shell_thickness_spin.setToolTip("Spessore del guscio in acciaio esterno")
+        geom_layout.addWidget(self.shell_thickness_spin, 3, 1)
+        
+        # Altezza batteria
         geom_layout.addWidget(QLabel("Altezza [m]:"), 4, 0)
         self.height_spin = QDoubleSpinBox()
         self.height_spin.setRange(1, 30)
         self.height_spin.setValue(4.0)
         self.height_spin.setDecimals(1)
         geom_layout.addWidget(self.height_spin, 4, 1)
+        
+        # Sfasamento angolare tubi/resistenze
+        geom_layout.addWidget(QLabel("Sfasamento Tubi/Heaters [°]:"), 5, 0)
+        self.phase_offset_spin = QDoubleSpinBox()
+        self.phase_offset_spin.setRange(0, 180)
+        self.phase_offset_spin.setValue(15)
+        self.phase_offset_spin.setDecimals(1)
+        self.phase_offset_spin.setSingleStep(5)
+        self.phase_offset_spin.setToolTip("Sfasamento angolare tra tubi e resistenze per evitare sovrapposizioni")
+        geom_layout.addWidget(self.phase_offset_spin, 5, 1)
+        
+        # === NUOVI CONTROLLI: SLAB ISOLANTI ===
+        geom_layout.addWidget(QLabel(""), 6, 0)  # Separatore
+        geom_layout.addWidget(QLabel("<b>Isolamento Verticale</b>"), 6, 0, 1, 2)
+        
+        # Slab isolante inferiore
+        geom_layout.addWidget(QLabel("Slab Isolante Inf. [m]:"), 7, 0)
+        self.slab_bottom_spin = QDoubleSpinBox()
+        self.slab_bottom_spin.setRange(0.0, 1.0)
+        self.slab_bottom_spin.setValue(0.2)
+        self.slab_bottom_spin.setDecimals(2)
+        self.slab_bottom_spin.setSingleStep(0.05)
+        self.slab_bottom_spin.setToolTip("Altezza dello slab isolante sotto lo storage")
+        geom_layout.addWidget(self.slab_bottom_spin, 7, 1)
+        
+        # Slab isolante superiore
+        geom_layout.addWidget(QLabel("Slab Isolante Sup. [m]:"), 8, 0)
+        self.slab_top_spin = QDoubleSpinBox()
+        self.slab_top_spin.setRange(0.0, 1.0)
+        self.slab_top_spin.setValue(0.2)
+        self.slab_top_spin.setDecimals(2)
+        self.slab_top_spin.setSingleStep(0.05)
+        self.slab_top_spin.setToolTip("Altezza dello slab isolante sopra lo storage")
+        geom_layout.addWidget(self.slab_top_spin, 8, 1)
+        
+        # === NUOVI CONTROLLI: TETTO ===
+        geom_layout.addWidget(QLabel("<b>Tetto</b>"), 9, 0, 1, 2)
+        
+        # Checkbox per abilitare tetto conico
+        self.enable_cone_roof_check = QCheckBox("Abilita tetto conico")
+        self.enable_cone_roof_check.setChecked(True)
+        self.enable_cone_roof_check.setToolTip("Se disabilitato, il tetto è piatto (termina con slab acciaio)")
+        geom_layout.addWidget(self.enable_cone_roof_check, 10, 0, 1, 2)
+        
+        # Angolo tetto
+        geom_layout.addWidget(QLabel("Angolo Tetto [°]:"), 11, 0)
+        self.roof_angle_spin = QDoubleSpinBox()
+        self.roof_angle_spin.setRange(0, 45)
+        self.roof_angle_spin.setValue(15)
+        self.roof_angle_spin.setDecimals(1)
+        self.roof_angle_spin.setSingleStep(5)
+        self.roof_angle_spin.setToolTip("Inclinazione del tetto conico (0 = piatto)")
+        geom_layout.addWidget(self.roof_angle_spin, 11, 1)
+        
+        # Slab acciaio sotto tetto
+        geom_layout.addWidget(QLabel("Slab Acciaio Top [m]:"), 12, 0)
+        self.steel_slab_spin = QDoubleSpinBox()
+        self.steel_slab_spin.setRange(0.0, 0.1)
+        self.steel_slab_spin.setValue(0.005)
+        self.steel_slab_spin.setDecimals(3)
+        self.steel_slab_spin.setSingleStep(0.005)
+        self.steel_slab_spin.setToolTip("Spessore slab acciaio sotto il tetto")
+        geom_layout.addWidget(self.steel_slab_spin, 12, 1)
+        
+        # Riempimento sabbia sotto cono
+        self.fill_cone_check = QCheckBox("Riempi cono con sabbia")
+        self.fill_cone_check.setChecked(False)
+        self.fill_cone_check.setToolTip("Riempie il volume sotto il tetto conico con sabbia")
+        geom_layout.addWidget(self.fill_cone_check, 13, 0, 1, 2)
         
         geom_group.setLayout(geom_layout)
         layout.addWidget(geom_group)
@@ -480,6 +572,27 @@ class SandBatteryGUI(QMainWindow):
         elem_layout.addWidget(QLabel("Potenza/elemento:"), 2, 0)
         self.power_per_heater_label = QLabel("-")
         elem_layout.addWidget(self.power_per_heater_label, 2, 1)
+        
+        # === OFFSET VERTICALI RESISTENZE ===
+        elem_layout.addWidget(QLabel("<b>Offset Verticali</b>"), 3, 0, 1, 2)
+        
+        elem_layout.addWidget(QLabel("Offset dal basso [m]:"), 4, 0)
+        self.heater_offset_bottom_spin = QDoubleSpinBox()
+        self.heater_offset_bottom_spin.setRange(0.0, 2.0)
+        self.heater_offset_bottom_spin.setValue(0.0)
+        self.heater_offset_bottom_spin.setDecimals(2)
+        self.heater_offset_bottom_spin.setSingleStep(0.1)
+        self.heater_offset_bottom_spin.setToolTip("Distanza dalla fine dello slab isolante inferiore")
+        elem_layout.addWidget(self.heater_offset_bottom_spin, 4, 1)
+        
+        elem_layout.addWidget(QLabel("Offset dall'alto [m]:"), 5, 0)
+        self.heater_offset_top_spin = QDoubleSpinBox()
+        self.heater_offset_top_spin.setRange(0.0, 2.0)
+        self.heater_offset_top_spin.setValue(0.0)
+        self.heater_offset_top_spin.setDecimals(2)
+        self.heater_offset_top_spin.setSingleStep(0.1)
+        self.heater_offset_top_spin.setToolTip("Distanza prima dell'inizio dello slab isolante superiore")
+        elem_layout.addWidget(self.heater_offset_top_spin, 5, 1)
         
         self.power_spin.valueChanged.connect(self._update_power_per_heater)
         self.n_heaters_spin.valueChanged.connect(self._update_power_per_heater)
@@ -669,51 +782,380 @@ class SandBatteryGUI(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         
-        # === SOLVER ===
+        # === METODO DI SOLUZIONE ===
         solver_group = QGroupBox("Metodo di Soluzione")
         solver_layout = QGridLayout()
         
-        solver_layout.addWidget(QLabel("Metodo:"), 0, 0)
+        row = 0
+        solver_layout.addWidget(QLabel("Metodo:"), row, 0)
         self.solver_combo = QComboBox()
-        self.solver_combo.addItems(["direct", "bicgstab", "gmres", "cg"])
-        solver_layout.addWidget(self.solver_combo, 0, 1)
+        self.solver_combo.addItems(["bicgstab", "cg", "gmres", "direct"])
+        self.solver_combo.setCurrentText("bicgstab")  # Default: BiCGSTAB è più robusto
+        self.solver_combo.currentTextChanged.connect(self._on_solver_method_changed)
+        solver_layout.addWidget(self.solver_combo, row, 1)
         
-        solver_layout.addWidget(QLabel("Tolleranza:"), 1, 0)
-        self.tolerance_spin = QDoubleSpinBox()
-        self.tolerance_spin.setRange(1e-12, 1e-2)
-        self.tolerance_spin.setValue(1e-8)
-        self.tolerance_spin.setDecimals(10)
-        self.tolerance_spin.setSingleStep(1e-9)
-        solver_layout.addWidget(self.tolerance_spin, 1, 1)
-        
-        solver_layout.addWidget(QLabel("Max iterazioni:"), 2, 0)
-        self.max_iter_spin = QSpinBox()
-        self.max_iter_spin.setRange(100, 100000)
-        self.max_iter_spin.setValue(10000)
-        solver_layout.addWidget(self.max_iter_spin, 2, 1)
+        row += 1
+        self.solver_method_desc = QLabel("")
+        self.solver_method_desc.setWordWrap(True)
+        self.solver_method_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        solver_layout.addWidget(self.solver_method_desc, row, 0, 1, 2)
         
         solver_group.setLayout(solver_layout)
         layout.addWidget(solver_group)
         
-        # === INFO SOLVER ===
-        info_group = QGroupBox("Info Metodi")
-        info_layout = QVBoxLayout()
+        # === PRECONDIZIONATORE ===
+        prec_group = QGroupBox("Precondizionatore")
+        prec_layout = QGridLayout()
         
-        info_text = QLabel(
-            "<b>direct:</b> Soluzione diretta (LU). Robusto, più lento per mesh grandi.<br>"
-            "<b>bicgstab:</b> BiCGSTAB iterativo. Veloce per mesh grandi.<br>"
-            "<b>gmres:</b> GMRES iterativo. Buona convergenza.<br>"
-            "<b>cg:</b> Gradiente Coniugato. Solo per matrici simmetriche."
+        row = 0
+        prec_layout.addWidget(QLabel("Tipo:"), row, 0)
+        self.preconditioner_combo = QComboBox()
+        self.preconditioner_combo.addItems(["jacobi", "none", "ilu", "amg"])
+        self.preconditioner_combo.setCurrentText("jacobi")  # Jacobi è più veloce per eq. calore
+        self.preconditioner_combo.currentTextChanged.connect(self._on_preconditioner_changed)
+        prec_layout.addWidget(self.preconditioner_combo, row, 1)
+        
+        row += 1
+        self.precond_desc = QLabel("")
+        self.precond_desc.setWordWrap(True)
+        self.precond_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        prec_layout.addWidget(self.precond_desc, row, 0, 1, 2)
+        
+        row += 1
+        self.amg_warning = QLabel("")
+        self.amg_warning.setWordWrap(True)
+        self.amg_warning.setStyleSheet("color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;")
+        self.amg_warning.hide()  # Nascosto di default
+        prec_layout.addWidget(self.amg_warning, row, 0, 1, 2)
+        
+        prec_group.setLayout(prec_layout)
+        layout.addWidget(prec_group)
+        
+        # === CONVERGENZA ===
+        conv_group = QGroupBox("Parametri di Convergenza")
+        conv_layout = QGridLayout()
+        
+        row = 0
+        conv_layout.addWidget(QLabel("Tolleranza:"), row, 0)
+        self.tolerance_combo = QComboBox()
+        self.tolerance_combo.addItems(["1e-10 (Alta precisione)", "1e-8 (Default)", 
+                                        "1e-6 (Veloce)", "1e-4 (Molto veloce)"])
+        self.tolerance_combo.setCurrentIndex(1)  # Default 1e-8
+        self.tolerance_combo.currentTextChanged.connect(self._on_tolerance_changed)
+        conv_layout.addWidget(self.tolerance_combo, row, 1)
+        
+        row += 1
+        self.tolerance_desc = QLabel("")
+        self.tolerance_desc.setWordWrap(True)
+        self.tolerance_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        conv_layout.addWidget(self.tolerance_desc, row, 0, 1, 2)
+        
+        row += 1
+        conv_layout.addWidget(QLabel("Max iterazioni:"), row, 0)
+        self.max_iter_spin = QSpinBox()
+        self.max_iter_spin.setRange(100, 100000)
+        self.max_iter_spin.setValue(5000)
+        self.max_iter_spin.setSingleStep(1000)
+        conv_layout.addWidget(self.max_iter_spin, row, 1)
+        
+        conv_group.setLayout(conv_layout)
+        layout.addWidget(conv_group)
+        
+        # === PERFORMANCE / THREAD ===
+        perf_group = QGroupBox("Performance (Multi-Core)")
+        perf_layout = QGridLayout()
+        
+        row = 0
+        perf_layout.addWidget(QLabel("Thread CPU:"), row, 0)
+        self.threads_combo = QComboBox()
+        self.threads_combo.addItems(["Auto (tutti)", "Tutti - 1", "4 core", "2 core", "1 core"])
+        self.threads_combo.setCurrentIndex(1)  # Default: tutti - 1
+        perf_layout.addWidget(self.threads_combo, row, 1)
+        
+        row += 1
+        threads_desc = QLabel(
+            "💡 <b>Auto</b>: massima velocità, può rallentare il sistema.\n"
+            "<b>Tutti - 1</b>: raccomandato, lascia un core libero per la GUI."
         )
-        info_text.setWordWrap(True)
-        info_text.setStyleSheet("color: gray; font-size: 9px;")
-        info_layout.addWidget(info_text)
+        threads_desc.setWordWrap(True)
+        threads_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        perf_layout.addWidget(threads_desc, row, 0, 1, 2)
         
-        info_group.setLayout(info_layout)
-        layout.addWidget(info_group)
+        perf_group.setLayout(perf_layout)
+        layout.addWidget(perf_group)
+        
+        # === SUGGERIMENTI RAPIDI ===
+        tips_group = QGroupBox("⚡ Suggerimenti per Velocizzare")
+        tips_layout = QVBoxLayout()
+        
+        tips_text = QLabel(
+            "<b>Per mesh grandi (>50k celle):</b><br>"
+            "• Usa metodo <b>cg</b> + precondizionatore <b>jacobi</b> o <b>none</b><br>"
+            "• Tolleranza <b>1e-6</b> è sufficiente per visualizzazione<br>"
+            "• ⚠️ Evita <b>ilu</b>: è single-threaded e lento!<br><br>"
+            "<b>Per risultati precisi:</b><br>"
+            "• Metodo <b>cg</b> con tolleranza <b>1e-10</b><br>"
+            "• Metodo <b>direct</b> solo per mesh piccole (<20k celle)"
+        )
+        tips_text.setWordWrap(True)
+        tips_text.setStyleSheet("background-color: #e8f5e9; padding: 8px; border-radius: 4px;")
+        tips_layout.addWidget(tips_text)
+        
+        tips_group.setLayout(tips_layout)
+        layout.addWidget(tips_group)
         
         layout.addStretch()
+        
+        # Inizializza descrizioni
+        self._on_solver_method_changed(self.solver_combo.currentText())
+        self._on_preconditioner_changed(self.preconditioner_combo.currentText())
+        self._on_tolerance_changed(self.tolerance_combo.currentText())
+        
         return self._create_scrollable_widget(content)
+    
+    def _create_help_tab(self) -> QWidget:
+        """Crea la scheda di aiuto/guida all'uso"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        # === GUIDA RAPIDA ===
+        guide_group = QGroupBox("📖 Guida Rapida")
+        guide_layout = QVBoxLayout()
+        
+        guide_text = QTextEdit()
+        guide_text.setReadOnly(True)
+        guide_text.setMinimumHeight(400)
+        guide_text.setHtml("""
+        <style>
+            body { font-family: Arial, sans-serif; font-size: 10px; }
+            h2 { color: #1976D2; margin-top: 12px; }
+            h3 { color: #388E3C; margin-top: 8px; }
+            .tip { background-color: #FFF9C4; padding: 8px; margin: 4px 0; border-left: 3px solid #FFC107; }
+            .warning { background-color: #FFEBEE; padding: 8px; margin: 4px 0; border-left: 3px solid #F44336; }
+            code { background-color: #ECEFF1; padding: 2px 4px; }
+        </style>
+        
+        <h2>🚀 Come Usare il Simulatore</h2>
+        
+        <h3>1. Configura la Geometria</h3>
+        <p>Nella scheda <b>Geometria</b>, imposta:</p>
+        <ul>
+            <li><b>Dimensioni dominio</b>: Lx, Ly, Lz del volume di simulazione</li>
+            <li><b>Punti mesh</b>: Risoluzione della griglia 3D</li>
+            <li><b>Raggio batteria</b>: Dimensione del cilindro di accumulo</li>
+        </ul>
+        
+        <div class="tip">
+        💡 <b>Suggerimento</b>: Inizia con pochi punti mesh (30-40) per test rapidi, 
+        poi aumenta (60-80) per risultati finali.
+        </div>
+        
+        <h3>2. Configura Resistenze e Tubi</h3>
+        <p>Nelle schede <b>Resistenze</b> e <b>Tubi</b>:</p>
+        <ul>
+            <li>Scegli il pattern di disposizione</li>
+            <li>Imposta potenza totale e numero elementi</li>
+            <li>Usa "Anteprima" per vedere le posizioni</li>
+        </ul>
+        
+        <h3>3. Configura il Solver</h3>
+        <p>Nella scheda <b>Solver</b>, ottimizza le prestazioni:</p>
+        
+        <table border="1" cellpadding="4" style="border-collapse: collapse;">
+            <tr style="background-color: #E3F2FD;">
+                <th>Scenario</th>
+                <th>Metodo</th>
+                <th>Tolleranza</th>
+                <th>Tempo stimato</th>
+            </tr>
+            <tr>
+                <td>Test rapido</td>
+                <td>cg + ilu</td>
+                <td>1e-4</td>
+                <td>~5 sec</td>
+            </tr>
+            <tr>
+                <td>Visualizzazione</td>
+                <td>cg + ilu</td>
+                <td>1e-6</td>
+                <td>~15 sec</td>
+            </tr>
+            <tr>
+                <td>Precisione standard</td>
+                <td>cg + ilu</td>
+                <td>1e-8</td>
+                <td>~30 sec</td>
+            </tr>
+            <tr>
+                <td>Alta precisione</td>
+                <td>direct</td>
+                <td>N/A</td>
+                <td>~2 min</td>
+            </tr>
+        </table>
+        
+        <h3>4. Esegui Simulazione</h3>
+        <ol>
+            <li>Clicca <b>"Costruisci Mesh"</b> per creare la griglia</li>
+            <li>Clicca <b>"Esegui Simulazione"</b> per risolvere</li>
+            <li>Usa i controlli di visualizzazione per esplorare i risultati</li>
+        </ol>
+        
+        <h2>⚡ Ottimizzazione Performance</h2>
+        
+        <h3>Perché è lento?</h3>
+        <ul>
+            <li><b>Troppi punti mesh</b>: N³ celle = tempo esponenziale. 100³ = 1 milione di celle!</li>
+            <li><b>Metodo diretto</b>: Usa O(N²) memoria, lentissimo per mesh grandi</li>
+            <li><b>Tolleranza troppo stretta</b>: Più iterazioni = più tempo</li>
+        </ul>
+        
+        <h3>Come velocizzare</h3>
+        <div class="tip">
+        <b>1. Usa solver iterativo</b>: <code>cg</code> o <code>bicgstab</code> invece di <code>direct</code><br>
+        <b>2. Precondizionatore ILU</b>: Riduce iterazioni 5-10x<br>
+        <b>3. Tolleranza rilassata</b>: <code>1e-6</code> è sufficiente per visualizzazione<br>
+        <b>4. Meno punti mesh</b>: 50³ invece di 100³ è 8x più veloce
+        </div>
+        
+        <h3>Uso CPU/GPU</h3>
+        <ul>
+            <li><b>Multi-core</b>: Seleziona "Auto" o "Tutti-1" nel tab Solver</li>
+            <li><b>GPU</b>: Non supportata nativamente. Richiede CuPy (avanzato)</li>
+        </ul>
+        
+        <h2>📊 Metodi di Soluzione</h2>
+        
+        <h3>Metodi Iterativi (consigliati per mesh grandi)</h3>
+        <ul>
+            <li><b>CG (Conjugate Gradient)</b>: Il più veloce per matrici simmetriche (il nostro caso!). 
+            Converge rapidamente con buon precondizionatore.</li>
+            <li><b>BiCGSTAB</b>: Più robusto di CG, funziona anche con matrici non simmetriche.</li>
+            <li><b>GMRES</b>: Ottima convergenza ma usa più memoria.</li>
+        </ul>
+        
+        <h3>Metodo Diretto</h3>
+        <ul>
+            <li><b>Direct (LU)</b>: Soluzione esatta senza iterazioni. 
+            Molto lento per mesh >50k celle. Usa molta RAM.</li>
+        </ul>
+        
+        <div class="warning">
+        ⚠️ <b>Attenzione</b>: Con 100³ celle (1 milione), il metodo diretto può usare 
+        >10 GB di RAM e impiegare ore!
+        </div>
+        
+        <h2>🔧 Risoluzione Problemi</h2>
+        
+        <h3>Simulazione non converge</h3>
+        <ul>
+            <li>Aumenta max iterazioni</li>
+            <li>Prova precondizionatore diverso (jacobi invece di ilu)</li>
+            <li>Verifica condizioni al contorno (temperature ragionevoli)</li>
+        </ul>
+        
+        <h3>Out of Memory</h3>
+        <ul>
+            <li>Riduci punti mesh</li>
+            <li>Usa metodo iterativo invece di diretto</li>
+            <li>Chiudi altre applicazioni</li>
+        </ul>
+        """)
+        
+        guide_layout.addWidget(guide_text)
+        guide_group.setLayout(guide_layout)
+        layout.addWidget(guide_group)
+        
+        return self._create_scrollable_widget(content)
+    
+    def _on_solver_method_changed(self, method: str):
+        """Aggiorna descrizione metodo solver"""
+        descriptions = {
+            "bicgstab": "⭐ <b>BiCGSTAB</b>: CONSIGLIATO! Robusto e veloce. "
+                        "Funziona con qualsiasi matrice, anche non simmetrica. "
+                        "Ideale per condizioni al contorno complesse.",
+            "cg": "⚡ <b>Gradiente Coniugato</b>: Molto veloce ma richiede matrice simmetrica. "
+                  "Può non convergere con condizioni al contorno miste (convezione + Dirichlet). "
+                  "Usa se BiCGSTAB è troppo lento.",
+            "gmres": "📈 <b>GMRES</b>: Eccellente convergenza ma usa più memoria. "
+                     "Utile per problemi difficili dove altri metodi falliscono.",
+            "direct": "🎯 <b>Soluzione Diretta (LU)</b>: Sempre converge, nessuna iterazione. "
+                      "⚠️ MOLTO LENTO per mesh >50k celle. Usa molta RAM. "
+                      "Solo per mesh piccole o debug."
+        }
+        self.solver_method_desc.setText(descriptions.get(method, ""))
+    
+    def _on_preconditioner_changed(self, prec: str):
+        """Aggiorna descrizione precondizionatore"""
+        descriptions = {
+            "jacobi": "⭐ <b>Jacobi (Diagonale)</b>: CONSIGLIATO! Velocissimo e multi-thread. "
+                      "Per l'equazione del calore è spesso il migliore.",
+            "none": "⚡ <b>Nessuno</b>: CG puro. Sorprendentemente veloce per matrici ben condizionate. "
+                    "Prova questa opzione se Jacobi è lento.",
+            "ilu": "⚠️ <b>ILU (Incomplete LU)</b>: Single-threaded, può essere LENTO! "
+                   "Riduce iterazioni ma ogni iterazione è più costosa. Usa solo per problemi difficili.",
+            "amg": "🚀 <b>AMG (Algebraic Multigrid)</b>: OTTIMO per mesh grandi (>100k celle). "
+                   "Complessità O(N), riduce iterazioni a ~10-20. Richiede PyAMG."
+        }
+        self.precond_desc.setText(descriptions.get(prec, ""))
+        
+        # Mostra warning per AMG se mesh piccola
+        if prec == "amg":
+            if self.mesh is not None and self.mesh.N_total < 100000:
+                self.amg_warning.setText(
+                    f"⚠️ La mesh attuale ha solo {self.mesh.N_total:,} celle. "
+                    "AMG è consigliato per mesh >100k celle. Per mesh piccole, usa Jacobi."
+                )
+                self.amg_warning.show()
+            elif self.mesh is None:
+                self.amg_warning.setText(
+                    "ℹ️ AMG è consigliato per mesh >100k celle. "
+                    "Per mesh più piccole, Jacobi è generalmente più veloce."
+                )
+                self.amg_warning.show()
+            else:
+                self.amg_warning.setText(
+                    f"✅ Mesh con {self.mesh.N_total:,} celle. AMG è una buona scelta!"
+                )
+                self.amg_warning.setStyleSheet("color: #2E7D32; font-size: 9px; padding: 4px; background-color: #E8F5E9;")
+                self.amg_warning.show()
+        else:
+            self.amg_warning.hide()
+    
+    def _on_tolerance_changed(self, tol_str: str):
+        """Aggiorna descrizione tolleranza"""
+        descriptions = {
+            "1e-10 (Alta precisione)": "🔬 Massima precisione. Molte iterazioni. "
+                                        "Per analisi dettagliate e validazione.",
+            "1e-8 (Default)": "⚖️ Buon compromesso tra velocità e precisione. "
+                              "Adatto per la maggior parte degli usi.",
+            "1e-6 (Veloce)": "⚡ Sufficiente per visualizzazione e analisi qualitativa. "
+                             "Circa 2x più veloce del default.",
+            "1e-4 (Molto veloce)": "🚀 Solo per test rapidi e debugging. "
+                                    "Precisione ridotta ma molto veloce."
+        }
+        self.tolerance_desc.setText(descriptions.get(tol_str, ""))
+    
+    def _get_tolerance_value(self) -> float:
+        """Estrae il valore numerico della tolleranza dalla combo"""
+        tol_map = {
+            "1e-10 (Alta precisione)": 1e-10,
+            "1e-8 (Default)": 1e-8,
+            "1e-6 (Veloce)": 1e-6,
+            "1e-4 (Molto veloce)": 1e-4
+        }
+        return tol_map.get(self.tolerance_combo.currentText(), 1e-8)
+    
+    def _get_n_threads(self) -> int:
+        """Estrae il numero di thread dalla combo"""
+        thread_map = {
+            "Auto (tutti)": 0,
+            "Tutti - 1": -1,
+            "4 core": 4,
+            "2 core": 2,
+            "1 core": 1
+        }
+        return thread_map.get(self.threads_combo.currentText(), -1)
     
     def _on_heater_pattern_changed(self, index: int):
         """Callback quando cambia il pattern resistenze"""
@@ -776,12 +1218,14 @@ class SandBatteryGUI(QMainWindow):
         """Mostra anteprima posizioni resistenze"""
         self.heater_positions_list.clear()
         
-        # Crea config temporanea
+        # Crea config temporanea con offset
         config = HeaterConfig(
             power_total=self.power_spin.value(),
             n_heaters=self.n_heaters_spin.value(),
             pattern=self._get_heater_pattern_enum(),
             heater_radius=self.heater_radius_spin.value(),
+            offset_bottom=self.heater_offset_bottom_spin.value(),
+            offset_top=self.heater_offset_top_spin.value(),
             grid_rows=self.heater_grid_rows.value(),
             grid_cols=self.heater_grid_cols.value(),
             grid_spacing=self.heater_grid_spacing.value(),
@@ -794,8 +1238,17 @@ class SandBatteryGUI(QMainWindow):
         radius = self.radius_spin.value()
         r_inner = radius * 0.4
         r_outer = radius * 0.5
-        z_bottom = 0.3
-        z_top = 0.3 + self.height_spin.value()
+        
+        # Calcola quote z per le resistenze (dentro lo storage con offset)
+        base_z = 0.3
+        slab_bottom = self.slab_bottom_spin.value()
+        height = self.height_spin.value()
+        slab_top = self.slab_top_spin.value()
+        
+        z_storage_start = base_z + slab_bottom
+        z_storage_end = z_storage_start + height
+        z_bottom = z_storage_start + config.offset_bottom
+        z_top = z_storage_end - config.offset_top
         
         elements = config.generate_positions(
             center_x, center_y,
@@ -810,6 +1263,7 @@ class SandBatteryGUI(QMainWindow):
                 item = QListWidgetItem(f"{i+1}: ({elem.x:.2f}, {elem.y:.2f}) - {elem.power:.1f} kW")
                 self.heater_positions_list.addItem(item)
             self.heater_positions_list.addItem(f"--- Totale: {len(elements)} elementi ---")
+            self.heater_positions_list.addItem(f"Z: {z_bottom:.2f}m - {z_top:.2f}m")
     
     def _preview_tube_positions(self):
         """Mostra anteprima posizioni tubi"""
@@ -834,8 +1288,16 @@ class SandBatteryGUI(QMainWindow):
         center_x, center_y = Lx / 2, Ly / 2
         radius = self.radius_spin.value()
         r_max = radius * 0.3  # Zona tubi centrale
-        z_bottom = 0.3
-        z_top = 0.3 + self.height_spin.value()
+        
+        # I tubi vanno da slab_bottom_start a steel_slab_end
+        base_z = 0.3
+        slab_bottom = self.slab_bottom_spin.value()
+        height = self.height_spin.value()
+        slab_top = self.slab_top_spin.value()
+        steel_slab = self.steel_slab_spin.value()
+        
+        z_bottom = base_z  # Da inizio slab isolante inferiore
+        z_top = base_z + slab_bottom + height + slab_top + steel_slab
         
         elements = config.generate_positions(
             center_x, center_y,
@@ -847,6 +1309,7 @@ class SandBatteryGUI(QMainWindow):
             item = QListWidgetItem(f"{i+1}: ({elem.x:.2f}, {elem.y:.2f}) - Ø{elem.radius*2*1000:.0f}mm")
             self.tube_positions_list.addItem(item)
         self.tube_positions_list.addItem(f"--- Totale: {len(elements)} tubi ---")
+        self.tube_positions_list.addItem(f"Z: {z_bottom:.2f}m - {z_top:.2f}m")
     
     def create_center_panel(self) -> QWidget:
         """Crea il pannello centrale con la visualizzazione 3D"""
@@ -869,61 +1332,41 @@ class SandBatteryGUI(QMainWindow):
         viz_group = QGroupBox("Controlli Visualizzazione")
         viz_layout = QGridLayout()
         
-        # Riga 1: Modalità visualizzazione
-        viz_layout.addWidget(QLabel("Modalità:"), 0, 0)
-        self.viz_mode_combo = QComboBox()
-        self.viz_mode_combo.addItems([
-            "Sezione Clip",      # Taglia e mostra solido dietro
-            "Multi-Slice",       # Più fette parallele
-            "Volume 3D",         # Volume rendering trasparente
-            "Isosuperficie"      # Superfici a temperatura costante
-        ])
-        self.viz_mode_combo.currentTextChanged.connect(self.update_visualization)
-        viz_layout.addWidget(self.viz_mode_combo, 0, 1, 1, 2)
-        
-        # Campo da visualizzare
-        viz_layout.addWidget(QLabel("Campo:"), 0, 3)
+        # Riga 1: Campo da visualizzare (includes Geometry option)
+        viz_layout.addWidget(QLabel("Campo:"), 0, 0)
         self.field_combo = QComboBox()
-        self.field_combo.addItems(["Temperature", "Material", "k", "Q"])
+        self.field_combo.addItems(["Temperature", "Material", "Geometry", "k", "Q"])
         self.field_combo.currentTextChanged.connect(self.update_visualization)
-        viz_layout.addWidget(self.field_combo, 0, 4)
+        viz_layout.addWidget(self.field_combo, 0, 1, 1, 2)
         
-        # Riga 2: Controlli slice/clip
-        viz_layout.addWidget(QLabel("Asse:"), 1, 0)
+        # Riga 2: Controlli clip position
+        viz_layout.addWidget(QLabel("Asse taglio:"), 1, 0)
         self.axis_combo = QComboBox()
         self.axis_combo.addItems(["x", "y", "z"])
         self.axis_combo.setCurrentIndex(2)
-        self.axis_combo.currentTextChanged.connect(self.update_slice_range)
+        self.axis_combo.currentTextChanged.connect(self._on_axis_changed)
         viz_layout.addWidget(self.axis_combo, 1, 1)
         
         viz_layout.addWidget(QLabel("Posizione:"), 1, 2)
         self.slice_slider = QSlider(Qt.Orientation.Horizontal)
-        self.slice_slider.setRange(0, 100)
+        self.slice_slider.setRange(1, 99)  # Avoid 0 and 100 to prevent crashes
         self.slice_slider.setValue(50)
-        self.slice_slider.valueChanged.connect(self.update_slice_position)
-        viz_layout.addWidget(self.slice_slider, 1, 3)
+        self.slice_slider.valueChanged.connect(self._on_slider_changed)
+        viz_layout.addWidget(self.slice_slider, 1, 3, 1, 2)
         
         self.slice_pos_label = QLabel("0.00 m")
-        viz_layout.addWidget(self.slice_pos_label, 1, 4)
+        viz_layout.addWidget(self.slice_pos_label, 1, 5)
         
-        # Riga 3: Opzioni avanzate per Volume 3D e Isosuperficie
+        # Riga 3: Opacità
         viz_layout.addWidget(QLabel("Opacità:"), 2, 0)
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(5, 100)
-        self.opacity_slider.setValue(30)
-        self.opacity_slider.valueChanged.connect(self.update_visualization)
-        viz_layout.addWidget(self.opacity_slider, 2, 1, 1, 2)
+        self.opacity_slider.setValue(80)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        viz_layout.addWidget(self.opacity_slider, 2, 1, 1, 4)
         
-        self.opacity_label = QLabel("30%")
-        viz_layout.addWidget(self.opacity_label, 2, 3)
-        
-        # Numero isosuperfici
-        viz_layout.addWidget(QLabel("N. iso:"), 2, 4)
-        self.n_iso_spin = QSpinBox()
-        self.n_iso_spin.setRange(1, 10)
-        self.n_iso_spin.setValue(5)
-        self.n_iso_spin.valueChanged.connect(self.update_visualization)
-        viz_layout.addWidget(self.n_iso_spin, 2, 5)
+        self.opacity_label = QLabel("80%")
+        viz_layout.addWidget(self.opacity_label, 2, 5)
         
         viz_group.setLayout(viz_layout)
         layout.addWidget(viz_group)
@@ -1028,7 +1471,7 @@ class SandBatteryGUI(QMainWindow):
     def show_initial_message(self):
         """Mostra messaggio iniziale nel plotter"""
         self.plotter.add_text(
-            "Sand Battery Thermal Simulation\n\n"
+            "Thermal Battery Simulation\n\n"
             "1. Configura i parametri nel pannello sinistro\n"
             "2. Premi 'Costruisci Mesh' per visualizzare\n"
             "3. Premi 'Esegui Simulazione' per calcolare",
@@ -1125,16 +1568,26 @@ class SandBatteryGUI(QMainWindow):
         
         This is the single function that bridges GUI widgets to simulation parameters.
         It reads every relevant widget and creates:
-        - CylinderGeometry: radial zone definitions
-        - HeaterConfig: heater pattern, power, positions
-        - TubeConfig: tube pattern, h_fluid, T_fluid, positions
+        - CylinderGeometry: Multi-zone structure with slabs and conical roof
+        - HeaterConfig: heater pattern, power, positions (inside storage)
+        - TubeConfig: tube pattern, h_fluid, T_fluid, positions (inside storage)
         - BatteryGeometry: combines all above with material selections
+        
+        ZONE STRUCTURE (from bottom to top):
+        1. CONCRETE: Base foundation layer (base_z thickness)
+        2. SHELL: Steel shell extending full height
+        3. RADIAL INSULATION: Annular insulation layer between shell and storage
+        4. SLAB BOTTOM: Bottom insulation slab (under storage)
+        5. STORAGE: Central zone with storage material containing tubes/heaters
+        6. SLAB TOP: Top insulation slab (above storage)
+        7. STEEL SLAB TOP (optional): Steel slab under roof
+        8. CONE: Conical steel roof with optional sand fill
+        9. AIR: External air
         
         Returns:
             tuple: (spacing, Lx, Ly, Lz, BatteryGeometry)
         
         NOTE: This function does NOT create the mesh - it only builds the configuration.
-        The actual mesh creation happens in build_mesh() or is skipped in preview_geometry().
         """
         # ==========================================================================
         # STEP 1: Read domain and mesh parameters from GUI
@@ -1146,17 +1599,27 @@ class SandBatteryGUI(QMainWindow):
         radius = self.radius_spin.value()
         height = self.height_spin.value()
 
+        # ==========================================================================
+        # STEP 2: Create cylinder geometry with slabs and roof
+        # ==========================================================================
         cylinder = CylinderGeometry(
             center_x=center_x,
             center_y=center_y,
             base_z=0.3,
             height=height,
-            r_tubes=0.3,
-            r_sand_inner=radius * 0.4,
-            r_heaters=radius * 0.5,
-            r_sand_outer=radius * 0.85,
-            r_insulation=radius,
-            r_shell=radius + 0.02,
+            r_storage=radius,  # Main storage zone radius
+            insulation_thickness=self.insulation_thickness_spin.value(),
+            shell_thickness=self.shell_thickness_spin.value(),
+            # Nuovi parametri: slab isolanti
+            insulation_slab_bottom=self.slab_bottom_spin.value(),
+            insulation_slab_top=self.slab_top_spin.value(),
+            # Nuovi parametri: tetto
+            roof_angle_deg=self.roof_angle_spin.value(),
+            steel_slab_top=self.steel_slab_spin.value(),
+            fill_cone_with_sand=self.fill_cone_check.isChecked(),
+            enable_cone_roof=self.enable_cone_roof_check.isChecked(),
+            # Sfasamento angolare
+            phase_offset_deg=self.phase_offset_spin.value(),
         )
 
         heater_config = HeaterConfig(
@@ -1164,6 +1627,9 @@ class SandBatteryGUI(QMainWindow):
             n_heaters=self.n_heaters_spin.value(),
             pattern=self._get_heater_pattern_enum(),
             heater_radius=self.heater_radius_spin.value(),
+            # Offset verticali resistenze
+            offset_bottom=self.heater_offset_bottom_spin.value(),
+            offset_top=self.heater_offset_top_spin.value(),
             grid_rows=self.heater_grid_rows.value(),
             grid_cols=self.heater_grid_cols.value(),
             grid_spacing=self.heater_grid_spacing.value(),
@@ -1185,6 +1651,23 @@ class SandBatteryGUI(QMainWindow):
 
         self.log(f"Heater pattern: {heater_config.pattern}")
         self.log(f"Tube pattern: {tube_config.pattern}")
+        self.log(f"Phase offset: {cylinder.phase_offset_deg}°")
+        
+        # Log nuovi parametri geometrici
+        self.log(f"  Struttura: base_z={cylinder.base_z}m, storage_height={height}m")
+        self.log(f"  Slab isolanti: bottom={cylinder.insulation_slab_bottom}m, top={cylinder.insulation_slab_top}m")
+        self.log(f"  Tetto conico: angle={cylinder.roof_angle_deg}°, roof_height={cylinder.roof_height:.3f}m")
+        if cylinder.steel_slab_top > 0:
+            self.log(f"  Steel slab sotto tetto: {cylinder.steel_slab_top}m")
+        if cylinder.fill_cone_with_sand:
+            self.log(f"  Cono riempito con sabbia")
+        self.log(f"  Altezza totale struttura: {cylinder.total_height:.3f}m")
+        
+        # Verifica che Lz sia sufficiente
+        min_Lz_required = cylinder.total_height + 0.5  # Margine aria sopra
+        if Lz < min_Lz_required:
+            self.log(f"⚠️ ATTENZIONE: Lz={Lz}m potrebbe essere insufficiente!")
+            self.log(f"    Altezza minima consigliata: {min_Lz_required:.2f}m")
 
         geom = BatteryGeometry(
             cylinder=cylinder,
@@ -1197,64 +1680,225 @@ class SandBatteryGUI(QMainWindow):
 
         return d, Lx, Ly, Lz, geom
 
-    def preview_geometry(self):
-        """Visualizza la geometria analitica (senza costruire la mesh)."""
+    def build_geometry(self):
+        """
+        Costruisce e visualizza la geometria analitica usando la vista Geometry.
+        
+        Questo metodo:
+        1. Legge tutti i parametri dalla GUI
+        2. Crea l'oggetto BatteryGeometry
+        3. Mostra la visualizzazione colorata con zone e legenda
+        
+        Non crea la mesh - per quello usare build_mesh().
+        """
         self.log("=" * 50)
-        self.log("Anteprima geometria (senza mesh)...")
+        self.log("Costruzione geometria...")
 
         try:
             _, Lx, Ly, Lz, geom = self._build_battery_geometry_from_inputs()
             self.battery_geometry = geom
 
             cyl = geom.cylinder
-
+            self.log(f"  R_storage: {cyl.r_storage:.2f} m")
+            self.log(f"  R_insulation: {cyl.r_insulation:.2f} m")
+            self.log(f"  R_shell: {cyl.r_shell:.2f} m")
+            self.log(f"  Altezza: {cyl.height:.2f} m")
+            self.log(f"  Sfasamento angolare: {cyl.phase_offset_deg:.1f}°")
+            
+            # Usa la nuova visualizzazione Geometry colorata
             self.plotter.clear()
-            self.plotter.add_text(
-                "Anteprima Geometria (no mesh)\n"
-                "- Strati cilindrici\n"
-                "- Tubi / resistenze (se presenti)",
-                position='upper_left',
-                font_size=12,
-                color='gray'
-            )
+            self._render_geometry_view_standalone(Lx, Ly, Lz)
+            
+            self.plotter.reset_camera()
+            self.plotter.render()
+            self.status_label.setText("Stato: Geometria costruita")
+            self.log("Geometria costruita con successo")
 
-            # Outline del dominio
-            domain = pv.Cube(
-                center=(Lx / 2, Ly / 2, Lz / 2),
-                x_length=Lx,
-                y_length=Ly,
-                z_length=Lz
+        except Exception as e:
+            self.log(f"ERRORE costruzione geometria: {e}")
+            self.status_label.setText(f"Errore: {e}")
+            QMessageBox.critical(self, "Errore", str(e))
+    
+    def _render_geometry_view_standalone(self, Lx: float, Ly: float, Lz: float):
+        """
+        Render della geometria analitica con zone colorate (versione standalone).
+        
+        Visualizzazione completa della struttura:
+        - FONDAZIONE (grigio scuro)
+        - SLAB ISOLANTE INFERIORE (giallo)
+        - STORAGE (beige/sabbia)
+        - SLAB ISOLANTE SUPERIORE (giallo)
+        - STEEL SLAB (grigio metallico)
+        - TETTO CONICO (grigio metallico) con eventuale riempimento sabbia
+        - SHELL laterale (grigio)
+        - ISOLAMENTO RADIALE (giallo)
+        - HEATERS (rosso) e TUBES (blu)
+        """
+        geom = self.battery_geometry
+        cyl = geom.cylinder
+        
+        # Domain outline
+        domain = pv.Cube(
+            center=(Lx / 2, Ly / 2, Lz / 2),
+            x_length=Lx,
+            y_length=Ly,
+            z_length=Lz
+        )
+        self.plotter.add_mesh(domain.outline(), color='gray', line_width=1)
+        
+        legend_entries = []
+        
+        # Colori per le zone
+        COLOR_CONCRETE = [0.35, 0.35, 0.35]
+        COLOR_INSULATION = [0.95, 0.85, 0.55]
+        COLOR_STORAGE = [0.85, 0.65, 0.45]
+        COLOR_STEEL = [0.50, 0.50, 0.55]
+        COLOR_HEATER = [0.95, 0.2, 0.1]
+        COLOR_TUBE = [0.3, 0.3, 0.8]
+        
+        # =====================================================================
+        # 1. FONDAZIONE (cilindro sotto la struttura)
+        # =====================================================================
+        if cyl.base_z > 0:
+            z_foundation = cyl.base_z / 2
+            foundation = pv.Cylinder(
+                center=(cyl.center_x, cyl.center_y, z_foundation),
+                direction=(0, 0, 1),
+                radius=float(cyl.r_shell + 0.5),
+                height=float(cyl.base_z),
+                resolution=72
             )
-            self.plotter.add_mesh(domain.outline(), color='gray', line_width=1)
-
-            # Strati: mostra solo i contorni dei raggi principali
-            z_center = cyl.base_z + cyl.height / 2
-            radii = [
-                cyl.r_tubes,
-                cyl.r_sand_inner,
-                cyl.r_heaters,
-                cyl.r_sand_outer,
-                cyl.r_insulation,
-                cyl.r_shell,
-            ]
-            for r in radii:
-                c = pv.Cylinder(
-                    center=(cyl.center_x, cyl.center_y, z_center),
+            self.plotter.add_mesh(foundation, color=COLOR_CONCRETE, opacity=0.5)
+            legend_entries.append(["CONCRETE", COLOR_CONCRETE])
+        
+        # =====================================================================
+        # 2. SHELL LATERALE (copre tutta l'altezza della struttura)
+        # =====================================================================
+        shell_z_center = (cyl.base_z + cyl.z_shell_top) / 2
+        shell_height = cyl.z_shell_top - cyl.base_z
+        
+        # Shell esterna
+        shell_outer = pv.Cylinder(
+            center=(cyl.center_x, cyl.center_y, shell_z_center),
+            direction=(0, 0, 1),
+            radius=float(cyl.r_shell),
+            height=float(shell_height),
+            resolution=72
+        )
+        self.plotter.add_mesh(shell_outer, color=COLOR_STEEL, opacity=0.3)
+        legend_entries.append(["STEEL SHELL", COLOR_STEEL])
+        
+        # =====================================================================
+        # 3. ISOLAMENTO RADIALE (tra storage e shell)
+        # =====================================================================
+        insul_z_center = (cyl.base_z + cyl.z_slab_top_end) / 2
+        insul_height = cyl.z_slab_top_end - cyl.base_z
+        
+        insul_cyl = pv.Cylinder(
+            center=(cyl.center_x, cyl.center_y, insul_z_center),
+            direction=(0, 0, 1),
+            radius=float(cyl.r_insulation),
+            height=float(insul_height),
+            resolution=72
+        )
+        self.plotter.add_mesh(insul_cyl, color=COLOR_INSULATION, opacity=0.4)
+        legend_entries.append(["INSULATION", COLOR_INSULATION])
+        
+        # =====================================================================
+        # 4. SLAB ISOLANTE INFERIORE
+        # =====================================================================
+        if cyl.insulation_slab_bottom > 0:
+            slab_bot_z = (cyl.z_slab_bottom_start + cyl.z_slab_bottom_end) / 2
+            slab_bot = pv.Cylinder(
+                center=(cyl.center_x, cyl.center_y, slab_bot_z),
+                direction=(0, 0, 1),
+                radius=float(cyl.r_storage),
+                height=float(cyl.insulation_slab_bottom),
+                resolution=72
+            )
+            self.plotter.add_mesh(slab_bot, color=COLOR_INSULATION, opacity=0.6)
+        
+        # =====================================================================
+        # 5. STORAGE (zona principale sabbia)
+        # =====================================================================
+        storage_z_center = (cyl.z_storage_start + cyl.z_storage_end) / 2
+        storage = pv.Cylinder(
+            center=(cyl.center_x, cyl.center_y, storage_z_center),
+            direction=(0, 0, 1),
+            radius=float(cyl.r_storage),
+            height=float(cyl.height),
+            resolution=72
+        )
+        self.plotter.add_mesh(storage, color=COLOR_STORAGE, opacity=0.6)
+        legend_entries.append(["STORAGE", COLOR_STORAGE])
+        
+        # =====================================================================
+        # 6. SLAB ISOLANTE SUPERIORE
+        # =====================================================================
+        if cyl.insulation_slab_top > 0:
+            slab_top_z = (cyl.z_slab_top_start + cyl.z_slab_top_end) / 2
+            slab_top = pv.Cylinder(
+                center=(cyl.center_x, cyl.center_y, slab_top_z),
+                direction=(0, 0, 1),
+                radius=float(cyl.r_storage),
+                height=float(cyl.insulation_slab_top),
+                resolution=72
+            )
+            self.plotter.add_mesh(slab_top, color=COLOR_INSULATION, opacity=0.6)
+        
+        # =====================================================================
+        # 7. STEEL SLAB TOP (opzionale)
+        # =====================================================================
+        if cyl.steel_slab_top > 0:
+            steel_slab_z = (cyl.z_slab_top_end + cyl.z_steel_slab_end) / 2
+            steel_slab = pv.Cylinder(
+                center=(cyl.center_x, cyl.center_y, steel_slab_z),
+                direction=(0, 0, 1),
+                radius=float(cyl.r_insulation),
+                height=float(cyl.steel_slab_top),
+                resolution=72
+            )
+            self.plotter.add_mesh(steel_slab, color=COLOR_STEEL, opacity=0.7)
+        
+        # =====================================================================
+        # 8. TETTO CONICO (se abilitato)
+        # =====================================================================
+        if cyl.enable_cone_roof and cyl.roof_height > 0:
+            cone = pv.Cone(
+                center=(cyl.center_x, cyl.center_y, cyl.z_cone_base + cyl.roof_height/2),
+                direction=(0, 0, 1),
+                height=float(cyl.roof_height),
+                radius=float(cyl.r_shell),
+                resolution=72
+            )
+            self.plotter.add_mesh(cone, color=COLOR_STEEL, opacity=0.5)
+            legend_entries.append(["CONE ROOF", COLOR_STEEL])
+            
+            # Riempimento sabbia sotto il cono (opzionale)
+            if cyl.fill_cone_with_sand:
+                cone_fill = pv.Cone(
+                    center=(cyl.center_x, cyl.center_y, cyl.z_cone_base + cyl.roof_height/2),
                     direction=(0, 0, 1),
-                    radius=float(r),
-                    height=float(cyl.height),
+                    height=float(cyl.roof_height * 0.95),
+                    radius=float(cyl.r_shell * 0.95),
                     resolution=72
                 )
-                self.plotter.add_mesh(c, color='gray', style='wireframe', line_width=1)
-
-            # Elementi discreti: heaters
-            heater_elems = []
-            if geom.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
-                heater_elems = geom.heaters.generate_positions(
-                    cyl.center_x, cyl.center_y,
-                    cyl.r_sand_inner, cyl.r_heaters,
-                    cyl.base_z, cyl.top_z
-                )
+                self.plotter.add_mesh(cone_fill, color=COLOR_STORAGE, opacity=0.4)
+        
+        # =====================================================================
+        # 9. RESISTENZE
+        # =====================================================================
+        heater_z_start = cyl.z_storage_start + geom.heaters.offset_bottom
+        heater_z_end = cyl.z_storage_end - geom.heaters.offset_top
+        
+        heater_elems = []
+        if geom.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
+            heater_elems = geom.heaters.generate_positions(
+                cyl.center_x, cyl.center_y,
+                0, cyl.r_storage * 0.9,
+                heater_z_start, heater_z_end,
+                phase_offset=cyl.phase_offset_rad
+            )
             for htr in heater_elems:
                 h_center = (htr.x, htr.y, (htr.z_bottom + htr.z_top) / 2)
                 h_cyl = pv.Cylinder(
@@ -1262,35 +1906,55 @@ class SandBatteryGUI(QMainWindow):
                     direction=(0, 0, 1),
                     radius=float(htr.radius),
                     height=float(htr.z_top - htr.z_bottom),
-                    resolution=36
+                    resolution=24
                 )
-                self.plotter.add_mesh(h_cyl, color='gray', opacity=0.6)
-
-            # Elementi discreti: tubes
-            tube_elems = geom.tubes.generate_positions(
-                cyl.center_x, cyl.center_y,
-                cyl.r_tubes,
-                cyl.base_z, cyl.top_z
+                self.plotter.add_mesh(h_cyl, color=COLOR_HEATER, opacity=0.9)
+            if heater_elems:
+                legend_entries.append(["HEATERS", COLOR_HEATER])
+        
+        # =====================================================================
+        # 10. TUBI (attraversano tutta la struttura)
+        # =====================================================================
+        tube_z_start = cyl.z_slab_bottom_start
+        tube_z_end = cyl.z_steel_slab_end
+        
+        tube_elems = geom.tubes.generate_positions(
+            cyl.center_x, cyl.center_y,
+            cyl.r_storage * 0.9,
+            tube_z_start, tube_z_end
+        )
+        for tube in tube_elems:
+            t_center = (tube.x, tube.y, (tube.z_bottom + tube.z_top) / 2)
+            t_cyl = pv.Cylinder(
+                center=t_center,
+                direction=(0, 0, 1),
+                radius=float(tube.radius),
+                height=float(tube.z_top - tube.z_bottom),
+                resolution=24
             )
-            for tube in tube_elems:
-                t_center = (tube.x, tube.y, (tube.z_bottom + tube.z_top) / 2)
-                t_cyl = pv.Cylinder(
-                    center=t_center,
-                    direction=(0, 0, 1),
-                    radius=float(tube.radius),
-                    height=float(tube.z_top - tube.z_bottom),
-                    resolution=36
-                )
-                self.plotter.add_mesh(t_cyl, color='gray', opacity=0.3)
-
-            self.plotter.reset_camera()
-            self.plotter.render()
-            self.status_label.setText("Stato: Anteprima geometria pronta")
-
-        except Exception as e:
-            self.log(f"ERRORE anteprima geometria: {e}")
-            self.status_label.setText(f"Errore: {e}")
-            QMessageBox.critical(self, "Errore", str(e))
+            self.plotter.add_mesh(t_cyl, color=COLOR_TUBE, opacity=0.8)
+        if tube_elems:
+            legend_entries.append(["TUBES", COLOR_TUBE])
+        
+        # =====================================================================
+        # LEGENDA E INFO
+        # =====================================================================
+        if legend_entries:
+            self.plotter.add_legend(legend_entries, bcolor='white', 
+                                    face='rectangle', loc='upper right')
+        
+        self.plotter.add_axes()
+        
+        # Info text con dettagli struttura
+        roof_text = f"Cone: {cyl.roof_angle_deg:.0f}°" if cyl.enable_cone_roof else "Flat roof"
+        self.plotter.add_text(
+            f"Geometria Completa\n"
+            f"R_storage={cyl.r_storage:.2f}m, H_storage={cyl.height:.2f}m\n"
+            f"Slab: {cyl.insulation_slab_bottom:.2f}m / {cyl.insulation_slab_top:.2f}m\n"
+            f"Insulation: {cyl.insulation_thickness:.2f}m, Shell: {cyl.shell_thickness:.3f}m\n"
+            f"{roof_text}, Total H: {cyl.total_height:.2f}m",
+            position='upper_left', font_size=9
+        )
         
     def run_simulation(self):
         """Esegue la simulazione termica sulla mesh esistente"""
@@ -1304,12 +1968,18 @@ class SandBatteryGUI(QMainWindow):
         self.status_label.setText("Stato: Configurazione solver...")
         
         try:
-            # Configura solver
+            # Configura solver con parametri dalla GUI
             config = SolverConfig(
                 method=self.solver_combo.currentText(),
-                tolerance=1e-8,
-                verbose=False
+                tolerance=self._get_tolerance_value(),
+                max_iterations=self.max_iter_spin.value(),
+                preconditioner=self.preconditioner_combo.currentText(),
+                n_threads=self._get_n_threads(),
+                verbose=True
             )
+            
+            self.log(f"Metodo: {config.method}, Tolleranza: {config.tolerance:.0e}")
+            self.log(f"Precondizionatore: {config.preconditioner}, Thread: {config.n_threads}")
             
             self.progress_bar.setValue(10)
             
@@ -1461,8 +2131,63 @@ MESH:
         
         self.mat_text.setText(text)
     
+    # =========================================================================
+    # VISUALIZATION HELPER METHODS (for seamless updates)
+    # =========================================================================
+    
+    def _on_axis_changed(self):
+        """Called when axis combo changes - update visualization"""
+        self._update_position_label()
+        self.update_visualization()
+    
+    def _on_slider_changed(self):
+        """Called when position slider changes - update seamlessly"""
+        self._update_position_label()
+        self._update_visualization_seamless()
+    
+    def _on_opacity_changed(self):
+        """Called when opacity slider changes - update seamlessly"""
+        opacity_pct = self.opacity_slider.value()
+        self.opacity_label.setText(f"{opacity_pct}%")
+        self._update_visualization_seamless()
+    
+    def _update_position_label(self):
+        """Update the position label without rebuilding visualization"""
+        if self.mesh is None:
+            return
+        axis = self.axis_combo.currentText()
+        slider_pct = self.slice_slider.value() / 100.0
+        if axis == 'x':
+            pos = slider_pct * self.mesh.Lx
+        elif axis == 'y':
+            pos = slider_pct * self.mesh.Ly
+        else:
+            pos = slider_pct * self.mesh.Lz
+        self.slice_pos_label.setText(f"{pos:.2f} m")
+    
+    def _update_visualization_seamless(self):
+        """Update visualization without flickering using render() instead of full rebuild"""
+        if self.mesh is None:
+            return
+        # For seamless updates during slider movement, rebuild the scene
+        # PyVista requires rebuilding meshes, but we skip camera reset
+        self._do_visualization(reset_camera=False)
+    
     def update_visualization(self):
-        """Aggiorna la visualizzazione 3D con diverse modalità"""
+        """Full visualization update with camera reset"""
+        if self.mesh is None:
+            return
+        self._do_visualization(reset_camera=True)
+    
+    def _do_visualization(self, reset_camera: bool = True):
+        """
+        Core visualization routine - renders the 3D view.
+        
+        Unified Volume 3D view with:
+        - Clip plane controlled by position slider
+        - Opacity controlled by opacity slider
+        - Field selected from dropdown (Temperature, Material, Geometry, k, Q)
+        """
         if self.mesh is None:
             return
         
@@ -1470,40 +2195,46 @@ MESH:
         
         field = self.field_combo.currentText()
         cmap = self.cmap_combo.currentText()
-        viz_mode = self.viz_mode_combo.currentText()
         
-        # Aggiorna label opacità
+        # Opacity
         opacity_pct = self.opacity_slider.value()
         self.opacity_label.setText(f"{opacity_pct}%")
         opacity = opacity_pct / 100.0
         
-        # Crea grid PyVista
+        # Handle special "Geometry" field - shows real analytic geometry
+        if field == "Geometry":
+            self._render_geometry_view(opacity)
+            if reset_camera:
+                self.plotter.reset_camera()
+            return
+        
+        # Create PyVista grid
         grid = pv.ImageData(
             dimensions=(self.mesh.Nx + 1, self.mesh.Ny + 1, self.mesh.Nz + 1),
             spacing=(self.mesh.dx, self.mesh.dy, self.mesh.dz),
             origin=(0, 0, 0)
         )
         
-        # Aggiungi dati
+        # Add data
         grid.cell_data["Temperature"] = self.mesh.T.ravel(order='F')
         grid.cell_data["Material"] = self.mesh.material_id.ravel(order='F').astype(float)
         grid.cell_data["k"] = self.mesh.k.ravel(order='F')
         grid.cell_data["Q"] = self.mesh.Q.ravel(order='F')
         
-        # Range colori
+        # Color range
         if self.auto_range_check.isChecked():
             data = grid.cell_data[field]
-            clim = [data.min(), data.max()]
+            clim = [float(data.min()), float(data.max())]
             self.tmin_spin.setValue(clim[0])
             self.tmax_spin.setValue(clim[1])
         else:
             clim = [self.tmin_spin.value(), self.tmax_spin.value()]
         
-        # Determina posizione e normale per slice/clip
+        # Clip plane position and normal
         axis = self.axis_combo.currentText()
         slider_pct = self.slice_slider.value() / 100.0
-        eps = 0.01
-        slider_pct = max(eps, min(1.0 - eps, slider_pct))
+        # Clamp to avoid edge cases
+        slider_pct = max(0.02, min(0.98, slider_pct))
         
         if axis == 'x':
             pos = slider_pct * self.mesh.Lx
@@ -1520,129 +2251,178 @@ MESH:
         
         self.slice_pos_label.setText(f"{pos:.2f} m")
         
-        # === MODALITÀ VISUALIZZAZIONE ===
+        # === UNIFIED VOLUME 3D VISUALIZATION ===
+        # Clip the grid and remove air (Material ID = 0)
+        clipped = grid.clip(normal=normal, origin=origin, invert=False)
         
-        if viz_mode == "Sezione Clip":
-            # CLIP: taglia il solido e mostra tutto ciò che c'è dietro il piano
-            clipped = grid.clip(normal=normal, origin=origin, invert=False)
-            
-            # Rimuovi l'aria (Material ID = 0) per rendere trasparente
+        # Remove air cells for cleaner visualization
+        if clipped.n_cells > 0:
             clipped_no_air = clipped.threshold(value=0.5, scalars="Material")
-            
-            if field == "Material":
-                self.plotter.add_mesh(clipped_no_air, scalars=field, cmap=self._get_material_cmap(), 
-                                      clim=[0, 7], show_scalar_bar=False)
-            else:
-                self.plotter.add_mesh(clipped_no_air, scalars=field, cmap=cmap, clim=clim)
-            
-            # Aggiungi outline per riferimento
-            self.plotter.add_mesh(grid.outline(), color='gray', line_width=1)
-            
-            info_text = f"Clip {axis.upper()} = {pos:.2f} m"
-            
-        elif viz_mode == "Multi-Slice":
-            # MULTI-SLICE: più fette parallele
-            n_slices = 5
-            for i in range(n_slices):
-                frac = (i + 1) / (n_slices + 1)
-                if axis == 'x':
-                    orig = (frac * self.mesh.Lx, self.mesh.Ly/2, self.mesh.Lz/2)
-                elif axis == 'y':
-                    orig = (self.mesh.Lx/2, frac * self.mesh.Ly, self.mesh.Lz/2)
-                else:
-                    orig = (self.mesh.Lx/2, self.mesh.Ly/2, frac * self.mesh.Lz)
-                
-                sliced = grid.slice(normal=normal, origin=orig)
-                if field == "Material":
-                    self.plotter.add_mesh(sliced, scalars=field, cmap=self._get_material_cmap(), 
-                                          clim=[0, 7], opacity=0.9, show_scalar_bar=False)
-                else:
-                    self.plotter.add_mesh(sliced, scalars=field, cmap=cmap, clim=clim, opacity=0.9)
-            
-            info_text = f"Multi-Slice {axis.upper()} (5 sezioni)"
-            
-        elif viz_mode == "Volume 3D":
-            # VOLUME RENDERING: solido semi-trasparente che permette di vedere l'interno
-            # Escludi sempre l'aria (Material ID = 0)
-            threshed = grid.threshold(value=0.5, scalars="Material")
-            
-            if field == "Material":
-                # Per materiali, mostra solo celle non-aria con trasparenza
-                self.plotter.add_mesh(threshed, scalars=field, cmap=self._get_material_cmap(),
-                                      clim=[0, 7], opacity=opacity, show_scalar_bar=False)
-            else:
-                # Per temperatura, clip e mostra senza aria
-                clipped = threshed.clip(normal='y', origin=(self.mesh.Lx/2, self.mesh.Ly/2, 0))
-                self.plotter.add_mesh(clipped, scalars=field, cmap=cmap, clim=clim, 
-                                      opacity=opacity, show_edges=False)
-            
-            # Aggiungi outline per riferimento
-            self.plotter.add_mesh(grid.outline(), color='gray', line_width=1)
-            
-            info_text = f"Volume 3D (opacità {opacity_pct}%)"
-            
-        elif viz_mode == "Isosuperficie":
-            # ISOSURFACE: superfici a valore costante (per temperatura)
-            if field == "Material":
-                # Per materiali non ha senso l'isosuperficie, usa threshold
-                threshed = grid.threshold(value=0.5, scalars="Material")
-                self.plotter.add_mesh(threshed, scalars=field, cmap=self._get_material_cmap(),
-                                      clim=[0, 7], opacity=opacity, show_scalar_bar=False)
-                info_text = "Isosuperficie (mostra materiali)"
-            else:
-                # Per campi scalari, crea isosuperfici
-                n_iso = self.n_iso_spin.value()
-                data = grid.cell_data[field]
-                data_range = data.max() - data.min()
-                
-                if data_range > 1e-6:  # Evita divisione per zero
-                    iso_values = np.linspace(data.min() + data_range*0.1, 
-                                            data.max() - data_range*0.1, n_iso)
-                    
-                    # Converti in point data per contour
-                    grid_point = grid.cell_data_to_point_data()
-                    
-                    for i, iso_val in enumerate(iso_values):
-                        try:
-                            iso = grid_point.contour([iso_val], scalars=field)
-                            if iso.n_points > 0:
-                                self.plotter.add_mesh(iso, scalars=field, cmap=cmap, clim=clim,
-                                                      opacity=opacity, show_scalar_bar=False)
-                        except Exception:
-                            pass  # Ignora isosuperfici vuote
-                
-                # Imposta info_text anche se data_range è piccolo
-                info_text = f"Isosuperfici ({n_iso} livelli)"
-        
-        # === ELEMENTI COMUNI ===
-        self.plotter.add_axes()
-        
-        # Legenda/Scalar bar
-        if field == "Material":
-            # Nomi coerenti con MaterialID enum in mesh.py
-            material_names = {
-                0: "AIR", 1: "SAND", 2: "INSULATION", 3: "STEEL",
-                4: "TUBES", 5: "HEATERS", 6: "GROUND", 7: "CONCRETE"
-            }
-            legend_entries = []
-            unique_mats = np.unique(self.mesh.material_id)
-            for mat_id in sorted(unique_mats):
-                name = material_names.get(int(mat_id), f"ID={mat_id}")
-                legend_entries.append([name, self._get_material_color(int(mat_id))])
-            
-            if legend_entries:
-                self.plotter.add_legend(legend_entries, bcolor='white', 
-                                        face='rectangle', loc='upper right')
         else:
+            clipped_no_air = clipped
+        
+        if clipped_no_air.n_cells > 0:
+            if field == "Material":
+                self.plotter.add_mesh(
+                    clipped_no_air, scalars=field, 
+                    cmap=self._get_material_cmap(),
+                    clim=[0, 7], opacity=opacity, show_scalar_bar=False
+                )
+            else:
+                self.plotter.add_mesh(
+                    clipped_no_air, scalars=field, 
+                    cmap=cmap, clim=clim, opacity=opacity
+                )
+        
+        # Add domain outline for reference
+        self.plotter.add_mesh(grid.outline(), color='gray', line_width=1)
+        
+        # === LEGEND / SCALAR BAR ===
+        if field == "Material":
+            self._add_material_legend()
+        else:
+            unit = "°C" if field == "Temperature" else ("W/m³" if field == "Q" else "W/(m·K)")
             self.plotter.add_scalar_bar(
-                title=f"{field} [°C]" if field == "Temperature" else field,
+                title=f"{field} [{unit}]",
                 vertical=True
             )
         
+        # Axes
+        self.plotter.add_axes()
+        
         # Info text
+        info_text = f"Taglio {axis.upper()} = {pos:.2f} m | Opacità {opacity_pct}%"
         self.plotter.add_text(info_text, position='upper_left', font_size=10)
         
-        self.plotter.reset_camera()
+        if reset_camera:
+            self.plotter.reset_camera()
+        else:
+            self.plotter.render()
+    
+    def _render_geometry_view(self, opacity: float):
+        """
+        Render the analytic geometry view with proper colors and legend.
+        
+        Shows the 4 concentric zones:
+        - STORAGE: central zone with storage material (beige)
+        - INSULATION: thermal insulation (yellow)  
+        - STEEL: external shell (dark gray)
+        - TUBES and HEATERS: discrete elements inside storage
+        """
+        if self.battery_geometry is None:
+            self.plotter.add_text("Nessuna geometria - Costruisci prima la geometria", 
+                                  position='upper_left', font_size=12, color='red')
+            return
+        
+        geom = self.battery_geometry
+        cyl = geom.cylinder
+        
+        # Domain outline
+        domain = pv.Cube(
+            center=(self.mesh.Lx / 2, self.mesh.Ly / 2, self.mesh.Lz / 2),
+            x_length=self.mesh.Lx,
+            y_length=self.mesh.Ly,
+            z_length=self.mesh.Lz
+        )
+        self.plotter.add_mesh(domain.outline(), color='gray', line_width=1)
+        
+        z_center = cyl.base_z + cyl.height / 2
+        
+        # Zone colors - 4 zone semplificate
+        zone_info = [
+            (cyl.r_shell, cyl.r_insulation, "STEEL", [0.40, 0.40, 0.45]),
+            (cyl.r_insulation, cyl.r_storage, "INSULATION", [0.95, 0.85, 0.55]),
+            (cyl.r_storage, 0, "STORAGE", [0.85, 0.65, 0.45]),
+        ]
+        
+        legend_entries = []
+        
+        for r_outer, r_inner, name, color in zone_info:
+            if r_outer <= 0:
+                continue
+            cyl_mesh = pv.Cylinder(
+                center=(cyl.center_x, cyl.center_y, z_center),
+                direction=(0, 0, 1),
+                radius=float(r_outer),
+                height=float(cyl.height),
+                resolution=72
+            )
+            self.plotter.add_mesh(cyl_mesh, color=color, opacity=opacity * 0.7, 
+                                  show_edges=False)
+            legend_entries.append([name, color])
+        
+        # Add individual heater elements if discrete pattern (inside storage)
+        heater_elems = []
+        if geom.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
+            heater_elems = geom.heaters.generate_positions(
+                cyl.center_x, cyl.center_y,
+                0, cyl.r_storage * 0.9,
+                cyl.base_z, cyl.top_z,
+                phase_offset=cyl.phase_offset_rad
+            )
+            for htr in heater_elems:
+                h_center = (htr.x, htr.y, (htr.z_bottom + htr.z_top) / 2)
+                h_cyl = pv.Cylinder(
+                    center=h_center,
+                    direction=(0, 0, 1),
+                    radius=float(htr.radius),
+                    height=float(htr.z_top - htr.z_bottom),
+                    resolution=24
+                )
+                self.plotter.add_mesh(h_cyl, color=[0.95, 0.2, 0.1], opacity=0.9)
+            if heater_elems:
+                legend_entries.append(["HEATERS", [0.95, 0.2, 0.1]])
+        
+        # Add individual tube elements (inside storage)
+        tube_elems = geom.tubes.generate_positions(
+            cyl.center_x, cyl.center_y,
+            cyl.r_storage * 0.9,
+            cyl.base_z, cyl.top_z
+        )
+        for tube in tube_elems:
+            t_center = (tube.x, tube.y, (tube.z_bottom + tube.z_top) / 2)
+            t_cyl = pv.Cylinder(
+                center=t_center,
+                direction=(0, 0, 1),
+                radius=float(tube.radius),
+                height=float(tube.z_top - tube.z_bottom),
+                resolution=24
+            )
+            self.plotter.add_mesh(t_cyl, color=[0.3, 0.3, 0.8], opacity=0.8)
+        if tube_elems:
+            legend_entries.append(["TUBES", [0.3, 0.3, 0.8]])
+        
+        # Legend
+        if legend_entries:
+            self.plotter.add_legend(legend_entries, bcolor='white', 
+                                    face='rectangle', loc='upper right')
+        
+        # Axes
+        self.plotter.add_axes()
+        
+        # Info text
+        self.plotter.add_text(
+            f"Geometria Analitica (4 Zone)\n"
+            f"R_storage={cyl.r_storage:.2f}m, H={cyl.height:.2f}m\n"
+            f"Insulation: {cyl.insulation_thickness:.2f}m, Steel: {cyl.shell_thickness:.3f}m",
+            position='upper_left', font_size=10
+        )
+    
+    def _add_material_legend(self):
+        """Add legend for material visualization"""
+        material_names = {
+            0: "AIR", 1: "SAND", 2: "INSULATION", 3: "STEEL",
+            4: "TUBES", 5: "HEATERS", 6: "GROUND", 7: "CONCRETE"
+        }
+        legend_entries = []
+        unique_mats = np.unique(self.mesh.material_id)
+        for mat_id in sorted(unique_mats):
+            name = material_names.get(int(mat_id), f"ID={mat_id}")
+            legend_entries.append([name, self._get_material_color(int(mat_id))])
+        
+        if legend_entries:
+            self.plotter.add_legend(legend_entries, bcolor='white', 
+                                    face='rectangle', loc='upper right')
     
     def _get_material_color(self, mat_id: int):
         """Restituisce il colore per un materiale dato il suo ID"""
@@ -1676,64 +2456,6 @@ MESH:
             [0.55, 0.55, 0.55, 1.0],  # 7 CONCRETE - grigio
         ]
         return ListedColormap(colors, name='materials')
-    
-    def update_slice_range(self):
-        """Aggiorna il range dello slider quando cambia l'asse"""
-        self.update_slice_position()
-    
-    def update_slice_position(self):
-        """Aggiorna la posizione della sezione"""
-        if self.mesh is None:
-            return
-        
-        axis = self.axis_combo.currentText()
-        slider_pct = self.slice_slider.value() / 100.0
-        
-        if axis == 'x':
-            pos = slider_pct * self.mesh.Lx
-        elif axis == 'y':
-            pos = slider_pct * self.mesh.Ly
-        else:
-            pos = slider_pct * self.mesh.Lz
-        
-        self.slice_pos_label.setText(f"{pos:.2f} m")
-        
-        # Aggiorna la visualizzazione (anche prima della simulazione per vedere i materiali)
-        self.update_visualization()
-    
-    def show_slice(self, axis: str):
-        """Mostra una sezione specifica"""
-        self.axis_combo.setCurrentText(axis)
-        self.slice_slider.setValue(50)
-        self.update_visualization()
-    
-    def show_3d_view(self):
-        """Mostra la vista 3D completa"""
-        if self.mesh is None:
-            return
-        
-        self.plotter.clear()
-        
-        field = self.field_combo.currentText()
-        cmap = self.cmap_combo.currentText()
-        clim = [self.tmin_spin.value(), self.tmax_spin.value()]
-        
-        grid = pv.ImageData(
-            dimensions=(self.mesh.Nx + 1, self.mesh.Ny + 1, self.mesh.Nz + 1),
-            spacing=(self.mesh.dx, self.mesh.dy, self.mesh.dz),
-            origin=(0, 0, 0)
-        )
-        
-        grid.cell_data["Temperature"] = self.mesh.T.ravel(order='F')
-        grid.cell_data["Material"] = self.mesh.material_id.ravel(order='F').astype(float)
-        
-        # Clip per mostrare metà
-        clipped = grid.clip(normal='y', origin=(self.mesh.Lx/2, self.mesh.Ly/2, 0))
-        
-        self.plotter.add_mesh(clipped, scalars=field, cmap=cmap, clim=clim, opacity=0.8)
-        self.plotter.add_axes()
-        self.plotter.add_scalar_bar(title=f"{field}", vertical=True)
-        self.plotter.reset_camera()
     
     def reset_view(self):
         """Reset della vista"""
@@ -1830,7 +2552,7 @@ def main():
     # Stile
     app.setStyle("Fusion")
     
-    window = SandBatteryGUI()
+    window = ThermalBatteryGUI()
     window.show()
     
     sys.exit(app.exec())

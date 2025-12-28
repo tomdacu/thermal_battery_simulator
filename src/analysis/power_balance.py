@@ -71,7 +71,7 @@ class ExergyResult:
 
 class PowerBalanceAnalyzer:
     """
-    Analizzatore del bilancio energetico per la Sand Battery.
+    Analizzatore del bilancio energetico per la Thermal Battery.
     
     Calcola tutti i flussi di potenza attraverso i bordi e le sorgenti.
     """

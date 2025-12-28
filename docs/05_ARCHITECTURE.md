@@ -1,8 +1,8 @@
-# System Architecture - Sand Battery Thermal Simulation
+# System Architecture - Thermal Battery Simulation
 
 ## 1. Overview
 
-This document describes the software architecture of the Sand Battery simulation system. The project simulates 3D thermal behavior of a sand-based thermal energy storage system using the Finite Difference Method (FDM).
+This document describes the software architecture of the Thermal Battery simulation system. The project simulates 3D thermal behavior of a sand-based thermal energy storage system using the Finite Difference Method (FDM).
 
 ---
 

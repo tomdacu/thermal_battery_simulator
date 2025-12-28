@@ -1,7 +1,7 @@
 """
-GUI Module for Sand Battery Thermal Simulation
+GUI Module for Thermal Battery Simulation
 """
 
-from .main_window import SandBatteryGUI, main
+from .main_window import ThermalBatteryGUI, main
 
-__all__ = ['SandBatteryGUI', 'main']
+__all__ = ['ThermalBatteryGUI', 'main']

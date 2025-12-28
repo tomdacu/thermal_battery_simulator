@@ -40,6 +40,93 @@ from scipy import sparse
 from typing import Tuple, Optional
 from ..core.mesh import Mesh3D, BoundaryType
 
+# Flag per usare la versione ottimizzata
+USE_VECTORIZED = True
+
+# Prova a importare Numba per accelerazione
+try:
+    from numba import njit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+
+# =============================================================================
+# FUNZIONI NUMBA (se disponibile)
+# =============================================================================
+
+if HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _compute_harmonic_means_numba(k_P, k_W, k_E, k_S, k_N, k_D, k_U, eps):
+        """
+        Calcola le medie armoniche delle conducibilità alle interfacce.
+        Versione Numba parallelizzata.
+        """
+        N = len(k_P)
+        k_w = np.empty(N, dtype=np.float64)
+        k_e = np.empty(N, dtype=np.float64)
+        k_s = np.empty(N, dtype=np.float64)
+        k_n = np.empty(N, dtype=np.float64)
+        k_d = np.empty(N, dtype=np.float64)
+        k_u = np.empty(N, dtype=np.float64)
+        
+        for i in prange(N):
+            k_w[i] = 2 * k_P[i] * k_W[i] / (k_P[i] + k_W[i] + eps)
+            k_e[i] = 2 * k_P[i] * k_E[i] / (k_P[i] + k_E[i] + eps)
+            k_s[i] = 2 * k_P[i] * k_S[i] / (k_P[i] + k_S[i] + eps)
+            k_n[i] = 2 * k_P[i] * k_N[i] / (k_P[i] + k_N[i] + eps)
+            k_d[i] = 2 * k_P[i] * k_D[i] / (k_P[i] + k_D[i] + eps)
+            k_u[i] = 2 * k_P[i] * k_U[i] / (k_P[i] + k_U[i] + eps)
+        
+        return k_w, k_e, k_s, k_n, k_d, k_u
+    
+    @njit(parallel=True, cache=True)
+    def _compute_coefficients_numba(k_w, k_e, k_s, k_n, k_d, k_u, d2,
+                                     is_x_min, is_x_max, is_y_min, is_y_max,
+                                     is_z_min, is_z_max):
+        """
+        Calcola i coefficienti della matrice sparsa.
+        Versione Numba parallelizzata.
+        """
+        N = len(k_w)
+        a_W = np.empty(N, dtype=np.float64)
+        a_E = np.empty(N, dtype=np.float64)
+        a_S = np.empty(N, dtype=np.float64)
+        a_N = np.empty(N, dtype=np.float64)
+        a_D = np.empty(N, dtype=np.float64)
+        a_U = np.empty(N, dtype=np.float64)
+        a_P = np.empty(N, dtype=np.float64)
+        
+        for i in prange(N):
+            # Coefficienti base
+            aw = k_w[i] / d2 if not is_x_min[i] else 0.0
+            ae = k_e[i] / d2 if not is_x_max[i] else 0.0
+            as_ = k_s[i] / d2 if not is_y_min[i] else 0.0
+            an = k_n[i] / d2 if not is_y_max[i] else 0.0
+            ad = k_d[i] / d2 if not is_z_min[i] else 0.0
+            au = k_u[i] / d2 if not is_z_max[i] else 0.0
+            
+            a_W[i] = aw
+            a_E[i] = ae
+            a_S[i] = as_
+            a_N[i] = an
+            a_D[i] = ad
+            a_U[i] = au
+            a_P[i] = aw + ae + as_ + an + ad + au
+        
+        return a_W, a_E, a_S, a_N, a_D, a_U, a_P
+
+
+def _compute_harmonic_means_numpy(k_P, k_W, k_E, k_S, k_N, k_D, k_U, eps):
+    """Versione NumPy (fallback)"""
+    k_w = 2 * k_P * k_W / (k_P + k_W + eps)
+    k_e = 2 * k_P * k_E / (k_P + k_E + eps)
+    k_s = 2 * k_P * k_S / (k_P + k_S + eps)
+    k_n = 2 * k_P * k_N / (k_P + k_N + eps)
+    k_d = 2 * k_P * k_D / (k_P + k_D + eps)
+    k_u = 2 * k_P * k_U / (k_P + k_U + eps)
+    return k_w, k_e, k_s, k_n, k_d, k_u
+
 
 def build_steady_state_matrix(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarray]:
     """
@@ -50,9 +137,224 @@ def build_steady_state_matrix(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarr
     Per conduzione: -∇·(k∇T) = Q
     Discretizzazione: Σ k_face * (T_neighbor - T_P) / d² = Q_P
     
+    Usa la versione vettorizzata per performance ottimali.
+    
     Returns:
         A: Matrice sparsa CSR
         b: Vettore dei termini noti
+    """
+    if USE_VECTORIZED:
+        return _build_steady_state_matrix_vectorized(mesh)
+    else:
+        return _build_steady_state_matrix_loop(mesh)
+
+
+def _build_steady_state_matrix_vectorized(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarray]:
+    """
+    Versione vettorizzata della costruzione matrice - 10-50x più veloce.
+    
+    Usa NumPy broadcasting invece di loop Python.
+    """
+    Nx, Ny, Nz = mesh.Nx, mesh.Ny, mesh.Nz
+    N = mesh.N_total
+    
+    d = mesh.d
+    d2 = d * d
+    
+    # Flatten degli array in ordine Fortran per coerenza con mesh.ijk_to_linear
+    k_flat = mesh.k.ravel(order='F')
+    Q_flat = mesh.Q.ravel(order='F')
+    bc_type_flat = mesh.boundary_type.ravel(order='F')
+    bc_h_flat = mesh.bc_h.ravel(order='F')
+    bc_T_inf_flat = mesh.bc_T_inf.ravel(order='F')
+    
+    # Pre-calcola indici lineari per tutti i nodi
+    # p = i + j*Nx + k*Nx*Ny (Fortran order)
+    ii, jj, kk = np.meshgrid(np.arange(Nx), np.arange(Ny), np.arange(Nz), indexing='ij')
+    ii = ii.ravel(order='F')
+    jj = jj.ravel(order='F')
+    kk = kk.ravel(order='F')
+    p_all = ii + jj * Nx + kk * Nx * Ny
+    
+    # Indici dei vicini (con clipping per evitare out-of-bounds)
+    p_W = np.clip(ii - 1, 0, Nx - 1) + jj * Nx + kk * Nx * Ny
+    p_E = np.clip(ii + 1, 0, Nx - 1) + jj * Nx + kk * Nx * Ny
+    p_S = ii + np.clip(jj - 1, 0, Ny - 1) * Nx + kk * Nx * Ny
+    p_N = ii + np.clip(jj + 1, 0, Ny - 1) * Nx + kk * Nx * Ny
+    p_D = ii + jj * Nx + np.clip(kk - 1, 0, Nz - 1) * Nx * Ny
+    p_U = ii + jj * Nx + np.clip(kk + 1, 0, Nz - 1) * Nx * Ny
+    
+    # Maschera per bordi
+    is_x_min = (ii == 0)
+    is_x_max = (ii == Nx - 1)
+    is_y_min = (jj == 0)
+    is_y_max = (jj == Ny - 1)
+    is_z_min = (kk == 0)
+    is_z_max = (kk == Nz - 1)
+    
+    # Conducibilità ai vicini
+    k_P = k_flat[p_all]
+    k_W = k_flat[p_W]
+    k_E = k_flat[p_E]
+    k_S = k_flat[p_S]
+    k_N = k_flat[p_N]
+    k_D = k_flat[p_D]
+    k_U = k_flat[p_U]
+    
+    # Media armonica per conducibilità interfaccia
+    eps = 1e-20  # Evita divisione per zero
+    
+    # Usa Numba se disponibile e mesh grande (>50k celle)
+    USE_NUMBA_HERE = HAS_NUMBA and N > 50000
+    
+    if USE_NUMBA_HERE:
+        # Versione Numba parallelizzata
+        k_w, k_e, k_s, k_n, k_d, k_u = _compute_harmonic_means_numba(
+            k_P, k_W, k_E, k_S, k_N, k_D, k_U, eps
+        )
+        a_W, a_E, a_S, a_N, a_D, a_U, a_P = _compute_coefficients_numba(
+            k_w, k_e, k_s, k_n, k_d, k_u, d2,
+            is_x_min, is_x_max, is_y_min, is_y_max, is_z_min, is_z_max
+        )
+    else:
+        # Versione NumPy vettorizzata
+        k_w, k_e, k_s, k_n, k_d, k_u = _compute_harmonic_means_numpy(
+            k_P, k_W, k_E, k_S, k_N, k_D, k_U, eps
+        )
+        
+        # Coefficienti base (W/(m³·K))
+        a_W = k_w / d2
+        a_E = k_e / d2
+        a_S = k_s / d2
+        a_N = k_n / d2
+        a_D = k_d / d2
+        a_U = k_u / d2
+        
+        # Azzera coefficienti per bordi (non ci sono vicini)
+        a_W[is_x_min] = 0
+        a_E[is_x_max] = 0
+        a_S[is_y_min] = 0
+        a_N[is_y_max] = 0
+        a_D[is_z_min] = 0
+        a_U[is_z_max] = 0
+        
+        # Coefficiente diagonale base
+        a_P = a_W + a_E + a_S + a_N + a_D + a_U
+    
+    # RHS base (sorgente)
+    b = Q_flat.copy()
+    
+    # === CONDIZIONI AL CONTORNO ===
+    
+    # Dirichlet: T = T_inf
+    is_dirichlet = (bc_type_flat == BoundaryType.DIRICHLET)
+    
+    # Convezione ai bordi: aggiungi contributo h*(T_inf - T)
+    # Coefficiente effettivo: 2*k*h/(2*k + h*d) / d
+    h_bc = bc_h_flat
+    T_inf_bc = bc_T_inf_flat
+    
+    # Calcola contributi convettivi per ogni bordo
+    def add_convection_at_boundary(mask, h, T_inf, k_local):
+        """Aggiunge contributo convettivo per celle al bordo."""
+        valid = mask & (h > 0)
+        a_conv = np.zeros(N)
+        b_conv = np.zeros(N)
+        
+        # Coefficiente Robin: 2*k*h / (2*k + h*d) / d
+        denom = 2 * k_local[valid] + h[valid] * d + eps
+        a_conv[valid] = 2 * k_local[valid] * h[valid] / denom / d
+        b_conv[valid] = a_conv[valid] * T_inf[valid]
+        
+        return a_conv, b_conv
+    
+    # Aggiungi convezione a tutti i bordi
+    for mask in [is_x_min, is_x_max, is_y_min, is_y_max, is_z_min, is_z_max]:
+        a_conv, b_conv = add_convection_at_boundary(mask, h_bc, T_inf_bc, k_P)
+        a_P += a_conv
+        b += b_conv
+    
+    # Gestione nodi Dirichlet (T = T_inf fissata)
+    a_P[is_dirichlet] = 1.0
+    a_W[is_dirichlet] = 0
+    a_E[is_dirichlet] = 0
+    a_S[is_dirichlet] = 0
+    a_N[is_dirichlet] = 0
+    a_D[is_dirichlet] = 0
+    a_U[is_dirichlet] = 0
+    b[is_dirichlet] = T_inf_bc[is_dirichlet]
+    
+    # Gestione nodi interni con convezione (es. tubi)
+    # Questi hanno bc_type = CONVECTION ma non sono sul bordo del dominio
+    is_internal_conv = (bc_type_flat == BoundaryType.CONVECTION) & ~(
+        is_x_min | is_x_max | is_y_min | is_y_max | is_z_min | is_z_max
+    )
+    valid_internal_conv = is_internal_conv & (h_bc > 0)
+    
+    # Aggiungi scambio verso T_inf: a_conv = h/d
+    a_conv_internal = np.zeros(N)
+    a_conv_internal[valid_internal_conv] = h_bc[valid_internal_conv] / d
+    a_P += a_conv_internal
+    b[valid_internal_conv] += a_conv_internal[valid_internal_conv] * T_inf_bc[valid_internal_conv]
+    
+    # === COSTRUZIONE MATRICE SPARSA ===
+    
+    # Costruisci liste per COO format
+    # Diagonale principale
+    row_list = [p_all]
+    col_list = [p_all]
+    data_list = [a_P]
+    
+    # Vicino West (solo se non al bordo x_min)
+    valid = ~is_x_min
+    row_list.append(p_all[valid])
+    col_list.append(p_W[valid])
+    data_list.append(-a_W[valid])
+    
+    # Vicino East
+    valid = ~is_x_max
+    row_list.append(p_all[valid])
+    col_list.append(p_E[valid])
+    data_list.append(-a_E[valid])
+    
+    # Vicino South
+    valid = ~is_y_min
+    row_list.append(p_all[valid])
+    col_list.append(p_S[valid])
+    data_list.append(-a_S[valid])
+    
+    # Vicino North
+    valid = ~is_y_max
+    row_list.append(p_all[valid])
+    col_list.append(p_N[valid])
+    data_list.append(-a_N[valid])
+    
+    # Vicino Down
+    valid = ~is_z_min
+    row_list.append(p_all[valid])
+    col_list.append(p_D[valid])
+    data_list.append(-a_D[valid])
+    
+    # Vicino Up
+    valid = ~is_z_max
+    row_list.append(p_all[valid])
+    col_list.append(p_U[valid])
+    data_list.append(-a_U[valid])
+    
+    # Concatena e costruisci matrice
+    rows = np.concatenate(row_list)
+    cols = np.concatenate(col_list)
+    data = np.concatenate(data_list)
+    
+    A = sparse.coo_matrix((data, (rows, cols)), shape=(N, N))
+    A = A.tocsr()
+    
+    return A, b
+
+
+def _build_steady_state_matrix_loop(mesh: Mesh3D) -> Tuple[sparse.csr_matrix, np.ndarray]:
+    """
+    Versione originale con loop Python (più lenta, mantenuta per riferimento).
     """
     Nx, Ny, Nz = mesh.Nx, mesh.Ny, mesh.Nz
     N = mesh.N_total
@@ -460,74 +762,6 @@ def build_transient_matrix(mesh: Mesh3D, dt: float, theta: float = 1.0
     B = M - (1 - theta) * L
     
     return A.tocsr(), B.tocsr()
-
-
-# =============================================================================
-# VERSIONE OTTIMIZZATA CON NUMBA (opzionale)
-# =============================================================================
-
-try:
-    from numba import jit, prange
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-
-if NUMBA_AVAILABLE:
-    @jit(nopython=True, parallel=True)
-    def _compute_coefficients_numba(k_field, Nx, Ny, Nz, d2):
-        """
-        Versione Numba per calcolo parallelo dei coefficienti.
-        
-        Restituisce array di coefficienti per tutti i nodi.
-        """
-        N = Nx * Ny * Nz
-        
-        # Array per coefficienti (7 per nodo: P, E, W, N, S, U, D)
-        coeffs = np.zeros((N, 7), dtype=np.float64)
-        
-        for p in prange(N):
-            # Converti a indici 3D (uso kz per evitare confusione con k_field)
-            kz = p // (Nx * Ny)
-            remainder = p % (Nx * Ny)
-            j = remainder // Nx
-            i = remainder % Nx
-            
-            k_P = k_field[i, j, kz]
-            
-            # Evita divisione per zero se k_P è troppo piccolo
-            if k_P < 1e-10:
-                k_P = 1e-10
-            
-            # Conducibilità vicini (con clamp ai bordi)
-            k_E = k_field[min(i+1, Nx-1), j, kz]
-            k_W = k_field[max(i-1, 0), j, kz]
-            k_N = k_field[i, min(j+1, Ny-1), kz]
-            k_S = k_field[i, max(j-1, 0), kz]
-            k_U = k_field[i, j, min(kz+1, Nz-1)]
-            k_D = k_field[i, j, max(kz-1, 0)]
-            
-            # Media armonica
-            k_e = 2 * k_P * k_E / (k_P + k_E) if (k_P + k_E) > 0 else 0
-            k_w = 2 * k_P * k_W / (k_P + k_W) if (k_P + k_W) > 0 else 0
-            k_n = 2 * k_P * k_N / (k_P + k_N) if (k_P + k_N) > 0 else 0
-            k_s = 2 * k_P * k_S / (k_P + k_S) if (k_P + k_S) > 0 else 0
-            k_u = 2 * k_P * k_U / (k_P + k_U) if (k_P + k_U) > 0 else 0
-            k_d = 2 * k_P * k_D / (k_P + k_D) if (k_P + k_D) > 0 else 0
-            
-            # Coefficienti normalizzati
-            coeffs[p, 1] = -k_e / k_P  # E
-            coeffs[p, 2] = -k_w / k_P  # W
-            coeffs[p, 3] = -k_n / k_P  # N
-            coeffs[p, 4] = -k_s / k_P  # S
-            coeffs[p, 5] = -k_u / k_P  # U
-            coeffs[p, 6] = -k_d / k_P  # D
-            
-            # Diagonale
-            coeffs[p, 0] = -(coeffs[p, 1] + coeffs[p, 2] + coeffs[p, 3] + 
-                            coeffs[p, 4] + coeffs[p, 5] + coeffs[p, 6])
-        
-        return coeffs
 
 
 # =============================================================================
