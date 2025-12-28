@@ -1,254 +1,257 @@
-# Teoria dello Scambio Termico - Thermal Battery Simulation
+# Heat Transfer Theory - Thermal Battery Simulation
 
-## 1. Obiettivi della Simulazione
+## 1. Simulation Objectives
 
-La simulazione mira a prevedere la distribuzione spaziale della temperatura all'interno di un accumulatore termico a sabbia. Questo permette di:
-- Identificare zone di ristagno termico o perdite eccessive.
-- Calcolare la capacità energetica reale basata sulla distribuzione di temperatura non uniforme.
-- Valutare l'efficacia dei sistemi di estrazione (tubi) e riscaldamento (resistenze).
+The simulation aims to predict the spatial temperature distribution inside a thermal energy storage system. This enables:
+- Identification of thermal stagnation zones or excessive heat losses.
+- Calculation of actual energy capacity based on non-uniform temperature distribution.
+- Evaluation of the effectiveness of heat extraction (tubes) and heating (resistors) systems.
 
 ---
 
-## 2. Equazioni Fondamentali
+## 2. Fundamental Equations
 
-### 2.1 Equazione del Calore (Generale)
+### 2.1 General Heat Equation
 
-L'equazione che governa la distribuzione della temperatura in un solido è:
+The equation governing temperature distribution in a solid is:
 
 $$\rho c_p \frac{\partial T}{\partial t} = \nabla \cdot (k \nabla T) + Q$$
 
-Dove:
-- $\rho$ = densità del materiale [kg/m³]
-- $c_p$ = calore specifico a pressione costante [J/(kg·K)]
-- $T$ = temperatura [K o °C]
-- $t$ = tempo [s]
-- $k$ = conducibilità termica [W/(m·K)]
-- $Q$ = sorgente/pozzo di calore volumetrica [W/m³]
+Where:
+- $\rho$ = material density [kg/m³]
+- $c_p$ = specific heat at constant pressure [J/(kg·K)]
+- $T$ = temperature [K or °C]
+- $t$ = time [s]
+- $k$ = thermal conductivity [W/(m·K)]
+- $Q$ = volumetric heat source/sink [W/m³]
 
-### 1.2 Caso Stazionario
+### 2.2 Steady-State Case
 
-Quando $\frac{\partial T}{\partial t} = 0$:
+When $\frac{\partial T}{\partial t} = 0$:
 
 $$\nabla \cdot (k \nabla T) + Q = 0$$
 
-Per conducibilità costante:
+For constant conductivity:
 
 $$k \nabla^2 T + Q = 0$$
 
 ---
 
-## 2. Meccanismi di Trasferimento del Calore
+## 3. Heat Transfer Mechanisms
 
-### 2.1 Conduzione (Legge di Fourier)
+### 3.1 Conduction (Fourier's Law)
 
-Il flusso di calore per conduzione è:
+The heat flux by conduction is:
 
 $$\vec{q} = -k \nabla T$$
 
-In forma scalare unidimensionale:
+In one-dimensional scalar form:
 
 $$q = -k \frac{dT}{dx}$$
 
-### 2.2 Convezione (Legge di Newton)
+### 3.2 Convection (Newton's Law)
 
-Il flusso di calore per convezione tra una superficie e un fluido:
+The heat flux by convection between a surface and a fluid:
 
 $$q = h (T_s - T_\infty)$$
 
-Dove:
-- $h$ = coefficiente di scambio termico convettivo [W/(m²·K)]
-- $T_s$ = temperatura della superficie
-- $T_\infty$ = temperatura del fluido lontano dalla superficie
+Where:
+- $h$ = convective heat transfer coefficient [W/(m²·K)]
+- $T_s$ = surface temperature
+- $T_\infty$ = fluid temperature far from the surface
 
-**Valori tipici di h:**
-| Condizione | h [W/(m²·K)] |
-|------------|--------------|
-| Convezione naturale aria | 5-25 |
-| Convezione forzata aria | 25-250 |
-| Convezione naturale acqua | 100-900 |
-| Convezione forzata acqua | 50-20.000 |
+**Typical values of h:**
+| Condition | h [W/(m²·K)] |
+|-----------|--------------|
+| Natural convection in air | 5-25 |
+| Forced convection in air | 25-250 |
+| Natural convection in water | 100-900 |
+| Forced convection in water | 50-20,000 |
 
-### 2.3 Irraggiamento (Legge di Stefan-Boltzmann)
+### 3.3 Radiation (Stefan-Boltzmann Law)
 
 $$q = \epsilon \sigma (T_s^4 - T_{surr}^4)$$
 
-Dove:
-- $\epsilon$ = emissività della superficie (0-1)
+Where:
+- $\epsilon$ = surface emissivity (0-1)
 - $\sigma$ = 5.67 × 10⁻⁸ W/(m²·K⁴)
 
-**Nota:** Per le temperature tipiche della Thermal Battery (< 600°C), l'irraggiamento 
-è significativo ma spesso linearizzato o incluso nel coefficiente h effettivo.
+**Note:** For typical Thermal Battery temperatures (< 600°C), radiation 
+is significant but often linearized or included in an effective h coefficient.
 
 ---
 
-## 3. Resistenze Termiche
+## 4. Thermal Resistances
 
-### 3.1 Analogia Elettrica
+### 4.1 Electrical Analogy
 
-Come in un circuito elettrico:
-- Temperatura ↔ Tensione
-- Flusso termico ↔ Corrente
-- Resistenza termica ↔ Resistenza elettrica
+Like in an electrical circuit:
+- Temperature ↔ Voltage
+- Heat flux ↔ Current
+- Thermal resistance ↔ Electrical resistance
 
 $$q = \frac{\Delta T}{R_{th}}$$
 
-### 3.2 Resistenze in Serie
+### 4.2 Resistances in Series
 
 $$R_{tot} = R_1 + R_2 + R_3 + ...$$
 
-### 3.3 Tipi di Resistenza Termica
+### 4.3 Types of Thermal Resistance
 
-**Conduzione (parete piana):**
+**Conduction (flat wall):**
 $$R_{cond} = \frac{L}{k \cdot A}$$
 
-**Conduzione (cilindro):**
+**Conduction (cylinder):**
 $$R_{cond,cyl} = \frac{\ln(r_2/r_1)}{2\pi k L}$$
 
-**Convezione:**
+**Convection:**
 $$R_{conv} = \frac{1}{h \cdot A}$$
 
 ---
 
-## 4. Scambio Termico in Materiali Porosi
+## 5. Heat Transfer in Porous Materials
 
-### 4.1 Conducibilità Termica Effettiva
+### 5.1 Effective Thermal Conductivity
 
-Per la sabbia con aria nei pori, la conducibilità effettiva può essere stimata:
+For sand with air in the pores, the effective conductivity can be estimated:
 
-**Modello parallelo (limite superiore):**
-$$k_{eff,\parallel} = \phi \cdot k_{fluido} + (1-\phi) \cdot k_{solido}$$
+**Parallel model (upper bound):**
+$$k_{eff,\parallel} = \phi \cdot k_{fluid} + (1-\phi) \cdot k_{solid}$$
 
-**Modello serie (limite inferiore):**
-$$\frac{1}{k_{eff,serie}} = \frac{\phi}{k_{fluido}} + \frac{1-\phi}{k_{solido}}$$
+**Series model (lower bound):**
+$$\frac{1}{k_{eff,series}} = \frac{\phi}{k_{fluid}} + \frac{1-\phi}{k_{solid}}$$
 
-**Media geometrica (buona approssimazione):**
-$$k_{eff} = k_{solido}^{(1-\phi)} \cdot k_{fluido}^{\phi}$$
+**Geometric mean (good approximation):**
+$$k_{eff} = k_{solid}^{(1-\phi)} \cdot k_{fluid}^{\phi}$$
 
-Dove $\phi$ = porosità (frazione di vuoti)
+Where $\phi$ = porosity (void fraction)
 
-### 4.2 Capacità Termica Effettiva
+### 5.2 Effective Thermal Capacity
 
-$$(\rho c_p)_{eff} = \phi \cdot (\rho c_p)_{fluido} + (1-\phi) \cdot (\rho c_p)_{solido}$$
+$$(\rho c_p)_{eff} = \phi \cdot (\rho c_p)_{fluid} + (1-\phi) \cdot (\rho c_p)_{solid}$$
 
 ---
 
-## 5. Condizioni al Contorno
+## 6. Boundary Conditions
 
-### 5.1 Dirichlet (Temperatura Imposta)
+### 6.1 Dirichlet (Prescribed Temperature)
 
-$$T|_{\Gamma} = T_{prescritta}$$
+$$T|_{\Gamma} = T_{prescribed}$$
 
-Esempio: Base della batteria a contatto con terreno a temperatura costante.
+Example: Battery base in contact with ground at constant temperature.
 
-### 5.2 Neumann (Flusso Imposto)
+### 6.2 Neumann (Prescribed Flux)
 
-$$-k \frac{\partial T}{\partial n}\bigg|_{\Gamma} = q_{prescritta}$$
+$$-k \frac{\partial T}{\partial n}\bigg|_{\Gamma} = q_{prescribed}$$
 
-Esempio: Superficie adiabatica (q = 0) per simmetria.
+Example: Adiabatic surface (q = 0) for symmetry.
 
-### 5.3 Robin (Convezione)
+### 6.3 Robin (Convection)
 
 $$-k \frac{\partial T}{\partial n}\bigg|_{\Gamma} = h(T_s - T_\infty)$$
 
-Esempio: Superficie esterna a contatto con aria ambiente.
+Example: External surface in contact with ambient air.
 
 ---
 
-## 6. Adimensionalizzazione e Numeri Caratteristici
+## 7. Dimensionless Numbers
 
-### 6.1 Numero di Biot
+### 7.1 Biot Number
 
 $$Bi = \frac{h \cdot L_c}{k}$$
 
-- $Bi << 1$: Temperatura uniforme nel solido (lumped capacitance)
-- $Bi >> 1$: Gradienti significativi nel solido
+- $Bi << 1$: Uniform temperature in the solid (lumped capacitance)
+- $Bi >> 1$: Significant gradients in the solid
 
-### 6.2 Numero di Fourier
+### 7.2 Fourier Number
 
 $$Fo = \frac{\alpha \cdot t}{L_c^2}$$
 
-Dove $\alpha = k/(\rho c_p)$ = diffusività termica [m²/s]
+Where $\alpha = k/(\rho c_p)$ = thermal diffusivity [m²/s]
 
-- Indica quanto il sistema è "vicino" all'equilibrio termico
+- Indicates how "close" the system is to thermal equilibrium
 
 ---
 
-## 7. Applicazione alla Thermal Battery
+## 8. Application to the Thermal Battery
 
-### 7.1 Architettura della Batteria
+### 8.1 Battery Architecture
 
-La batteria è modellata come un cilindro verticale composto da diverse zone radiali concentriche:
+The battery is modeled as a vertical cylinder composed of different concentric radial zones:
 
-1.  **Zona Tubi Centrali**: Area dedicata agli scambiatori di calore per l'estrazione dell'energia.
-2.  **Sabbia Interna**: Primo strato di accumulo termico.
-3.  **Zona Resistenze**: Area dove sono posizionati gli elementi riscaldanti elettrici.
-4.  **Sabbia Esterna**: Secondo strato di accumulo termico.
-5.  **Isolamento**: Strato di materiale a bassa conducibilità (es. lana di roccia) per minimizzare le perdite.
-6.  **Guscio**: Rivestimento esterno in acciaio per protezione strutturale.
+1.  **STORAGE Zone**: Central area containing the thermal storage material with embedded tubes and heaters.
+2.  **INSULATION Zone**: Layer of low-conductivity material (e.g., rock wool) to minimize losses.
+3.  **STEEL Zone**: External steel shell for structural protection.
+4.  **AIR Zone**: External air (outside the shell).
 
-### 7.2 Bilancio Energetico Globale
+Additionally, the geometry includes:
+- **Insulation slabs** at top and bottom for vertical thermal protection.
+- **Optional conical roof** for realistic geometry modeling.
+- **Phase offset** between tubes and heaters to avoid overlapping.
 
-**Stato di carica:**
+### 8.2 Global Energy Balance
+
+**Charging state:**
 $$\dot{E}_{in} = \dot{E}_{stored} + \dot{E}_{losses}$$
 
-$$P_{resistenze} = \frac{d}{dt}(m \cdot c_p \cdot \bar{T}) + P_{dispersione}$$
+$$P_{heaters} = \frac{d}{dt}(m \cdot c_p \cdot \bar{T}) + P_{dispersion}$$
 
-**Stato di scarica:**
+**Discharging state:**
 $$\dot{E}_{stored} = \dot{E}_{out} + \dot{E}_{losses}$$
 
-$$\frac{d}{dt}(m \cdot c_p \cdot \bar{T}) = P_{tubi} + P_{dispersione}$$
+$$\frac{d}{dt}(m \cdot c_p \cdot \bar{T}) = P_{tubes} + P_{dispersion}$$
 
-### 7.3 Potenza delle Resistenze
+### 8.3 Heater Power
 
-La potenza termica generata per unità di volume ($Q$) è distribuita nella zona delle resistenze:
+The thermal power generated per unit volume ($Q$) is distributed in the heater zone:
 
-$$P_{res} = \sum_i Q_i \cdot V_i$$
+$$P_{heaters} = \sum_i Q_i \cdot V_i$$
 
-Dove $V_i$ è il volume della cella i-esima appartenente alla zona riscaldante.
+Where $V_i$ is the volume of cell i belonging to the heating zone.
 
-### 7.4 Potenza Estratta dai Tubi
+### 8.4 Power Extracted by Tubes
 
-Lo scambio termico con il fluido nei tubi è modellato tramite una condizione di convezione interna:
+Heat exchange with the fluid in tubes is modeled through an internal convection condition:
 
-$$q_{tubi} = h_{fluido} (T_{parete} - T_{fluido})$$
+$$q_{tubes} = h_{fluid} (T_{wall} - T_{fluid})$$
 
-### 7.5 Potenza Dispersa
+### 8.5 Heat Losses
 
-La dispersione verso l'ambiente avviene per convezione sulle superfici esterne:
+Dispersion to the environment occurs by convection on external surfaces:
 
 $$P_{disp} = \oint h(T_s - T_\infty) \, dA$$
 
-E per conduzione verso il terreno alla base:
+And by conduction toward the ground at the base:
 
 $$q_{base} = -k \frac{\partial T}{\partial z}\bigg|_{z=0}$$
 
 ---
 
-## 8. Analisi Exergetica (Cenni)
+## 9. Exergy Analysis (Overview)
 
-### 8.1 Exergia Termica
+### 9.1 Thermal Exergy
 
-L'exergia associata a un flusso di calore Q a temperatura T:
+The exergy associated with a heat flow Q at temperature T:
 
 $$\dot{Ex} = \dot{Q} \cdot \left(1 - \frac{T_0}{T}\right)$$
 
-Dove $T_0$ = temperatura di riferimento (ambiente)
+Where $T_0$ = reference temperature (ambient)
 
-### 8.2 Exergia Immagazzinata
+### 9.2 Stored Exergy
 
 $$Ex_{stored} = m \cdot c_p \cdot \left[(T - T_0) - T_0 \cdot \ln\left(\frac{T}{T_0}\right)\right]$$
 
-### 8.3 Distruzione di Exergia
+### 9.3 Exergy Destruction
 
-Per un sistema con temperature $T_1$ e $T_2$ che scambia calore Q:
+For a system with temperatures $T_1$ and $T_2$ exchanging heat Q:
 
-$$\dot{Ex}_{distr} = T_0 \cdot \dot{Q} \cdot \left(\frac{1}{T_2} - \frac{1}{T_1}\right)$$
+$$\dot{Ex}_{destr} = T_0 \cdot \dot{Q} \cdot \left(\frac{1}{T_2} - \frac{1}{T_1}\right)$$
 
 ---
 
-## 9. Riferimenti
+## 10. References
 
 1. Incropera, F.P., DeWitt, D.P. - "Fundamentals of Heat and Mass Transfer"
 2. Çengel, Y.A. - "Heat Transfer: A Practical Approach"
-3. Bejan, A. - "Advanced Engineering Thermodynamics" (per exergia)
+3. Bejan, A. - "Advanced Engineering Thermodynamics" (for exergy)
 4. Kaviany, M. - "Principles of Heat Transfer in Porous Media"

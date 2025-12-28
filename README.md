@@ -1,154 +1,408 @@
-# Thermal Battery Simulator 3D
+# 🔋 Thermal Battery Simulator 3D
 
-## Obiettivi del Progetto
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 
-Il **Thermal Battery Simulator** è un software avanzato per la progettazione e l'analisi di sistemi di accumulo termico a sabbia (Sand Batteries). L'obiettivo principale è fornire uno strumento flessibile e interattivo che permetta di:
+A comprehensive 3D thermal simulation tool for designing and analyzing **thermal energy storage systems** (also known as "Sand Batteries"). This software enables engineers and researchers to visualize temperature distributions, optimize insulation design, and evaluate energy storage performance.
 
-1.  **Configurare Geometrie Complesse**: Definire dimensioni, strati isolanti e posizionamento di scambiatori e riscaldatori.
-2.  **Simulare Scenari Operativi**: Analizzare il comportamento termico in regime stazionario (e futuro transitorio) variando potenze e temperature.
-3.  **Ottimizzare il Design**: Valutare l'impatto di diversi materiali e configurazioni sull'efficienza energetica e sulle perdite termiche.
-4.  **Accessibilità**: Rendere la simulazione numerica complessa accessibile tramite un'interfaccia grafica (GUI) intuitiva, eliminando la necessità di modificare il codice per ogni test.
+![Thermal Battery Visualization](photo/screenshot.png)
 
-## Funzionamento
+---
 
-Il sistema si basa su un motore di calcolo a **Differenze Finite (FDM)** che risolve l'equazione del calore in un dominio 3D. A differenza di modelli statici, questo simulatore permette di:
-- Scegliere i materiali da un database integrato.
-- Configurare le condizioni al contorno (aria, terreno, fluidi) direttamente dalla GUI.
-- Visualizzare i risultati in tempo reale con strumenti di slicing 3D.
+## 📋 Table of Contents
 
-## Struttura della Documentazione
+- [Features](#-features)
+- [Project Goals](#-project-goals)
+- [Architecture Overview](#-architecture-overview)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [User Guide](#-user-guide)
+- [Performance Optimization](#-performance-optimization)
+- [Documentation](#-documentation)
+- [Project Structure](#-project-structure)
+- [Requirements](#-requirements)
+- [Contributing](#-contributing)
+- [License](#-license)
 
-Per approfondire il funzionamento del programma, consulta i file nella cartella `docs/`:
+---
 
-1.  [01_THEORY.md](docs/01_THEORY.md): Fondamenti fisici ed equazioni del calore.
-2.  [02_FDM_DISCRETIZATION.md](docs/02_FDM_DISCRETIZATION.md): Dettagli sulla discretizzazione FDM e indicizzazione.
-3.  [03_GEOMETRY.md](docs/03_GEOMETRY.md): Modello geometrico e mapping sulla mesh.
-4.  [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md): Struttura e design della GUI.
+## ✨ Features
 
-## Installazione
+### Core Simulation
+- **3D Finite Difference Method (FDM)** solver for heat equation
+- **Steady-state analysis** with future transient support planned
+- **Multiple solver methods**: Direct (LU), CG, BiCGSTAB, GMRES
+- **Preconditioners**: Jacobi, ILU, AMG (PyAMG)
+- **Vectorized matrix builder** for 10-50x faster assembly
+
+### Geometry Modeling
+- **4-zone concentric cylinder**: Storage, Insulation, Steel Shell, Air
+- **Vertical insulation slabs**: Top and bottom thermal protection
+- **Optional conical roof** for realistic industrial designs
+- **Flexible heater patterns**: Uniform, Grid, Radial, Spiral, Custom
+- **Heat exchanger tubes**: Various patterns with internal convection BC
+
+### Materials & Physics
+- **Built-in material database**: Steatite, silica sand, rock wool, glass wool, etc.
+- **Packing fraction adjustment** for porous media
+- **Convection, conduction, and Dirichlet boundary conditions**
+- **Energy balance calculations** with loss analysis
+
+### Visualization
+- **Interactive 3D visualization** with PyVista
+- **Slice planes** (X, Y, Z) for internal inspection
+- **Volume rendering** and isosurfaces
+- **Real-time updates** during parameter changes
+
+### User Interface
+- **Intuitive PyQt6 GUI** - no code modification needed
+- **Threaded simulation** - responsive UI during computation
+- **Export options**: CSV, VTK for ParaView
+
+---
+
+## 🎯 Project Goals
+
+The **Thermal Battery Simulator** is designed to:
+
+1. **Configure Complex Geometries**: Define dimensions, insulation layers, and placement of heat exchangers and heaters.
+
+2. **Simulate Operating Scenarios**: Analyze thermal behavior in steady-state (and future transient) conditions by varying power and temperatures.
+
+3. **Optimize Design**: Evaluate the impact of different materials and configurations on energy efficiency and thermal losses.
+
+4. **Accessibility**: Make complex numerical simulation accessible through an intuitive graphical interface, eliminating the need to modify code for each test.
+
+---
+
+## 🏗️ Architecture Overview
+
+The system follows a **GUI-driven design** where all simulation parameters originate from the user interface:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        GUI (PyQt6)                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │  Geometry    │  │  Materials   │  │   Solver     │           │
+│  │  - radius    │  │  - storage   │  │  - method    │           │
+│  │  - height    │  │  - insulation│  │  - tolerance │           │
+│  │  - slabs     │  │  - packing % │  │  - threads   │           │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
+└─────────┼──────────────────┼──────────────────┼─────────────────┘
+          │                  │                  │
+          ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    BatteryGeometry                               │
+│         (Dataclass combining all configuration)                  │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         Mesh3D                                   │
+│            3D arrays: T, k, ρ, cp, Q, boundaries                │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    SteadyStateSolver                             │
+│                    Solves A·T = b                                │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│               3D Temperature Field + Analysis                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 💻 Installation
+
+### Prerequisites
+- Python 3.10 or higher
+- Git (optional, for cloning)
+
+### Step-by-step Installation
 
 ```bash
-# 1. Clonare il repository
+# 1. Clone the repository
 git clone https://github.com/PhyTom/Thermal_battery_simulator.git
 cd Thermal_battery_simulator
 
-# 2. Creare ambiente virtuale
+# 2. Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-.venv\Scripts\activate     # Windows
 
-# 3. Installare dipendenze
+# 3. Activate virtual environment
+# On Windows:
+.venv\Scripts\activate
+# On Linux/Mac:
+source .venv/bin/activate
+
+# 4. Install dependencies
 pip install -r requirements.txt
 ```
 
-## Avvio Rapido
+### Optional: PyAMG for AMG Preconditioner
+```bash
+pip install pyamg
+```
 
-Per avviare l'interfaccia grafica:
+---
+
+## 🚀 Quick Start
+
+### Launch the GUI
 ```bash
 python run_gui.py
 ```
 
-Per eseguire una simulazione di test via script:
-```bash
-python main.py
+### Basic Workflow
+
+1. **Configure Geometry** (Geometry tab)
+   - Set domain dimensions (Lx, Ly, Lz)
+   - Define battery radius and height
+   - Configure insulation thickness
+
+2. **Set Heaters** (Heaters tab)
+   - Total power [kW]
+   - Distribution pattern
+   - Number of elements
+
+3. **Configure Tubes** (Tubes tab) - Optional
+   - Enable/disable heat extraction
+   - Fluid temperature and convection coefficient
+
+4. **Build Mesh**
+   - Click "Build Mesh" button
+   - Mesh preview appears in 3D view
+
+5. **Run Simulation**
+   - Click "Run Simulation"
+   - View temperature distribution
+   - Analyze energy balance
+
+---
+
+## 📖 User Guide
+
+### Geometry Configuration
+
+The battery uses a **4-zone concentric structure**:
+
+| Zone | Description | Typical Material |
+|------|-------------|------------------|
+| **STORAGE** | Central thermal mass | Steatite, Sand |
+| **INSULATION** | Thermal barrier | Rock wool |
+| **STEEL** | Structural shell | Carbon steel |
+| **AIR** | External environment | Air |
+
+**Key Parameters:**
+- `r_storage`: Radius of storage zone [m]
+- `insulation_thickness`: Insulation layer [m]
+- `shell_thickness`: Steel shell [m]
+- `height`: Total battery height [m]
+
+### Heater Patterns
+
+| Pattern | Description | Best For |
+|---------|-------------|----------|
+| **Uniform** | Distributed throughout volume | Simple analysis |
+| **Grid** | Rectangular array | Regular layouts |
+| **Radial** | Concentric rings | Cylindrical symmetry |
+| **Spiral** | Spiral from center | Uniform coverage |
+
+### Tube Patterns
+
+| Pattern | Description | Best For |
+|---------|-------------|----------|
+| **Central Cluster** | Group at center | Small systems |
+| **Radial Array** | Rings around center | Large systems |
+| **Hexagonal** | Maximum density | High extraction |
+
+---
+
+## ⚡ Performance Optimization
+
+### Why is simulation slow?
+
+Computation time depends on:
+- **Number of cells**: $N = N_x \times N_y \times N_z$ (100×100×100 = 1 million cells!)
+- **Solver method**: Direct methods are O(N^1.5), iterative are O(N)
+- **Tolerance**: Tighter tolerances require more iterations
+
+### Recommended Configuration by Scenario
+
+| Scenario | Method | Precond. | Tolerance | Est. Time |
+|----------|--------|----------|-----------|-----------|
+| Quick test | cg | none | 1e-4 | ~1 sec |
+| Visualization | cg | jacobi | 1e-6 | ~5 sec |
+| Standard precision | cg | jacobi | 1e-8 | ~15 sec |
+| High precision | bicgstab | jacobi | 1e-10 | ~30 sec |
+
+### Solver Methods
+
+| Method | Description | When to Use |
+|--------|-------------|-------------|
+| **bicgstab** | BiCGSTAB | ⭐ **RECOMMENDED**. Robust, always works |
+| **cg** | Conjugate Gradient | Fast but may not converge with mixed BC |
+| **gmres** | GMRES | Excellent convergence, uses more memory |
+| **direct** | Direct LU | Only for small meshes (<30k cells) |
+
+> ⚠️ **Note on CG**: CG requires symmetric positive definite matrix. With mixed boundary conditions (tube convection + Dirichlet), the matrix may lose symmetry → use BiCGSTAB.
+
+### Preconditioners
+
+| Precond. | Description | Performance |
+|----------|-------------|-------------|
+| **jacobi** | Diagonal | ⭐ **RECOMMENDED**. Multi-threaded, fast |
+| **none** | None | Pure CG, surprisingly fast! |
+| **ilu** | Incomplete LU | ⚠️ Single-threaded, can be SLOW |
+| **amg** | Algebraic Multigrid | Best for very large systems (requires PyAMG) |
+
+> ⚠️ **Important**: ILU uses SuperLU which is single-threaded. For large meshes, Jacobi or no preconditioner is often faster!
+
+### Tolerance Guide
+
+| Value | Use Case | Notes |
+|-------|----------|-------|
+| 1e-10 | High precision | For validation and detailed analysis |
+| 1e-8 | Default | Good speed/precision balance |
+| 1e-6 | Fast | Sufficient for visualization |
+| 1e-4 | Very fast | Only for quick tests |
+
+### Multi-Threading
+
+- **Auto**: Uses all CPU cores → maximum speed, may slow system
+- **All - 1**: ⭐ **Recommended**. Leaves one core free for GUI
+- **N cores**: Limits to N specific cores
+
+### Practical Tips
+
+1. **Start with small meshes** (30-40 points) for quick tests
+2. **Use BiCGSTAB + Jacobi** for most cases
+3. **Increase mesh** only for final results
+4. **Tolerance 1e-6** is sufficient for visualization
+5. **Check energy balance** to validate results
+
+---
+
+## 📚 Documentation
+
+Detailed documentation is available in the `docs/` folder:
+
+| Document | Description |
+|----------|-------------|
+| [01_THEORY.md](docs/01_THEORY.md) | Heat transfer fundamentals and equations |
+| [02_FDM_DISCRETIZATION.md](docs/02_FDM_DISCRETIZATION.md) | Finite Difference Method details |
+| [03_GEOMETRY.md](docs/03_GEOMETRY.md) | Geometry model and mesh mapping |
+| [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md) | GUI structure and usage |
+| [05_ARCHITECTURE.md](docs/05_ARCHITECTURE.md) | Software architecture |
+| [06_GUI_CONFIGURATION.md](docs/06_GUI_CONFIGURATION.md) | Parameter configuration guide |
+| [07_CODE_STRUCTURE.md](docs/07_CODE_STRUCTURE.md) | Detailed code documentation |
+
+---
+
+## 📁 Project Structure
+
+```
+battery_simulation/
+├── run_gui.py              # 🚀 Main entry point - launches GUI
+├── materials_database.py   # Material properties database
+├── requirements.txt        # Python dependencies
+│
+├── gui/                    # User Interface
+│   └── main_window.py      # PyQt6 main window
+│
+├── src/                    # Source code
+│   ├── core/               # Domain model
+│   │   ├── mesh.py         # 3D mesh data structure
+│   │   ├── geometry.py     # Battery geometry definition
+│   │   └── materials.py    # Material manager
+│   │
+│   ├── solver/             # Numerical engine
+│   │   ├── matrix_builder.py  # FDM matrix assembly
+│   │   └── steady_state.py    # Linear system solver
+│   │
+│   ├── analysis/           # Post-processing
+│   │   └── power_balance.py   # Energy balance calculations
+│   │
+│   └── visualization/      # Rendering
+│       └── renderer.py     # Standalone PyVista renderer
+│
+├── tests/                  # Unit tests
+│   ├── test_core.py
+│   └── test_solver.py
+│
+├── docs/                   # Documentation
+├── config/                 # Configuration files
+└── photo/                  # Screenshots and images
 ```
 
 ---
 
-## 📖 Guida all'Uso
+## 📦 Requirements
 
-### Workflow Base
+### Core Dependencies
+- **Python** 3.10+
+- **NumPy** - Numerical computations
+- **SciPy** - Sparse matrices and solvers
+- **PyQt6** - GUI framework
+- **PyVista** - 3D visualization
+- **PyVistaQt** - PyVista-Qt integration
+- **PyYAML** - Configuration files
 
-1. **Configura la Geometria** (Tab "Geometria")
-   - Imposta le dimensioni del dominio (Lx, Ly, Lz)
-   - Scegli la risoluzione mesh (punti per dimensione)
-   - Definisci le dimensioni della batteria cilindrica
+### Optional Dependencies
+- **Numba** - JIT acceleration (optional)
+- **PyAMG** - Algebraic Multigrid preconditioner
 
-2. **Configura Resistenze e Tubi** (Tab "Resistenze" e "Tubi")
-   - Seleziona il pattern di disposizione
-   - Imposta potenza totale e numero di elementi
-   - Usa "Anteprima" per verificare le posizioni
-
-3. **Ottimizza il Solver** (Tab "Solver")
-   - Vedi sezione "Ottimizzazione Performance" sotto
-
-4. **Esegui**
-   - Clicca "Costruisci Mesh"
-   - Clicca "Esegui Simulazione"
-   - Esplora i risultati con i controlli di visualizzazione
+### Installation
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
-## ⚡ Ottimizzazione Performance
+## 🤝 Contributing
 
-### Perché la simulazione è lenta?
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-Il tempo di calcolo dipende da:
-- **Numero di celle**: $N = N_x \times N_y \times N_z$. Con 100×100×100 = 1 milione di celle!
-- **Metodo di soluzione**: I metodi diretti sono $O(N^{1.5})$, gli iterativi $O(N)$
-- **Tolleranza**: Tolleranze più strette richiedono più iterazioni
+### Development Setup
+```bash
+# Clone and install in development mode
+git clone https://github.com/PhyTom/Thermal_battery_simulator.git
+cd Thermal_battery_simulator
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+pip install -r requirements.txt
 
-### Configurazione Consigliata per Scenario
+# Run tests
+pytest tests/
+```
 
-| Scenario | Metodo | Precond. | Tolleranza | Tempo Est. |
-|----------|--------|----------|------------|------------|
-| Test rapido (debug) | cg | none | 1e-4 | ~1 sec |
-| Visualizzazione | cg | jacobi | 1e-6 | ~5 sec |
-| Precisione standard | cg | jacobi | 1e-8 | ~15 sec |
-| Alta precisione | cg | jacobi | 1e-10 | ~30 sec |
-
-### Metodi di Soluzione
-
-| Metodo | Descrizione | Quando usarlo |
-|--------|-------------|---------------|
-| **bicgstab** | BiCGSTAB | ⭐ **CONSIGLIATO**. Robusto, funziona sempre |
-| **cg** | Gradiente Coniugato | Veloce ma può non convergere con BC miste |
-| **gmres** | GMRES | Ottima convergenza, usa più memoria |
-| **direct** | LU diretto | Solo per mesh piccole (<30k celle) |
-
-> ⚠️ **Nota su CG**: Il metodo CG richiede matrice simmetrica definita positiva. Con condizioni al contorno miste (convezione sui tubi + Dirichlet) la matrice può perdere simmetria → usa BiCGSTAB.
-
-### Precondizionatori
-
-| Precond. | Descrizione | Performance |
-|----------|-------------|-------------|
-| **jacobi** | Diagonale | ⭐ **CONSIGLIATO**. Multi-threaded, veloce |
-| **none** | Nessuno | CG puro, sorprendentemente veloce! |
-| **ilu** | Incomplete LU | ⚠️ Single-threaded, può essere LENTO |
-
-> ⚠️ **Nota importante**: ILU usa SuperLU che è single-threaded. Per mesh grandi, Jacobi o nessun precondizionatore sono spesso più veloci!
-
-### Tolleranza
-
-| Valore | Uso | Note |
-|--------|-----|------|
-| 1e-10 | Alta precisione | Per validazione e analisi dettagliate |
-| 1e-8 | Default | Buon compromesso velocità/precisione |
-| 1e-6 | Veloce | Sufficiente per visualizzazione |
-| 1e-4 | Molto veloce | Solo per test rapidi |
-
-### Multi-Threading
-
-- **Auto**: Usa tutti i core CPU → massima velocità, può rallentare il sistema
-- **Tutti - 1**: ⭐ **Consigliato**. Lascia un core libero per la GUI
-- **N core**: Limita a N core specifici
-
-### Suggerimenti Pratici
-
-1. **Inizia con mesh piccole** (30-40 punti) per test rapidi
-2. **Usa CG + ILU** per la maggior parte dei casi
-3. **Aumenta la mesh** solo per risultati finali
-4. **Tolleranza 1e-6** è sufficiente per visualizzazione
+### Future Enhancements
+- [ ] Transient simulation support
+- [ ] Parameter presets and project saving
+- [ ] Additional export formats
+- [ ] Editable material database in GUI
+- [ ] 2D temporal evolution plots
 
 ---
 
-## Requisiti
+## 📄 License
 
-- Python 3.10+
-- NumPy, SciPy (Calcolo numerico)
-- PyVista, PyQt6 (Interfaccia e Visualizzazione)
-- Numba (Accelerazione JIT - opzionale)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Licenza
+---
 
-MIT License
+## 👤 Author
+
+**PhyTom**
+
+---
+
+## 🙏 Acknowledgments
+
+- Heat transfer theory based on Incropera & DeWitt
+- PyVista for excellent 3D visualization
+- SciPy for robust numerical solvers

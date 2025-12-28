@@ -129,17 +129,19 @@ def _build_battery_geometry_from_inputs(self):
     d = self.spacing_spin.value()
     Lx, Ly, Lz = self.lx_spin.value(), self.ly_spin.value(), self.lz_spin.value()
 
-    # 2. Calculate cylinder radii from main radius
-    radius = self.radius_spin.value()
+    # 2. Create 4-zone cylinder geometry
     cylinder = CylinderGeometry(
         center_x=Lx / 2,
         center_y=Ly / 2,
-        r_tubes=0.3,                    # Fixed ratio
-        r_sand_inner=radius * 0.4,      # 40% of radius
-        r_heaters=radius * 0.5,         # 50% of radius
-        r_sand_outer=radius * 0.85,     # 85% of radius
-        r_insulation=radius,            # Full radius
-        r_shell=radius + 0.02,          # +2cm for shell
+        r_storage=self.radius_spin.value(),           # Storage zone radius
+        insulation_thickness=self.insul_thick_spin.value(),  # Insulation layer
+        shell_thickness=self.shell_thick_spin.value(),       # Steel shell
+        height=self.height_spin.value(),
+        insulation_slab_bottom=self.slab_bottom_spin.value(),
+        insulation_slab_top=self.slab_top_spin.value(),
+        enable_cone_roof=self.cone_check.isChecked(),
+        roof_angle_deg=self.roof_angle_spin.value(),
+        phase_offset_deg=self.phase_offset_spin.value(),
         ...
     )
 

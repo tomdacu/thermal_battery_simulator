@@ -726,18 +726,27 @@ def _get_boundary_coefficients(mesh: Mesh3D, i: int, j: int, k: int,
 def build_transient_matrix(mesh: Mesh3D, dt: float, theta: float = 1.0
                            ) -> Tuple[sparse.csr_matrix, np.ndarray]:
     """
-    Costruisce la matrice per il caso transitorio con schema theta.
+    Build the matrix for transient simulation using theta-scheme.
     
-    theta = 0: Euler esplicito (instabile per Fo > 1/6)
-    theta = 0.5: Crank-Nicolson (secondo ordine)
-    theta = 1: Euler implicito (incondizionatamente stabile)
+    FUTURE IMPLEMENTATION: This function is reserved for future transient
+    simulation support. Currently, only steady-state simulation is fully
+    integrated in the GUI. This function is tested but not yet connected
+    to the main application workflow.
     
-    Equazione:
+    Parameters:
+        mesh: 3D mesh with thermal properties
+        dt: Time step [s]
+        theta: Implicit/explicit weighting factor
+            - theta = 0: Explicit Euler (unstable for Fo > 1/6)
+            - theta = 0.5: Crank-Nicolson (second order)
+            - theta = 1: Implicit Euler (unconditionally stable)
+    
+    Equation:
     (ρcp/dt) * T^{n+1} - θ∇·(k∇T^{n+1}) = (ρcp/dt) * T^n + (1-θ)∇·(k∇T^n) + Q
     
     Returns:
-        A: Matrice per il lato sinistro
-        M: Matrice di massa per il lato destro
+        A: Matrix for left-hand side (implicit part)
+        M: Mass matrix for right-hand side (explicit part)
     """
     # Prima ottieni la matrice stazionaria (laplaciano discreto)
     L, _ = build_steady_state_matrix(mesh)

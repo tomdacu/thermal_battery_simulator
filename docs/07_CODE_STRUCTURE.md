@@ -69,7 +69,7 @@ mesh.set_symmetry_bc('x_min')
 
 | Class | Purpose |
 |-------|---------|
-| `CylinderGeometry` | Radial zone definitions (r_tubes, r_sand, etc.) |
+| `CylinderGeometry` | 4-zone radial structure (r_storage, insulation_thickness, shell_thickness) |
 | `HeaterConfig` | Heater power, count, pattern configuration |
 | `TubeConfig` | Tube fluid properties and pattern configuration |
 | `HeaterElement` | Single heater element properties |

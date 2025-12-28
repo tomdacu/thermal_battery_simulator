@@ -168,7 +168,7 @@ Translates analytic geometry into mesh fields:
 ```python
 @dataclass
 class BatteryGeometry:
-    cylinder: CylinderGeometry  # Radial zones (r_tubes, r_sand_inner, ...)
+    cylinder: CylinderGeometry  # 4 radial zones (STORAGE, INSULATION, STEEL, AIR)
     heaters: HeaterConfig       # Heating elements configuration
     tubes: TubeConfig           # Heat exchange tubes configuration
     storage_material: str       # Material name (from GUI combo)
@@ -181,11 +181,21 @@ class BatteryGeometry:
             r = distance_from_center(i, j)
             z = mesh.z[k]
             
-            if r < cylinder.r_tubes:
-                set_tube_properties(mesh, i, j, k)
-            elif r < cylinder.r_sand_inner:
-                set_sand_properties(mesh, i, j, k)
-            # ... etc for each radial zone
+            # Determine radial zone (4-zone model)
+            if r > r_storage + insulation_thickness + shell_thickness:
+                set_air_properties(mesh, i, j, k)
+            elif r > r_storage + insulation_thickness:
+                set_steel_properties(mesh, i, j, k)
+            elif r > r_storage:
+                set_insulation_properties(mesh, i, j, k)
+            else:
+                # Inside storage: check for discrete elements
+                if is_inside_tube(x, y):
+                    set_tube_properties(mesh, i, j, k)
+                elif is_inside_heater(x, y):
+                    set_heater_properties(mesh, i, j, k)
+                else:
+                    set_storage_properties(mesh, i, j, k)
 ```
 
 ### 5.3 SteadyStateSolver (src/solver/steady_state.py)
