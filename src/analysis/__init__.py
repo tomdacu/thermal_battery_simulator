@@ -7,9 +7,15 @@ from .power_balance import (
     PowerBalanceResult,
     ExergyResult,
 )
+from .energy_balance import (
+    EnergyBalanceAnalyzer,
+    EnergyBalanceResult,
+)
 
 __all__ = [
     'PowerBalanceAnalyzer',
     'PowerBalanceResult',
     'ExergyResult',
+    'EnergyBalanceAnalyzer',
+    'EnergyBalanceResult',
 ]

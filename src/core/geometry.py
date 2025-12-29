@@ -918,42 +918,114 @@ class BatteryGeometry:
             mesh.cp[mask_cone_shell] = steel_props.cp
         
         # =====================================================================
-        # 10. Elementi discreti (tubi e resistenze) - loop solo sugli elementi
+        # 10. Elementi discreti (tubi e resistenze) - VERSIONE VETTORIZZATA
+        # =====================================================================
+        # OTTIMIZZAZIONE FASE 2: Broadcasting NumPy invece di loop Python
+        # --------------------------------------------------------------------------
+        # PROBLEMA ORIGINALE:
+        # Il loop Python su N elementi richiede N*M operazioni dove M = mesh size
+        # Per 100 elementi e mesh 100³ = 100M operazioni in Python (lento)
+        #
+        # SOLUZIONE:
+        # 1. Estrai coordinate (x, y, z_bottom, z_top, radius) in array 1D
+        # 2. Usa broadcasting 4D: (Nx, Ny, Nz, N_elements) per calcolare
+        #    tutte le distanze in un'unica operazione vettorizzata
+        # 3. any(axis=-1) per ridurre a maschera 3D
+        #
+        # SPEEDUP ATTESO: 5-20x rispetto al loop Python
+        # TRADE-OFF: Usa più memoria temporanea (O(mesh_size * n_elements))
+        # Per mesh molto grandi con molti elementi, potrebbe essere necessario
+        # partizionare in batch per evitare memory overflow.
         # =====================================================================
         
-        # Resistenze discrete
+        # -------------------------------------------------------------------------
+        # RESISTENZE DISCRETE (vettorizzato)
+        # -------------------------------------------------------------------------
         if heater_elements:
-            for heater in heater_elements:
-                dist_xy = np.sqrt((X - heater.x)**2 + (Y - heater.y)**2)
-                mask_heater = (dist_xy <= heater.radius) & \
-                              (Z >= heater.z_bottom) & (Z <= heater.z_top)
-                
-                mesh.material_id[mask_heater] = MaterialID.HEATERS
-                mesh.k[mask_heater] = storage_props.k
-                mesh.rho[mask_heater] = storage_props.rho
-                mesh.cp[mask_heater] = storage_props.cp
-                mesh.Q[mask_heater] = Q_heaters
+            n_heaters = len(heater_elements)
+            
+            # Estrai coordinate in array NumPy per broadcasting
+            heater_x = np.array([h.x for h in heater_elements])        # (n_heaters,)
+            heater_y = np.array([h.y for h in heater_elements])
+            heater_r = np.array([h.radius for h in heater_elements])
+            heater_zb = np.array([h.z_bottom for h in heater_elements])
+            heater_zt = np.array([h.z_top for h in heater_elements])
+            
+            # Broadcasting 4D: X(Nx,Ny,Nz,1) - heater_x(1,1,1,n_heaters)
+            # Risultato: (Nx, Ny, Nz, n_heaters)
+            dx_h = X[:, :, :, np.newaxis] - heater_x[np.newaxis, np.newaxis, np.newaxis, :]
+            dy_h = Y[:, :, :, np.newaxis] - heater_y[np.newaxis, np.newaxis, np.newaxis, :]
+            dist_xy_h = np.sqrt(dx_h**2 + dy_h**2)  # (Nx, Ny, Nz, n_heaters)
+            
+            # Maschera per ogni elemento: distanza <= raggio AND z in range
+            Z_4d = Z[:, :, :, np.newaxis]  # (Nx, Ny, Nz, 1)
+            in_radius_h = dist_xy_h <= heater_r[np.newaxis, np.newaxis, np.newaxis, :]
+            in_z_range_h = (Z_4d >= heater_zb[np.newaxis, np.newaxis, np.newaxis, :]) & \
+                           (Z_4d <= heater_zt[np.newaxis, np.newaxis, np.newaxis, :])
+            
+            # Riduzione: any(axis=-1) -> True se il nodo appartiene ad almeno 1 heater
+            mask_any_heater = np.any(in_radius_h & in_z_range_h, axis=-1)  # (Nx, Ny, Nz)
+            
+            # Applica proprietà a tutte le celle delle resistenze in una volta
+            mesh.material_id[mask_any_heater] = MaterialID.HEATERS
+            mesh.k[mask_any_heater] = storage_props.k
+            mesh.rho[mask_any_heater] = storage_props.rho
+            mesh.cp[mask_any_heater] = storage_props.cp
+            mesh.Q[mask_any_heater] = Q_heaters
         
-        # Tubi discreti
+        # -------------------------------------------------------------------------
+        # TUBI DISCRETI (vettorizzato)
+        # -------------------------------------------------------------------------
         if tube_elements:
-            for tube in tube_elements:
-                dist_xy = np.sqrt((X - tube.x)**2 + (Y - tube.y)**2)
-                mask_tube = (dist_xy <= tube.radius) & \
-                            (Z >= tube.z_bottom) & (Z <= tube.z_top)
+            n_tubes = len(tube_elements)
+            
+            # Estrai coordinate in array NumPy per broadcasting
+            tube_x = np.array([t.x for t in tube_elements])        # (n_tubes,)
+            tube_y = np.array([t.y for t in tube_elements])
+            tube_r = np.array([t.radius for t in tube_elements])
+            tube_zb = np.array([t.z_bottom for t in tube_elements])
+            tube_zt = np.array([t.z_top for t in tube_elements])
+            tube_h = np.array([t.h_fluid for t in tube_elements])
+            tube_T = np.array([t.T_fluid for t in tube_elements])
+            
+            # Broadcasting 4D: X(Nx,Ny,Nz,1) - tube_x(1,1,1,n_tubes)
+            dx_t = X[:, :, :, np.newaxis] - tube_x[np.newaxis, np.newaxis, np.newaxis, :]
+            dy_t = Y[:, :, :, np.newaxis] - tube_y[np.newaxis, np.newaxis, np.newaxis, :]
+            dist_xy_t = np.sqrt(dx_t**2 + dy_t**2)  # (Nx, Ny, Nz, n_tubes)
+            
+            # Maschera per ogni elemento
+            Z_4d = Z[:, :, :, np.newaxis]  # (Nx, Ny, Nz, 1)
+            in_radius_t = dist_xy_t <= tube_r[np.newaxis, np.newaxis, np.newaxis, :]
+            in_z_range_t = (Z_4d >= tube_zb[np.newaxis, np.newaxis, np.newaxis, :]) & \
+                           (Z_4d <= tube_zt[np.newaxis, np.newaxis, np.newaxis, :])
+            
+            # Maschera combinata per ogni tubo: (Nx, Ny, Nz, n_tubes)
+            mask_per_tube = in_radius_t & in_z_range_t
+            
+            # Riduzione: any(axis=-1) -> True se il nodo appartiene ad almeno 1 tubo
+            mask_any_tube = np.any(mask_per_tube, axis=-1)  # (Nx, Ny, Nz)
+            
+            # Applica proprietà comuni a tutti i tubi
+            mesh.material_id[mask_any_tube] = MaterialID.TUBES
+            mesh.k[mask_any_tube] = storage_props.k
+            mesh.rho[mask_any_tube] = storage_props.rho
+            mesh.cp[mask_any_tube] = storage_props.cp
+            
+            # Per le condizioni al contorno, serve sapere a QUALE tubo appartiene
+            # ogni cella. Usiamo argmax per trovare il primo tubo che contiene il nodo.
+            if self.tubes.active:
+                # argmax restituisce l'indice del primo True lungo l'asse
+                # Ma funziona solo dove mask_any_tube è True
+                tube_indices = np.argmax(mask_per_tube, axis=-1)  # (Nx, Ny, Nz)
                 
-                mesh.material_id[mask_tube] = MaterialID.TUBES
-                mesh.k[mask_tube] = storage_props.k
-                mesh.rho[mask_tube] = storage_props.rho
-                mesh.cp[mask_tube] = storage_props.cp
-                
-                # Condizioni al contorno per i tubi
-                if self.tubes.active:
-                    mesh.bc_h[mask_tube] = tube.h_fluid
-                    mesh.bc_T_inf[mask_tube] = tube.T_fluid
-                    mesh.boundary_type[mask_tube] = BoundaryType.CONVECTION
-                else:
-                    mesh.bc_h[mask_tube] = 0.0
-                    mesh.boundary_type[mask_tube] = BoundaryType.INTERNAL
+                # Costruisci array h_fluid e T_fluid per tutte le celle
+                # h_fluid[i,j,k] = tube_h[tube_indices[i,j,k]] dove mask_any_tube[i,j,k]
+                mesh.bc_h[mask_any_tube] = tube_h[tube_indices[mask_any_tube]]
+                mesh.bc_T_inf[mask_any_tube] = tube_T[tube_indices[mask_any_tube]]
+                mesh.boundary_type[mask_any_tube] = BoundaryType.CONVECTION
+            else:
+                mesh.bc_h[mask_any_tube] = 0.0
+                mesh.boundary_type[mask_any_tube] = BoundaryType.INTERNAL
         
         # Imposta condizioni al contorno
         self._apply_boundary_conditions(mesh)

@@ -389,7 +389,72 @@ k = p // (Nx * Ny)
 
 ---
 
-## 10. Extension Points
+## 10. New Modules (v2.0)
+
+### 10.1 Transient Solver (`src/solver/transient.py`)
+
+**Key Classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `TransientSolverConfig` | Time stepping and solver configuration |
+| `TransientSolver` | Backward Euler time-stepping solver |
+
+**Key Methods:**
+```python
+class TransientSolver:
+    def step(self, Q_current, extraction_power) -> SolverResult:
+        """Advances one time step"""
+    
+    def run(self, power_profile, extraction_profile) -> TransientResults:
+        """Runs full transient simulation"""
+```
+
+### 10.2 Profiles (`src/core/profiles.py`)
+
+**Key Classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `PowerProfile` | Time-dependent heater power (constant, step, ramp, sinusoidal) |
+| `ExtractionProfile` | Time-dependent extraction (constant, modulated, T-controlled) |
+| `InitialCondition` | Starting temperature distribution |
+| `TransientConfig` | Time discretization parameters (t_end, dt) |
+
+### 10.3 State Manager (`src/io/state_manager.py`)
+
+**Key Classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `SimulationState` | Complete simulation state (T, mesh, config) |
+| `StateManager` | HDF5 save/load with geometry hash verification |
+| `TransientResults` | Time series of transient simulation results |
+
+### 10.4 Energy Balance (`src/analysis/energy_balance.py`)
+
+**Key Classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `EnergyBalanceResult` | Dataclass with energy/exergy terms |
+| `EnergyBalanceAnalyzer` | Computes stored energy, losses, exergy |
+
+### 10.5 Analysis Tab Widgets (`gui/analysis_tab.py`)
+
+**Key Classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `AnalysisTypeWidget` | Radio buttons for Steady/Losses/Transient |
+| `InitialConditionWidget` | Initial temperature configuration |
+| `PowerProfileWidget` | Heater power profile editor with preview |
+| `ExtractionProfileWidget` | Extraction profile editor |
+| `SaveLoadWidget` | HDF5 save/load interface |
+
+---
+
+## 11. Extension Points
 
 To add new features:
 
@@ -400,12 +465,14 @@ To add new features:
 | New tube pattern | `geometry.py` (TubeConfig) |
 | New solver method | `steady_state.py` |
 | New boundary type | `mesh.py`, `matrix_builder.py` |
-| New analysis metric | `power_balance.py` |
+| New analysis metric | `power_balance.py`, `energy_balance.py` |
 | New GUI widget | `main_window.py` |
+| New power profile | `profiles.py` (PowerProfile) |
+| New state format | `state_manager.py` |
 
 ---
 
-## 11. Testing
+## 12. Testing
 
 Tests are in the `tests/` directory:
 
@@ -423,11 +490,10 @@ Key test files:
 
 ---
 
-## 12. Configuration Files
+## 13. Configuration Files
 
 | File | Purpose |
 |------|---------|
 | `config/default_config.yaml` | Default GUI values (not yet used) |
 | `requirements.txt` | Python dependencies |
-| `PROJECT_ARCHITECTURE.py` | Project structure definition (metadata) |
 

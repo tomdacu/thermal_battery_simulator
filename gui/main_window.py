@@ -61,7 +61,12 @@ from src.core.geometry import (
     HeaterPattern, TubePattern
 )
 from src.solver.steady_state import SteadyStateSolver, SolverConfig
+from src.solver.transient import TransientSolver, run_transient_simulation
 from src.analysis.power_balance import PowerBalanceAnalyzer
+from src.analysis.energy_balance import EnergyBalanceAnalyzer
+from src.core.profiles import PowerProfile, ExtractionProfile, InitialCondition, TransientConfig
+from src.io.state_manager import StateManager, SimulationState, TransientResults
+# NOTA: AnalysisTab importato localmente in create_left_panel() per evitare import circolari
 
 
 class SimulationThread(QThread):
@@ -110,6 +115,11 @@ class ThermalBatteryGUI(QMainWindow):
         """Inizializza l'interfaccia utente"""
         self.setWindowTitle("Thermal Battery Simulation")
         self.setGeometry(100, 100, 1600, 900)
+        
+        # Imposta icona della finestra
+        icon_path = Path(__file__).parent.parent / "photo" / "Icona Thermal Battery.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         
         # Menu bar
         self.create_menu_bar()
@@ -196,34 +206,152 @@ class ThermalBatteryGUI(QMainWindow):
         toolbar.addAction(run_btn)
         
     def create_left_panel(self) -> QWidget:
-        """Crea il pannello sinistro con i controlli input usando tab scrollabili"""
+        """
+        Crea il pannello sinistro con struttura a 2 livelli di tabs.
+        
+        LIVELLO 1: [Geometria] [Materiali] [Analisi] [Risultati]
+        LIVELLO 2: Sub-tabs specifiche per ogni sezione
+        """
         panel = QWidget()
         main_layout = QVBoxLayout(panel)
         
-        # Tab widget per organizzare le configurazioni
-        tabs = QTabWidget()
+        # === LIVELLO 1: TABS PRINCIPALI ===
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #ccc;
+                background: white;
+            }
+            QTabBar::tab {
+                background: #e0e0e0;
+                padding: 8px 12px;
+                margin-right: 2px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: #4CAF50;
+                color: white;
+            }
+        """)
         
-        # === TAB 1: GEOMETRIA E MESH ===
-        geom_tab = self._create_geometry_tab()
-        tabs.addTab(geom_tab, "Geometria")
+        # ============================================================
+        # TAB 1: GEOMETRIA (con sub-tabs)
+        # ============================================================
+        self.geom_tabs = QTabWidget()
+        self.geom_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
         
-        # === TAB 2: RESISTENZE (HEATERS) ===
-        heater_tab = self._create_heater_tab()
-        tabs.addTab(heater_tab, "Resistenze")
+        # Sub-tab: Cilindro
+        cylinder_tab = self._create_cylinder_subtab()
+        self.geom_tabs.addTab(cylinder_tab, "Cilindro")
         
-        # === TAB 3: TUBI (TUBES) ===
-        tube_tab = self._create_tube_tab()
-        tabs.addTab(tube_tab, "Tubi")
+        # Sub-tab: Isolamento
+        insulation_tab = self._create_insulation_subtab()
+        self.geom_tabs.addTab(insulation_tab, "Isolamento")
         
-        # === TAB 4: SOLVER ===
+        # Sub-tab: Resistenze
+        heaters_tab = self._create_heater_tab()
+        self.geom_tabs.addTab(heaters_tab, "Resistenze")
+        
+        # Sub-tab: Tubi
+        tubes_tab = self._create_tube_tab()
+        self.geom_tabs.addTab(tubes_tab, "Tubi")
+        
+        # Sub-tab: Mesh
+        mesh_tab = self._create_mesh_subtab()
+        self.geom_tabs.addTab(mesh_tab, "Mesh")
+        
+        self.main_tabs.addTab(self.geom_tabs, "1. Geometria")
+        
+        # ============================================================
+        # TAB 2: MATERIALI (con sub-tabs)
+        # ============================================================
+        self.mat_tabs = QTabWidget()
+        self.mat_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
+        
+        # Sub-tab: Storage
+        storage_mat_tab = self._create_storage_material_subtab()
+        self.mat_tabs.addTab(storage_mat_tab, "Storage")
+        
+        # Sub-tab: Isolamento
+        insul_mat_tab = self._create_insulation_material_subtab()
+        self.mat_tabs.addTab(insul_mat_tab, "Isolamento")
+        
+        # Sub-tab: Condizioni operative
+        conditions_tab = self._create_conditions_subtab()
+        self.mat_tabs.addTab(conditions_tab, "Condizioni")
+        
+        self.main_tabs.addTab(self.mat_tabs, "2. Materiali")
+        
+        # ============================================================
+        # TAB 3: ANALISI (con sub-tabs)
+        # ============================================================
+        self.analysis_tabs = QTabWidget()
+        self.analysis_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
+        
+        # Importa i widget dall'analysis_tab
+        from gui.analysis_tab import (
+            AnalysisTypeWidget, InitialConditionWidget,
+            PowerProfileWidget, ExtractionProfileWidget, SaveLoadWidget
+        )
+        
+        # Sub-tab: Tipo Analisi
+        self.analysis_type_widget = AnalysisTypeWidget()
+        self.analysis_type_widget.analysis_changed.connect(self._on_analysis_type_changed)
+        self.analysis_tabs.addTab(self.analysis_type_widget, "Tipo")
+        
+        # Sub-tab: Condizioni Iniziali
+        self.initial_cond_widget = InitialConditionWidget()
+        self.analysis_tabs.addTab(self.initial_cond_widget, "Condizioni Iniziali")
+        
+        # Sub-tab: Potenza
+        self.power_widget = PowerProfileWidget()
+        self.analysis_tabs.addTab(self.power_widget, "Potenza")
+        
+        # Sub-tab: Estrazione
+        self.extraction_widget = ExtractionProfileWidget()
+        self.analysis_tabs.addTab(self.extraction_widget, "Estrazione")
+        
+        # Sub-tab: Solver
         solver_tab = self._create_solver_tab()
-        tabs.addTab(solver_tab, "Solver")
+        self.analysis_tabs.addTab(solver_tab, "Solver")
         
-        # === TAB 5: GUIDA ===
+        # Sub-tab: Salvataggio
+        self.save_load_widget = SaveLoadWidget()
+        self.save_load_widget.state_loaded.connect(self._on_state_loaded)
+        self.save_load_widget.save_btn.clicked.connect(self._save_current_state)
+        self.analysis_tabs.addTab(self.save_load_widget, "Salvataggio")
+        
+        self.main_tabs.addTab(self.analysis_tabs, "3. Analisi")
+        
+        # ============================================================
+        # TAB 4: RISULTATI (con sub-tabs)
+        # ============================================================
+        self.results_tabs = QTabWidget()
+        self.results_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
+        
+        # Sub-tab: Statistiche
+        stats_tab = self._create_statistics_subtab()
+        self.results_tabs.addTab(stats_tab, "Statistiche")
+        
+        # Sub-tab: Bilancio Energetico
+        balance_tab = self._create_energy_balance_subtab()
+        self.results_tabs.addTab(balance_tab, "Bilancio")
+        
+        # Sub-tab: Materiali (distribuzione)
+        mat_info_tab = self._create_materials_info_subtab()
+        self.results_tabs.addTab(mat_info_tab, "Materiali")
+        
+        # Sub-tab: Esporta
+        export_tab = self._create_export_subtab()
+        self.results_tabs.addTab(export_tab, "Esporta")
+        
+        # Sub-tab: Guida
         help_tab = self._create_help_tab()
-        tabs.addTab(help_tab, "📖 Guida")
+        self.results_tabs.addTab(help_tab, "📖 Guida")
         
-        main_layout.addWidget(tabs)
+        self.main_tabs.addTab(self.results_tabs, "4. Risultati")
+        
+        main_layout.addWidget(self.main_tabs)
         
         # === PULSANTI (sempre visibili) ===
         btn_layout = QVBoxLayout()
@@ -235,7 +363,7 @@ class ThermalBatteryGUI(QMainWindow):
         btn_layout.addWidget(self.build_mesh_btn)
 
         # Pulsante Costruisci Geometria (senza mesh)
-        self.preview_geom_btn = QPushButton("🔧 Costruisci Geometria")
+        self.preview_geom_btn = QPushButton("🔧 Preview Geometria")
         self.preview_geom_btn.clicked.connect(self.build_geometry)
         btn_layout.addWidget(self.preview_geom_btn)
         
@@ -257,21 +385,16 @@ class ThermalBatteryGUI(QMainWindow):
         
         return panel
     
-    def _create_scrollable_widget(self, content_widget: QWidget) -> QScrollArea:
-        """Crea un widget scrollabile contenente il content_widget"""
-        scroll = QScrollArea()
-        scroll.setWidget(content_widget)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        return scroll
+    # ================================================================
+    # SUB-TABS GEOMETRIA
+    # ================================================================
     
-    def _create_geometry_tab(self) -> QWidget:
-        """Crea il tab per geometria e mesh"""
+    def _create_cylinder_subtab(self) -> QWidget:
+        """Sub-tab per configurazione cilindro e dominio"""
         content = QWidget()
         layout = QVBoxLayout(content)
         
-        # === GEOMETRIA DOMINIO ===
+        # Dominio
         domain_group = QGroupBox("Dominio Simulazione")
         domain_layout = QGridLayout()
         
@@ -299,133 +422,125 @@ class ThermalBatteryGUI(QMainWindow):
         domain_group.setLayout(domain_layout)
         layout.addWidget(domain_group)
         
-        # === GEOMETRIA BATTERIA (4 zone concentriche) ===
-        geom_group = QGroupBox("Geometria Batteria (4 Zone)")
-        geom_layout = QGridLayout()
+        # Cilindro Storage
+        cyl_group = QGroupBox("Cilindro Storage")
+        cyl_layout = QGridLayout()
         
-        # Descrizione zone
-        zone_desc = QLabel(
-            "Zone concentriche:\n"
-            "1. STORAGE: materiale + tubi/resistenze\n"
-            "2. INSULATION: isolamento termico\n"
-            "3. STEEL: guscio acciaio\n"
-            "4. AIR: aria esterna"
-        )
-        zone_desc.setStyleSheet("color: gray; font-size: 9px;")
-        zone_desc.setWordWrap(True)
-        geom_layout.addWidget(zone_desc, 0, 0, 1, 2)
-        
-        # Raggio storage (zona centrale con sabbia + tubi + resistenze)
-        geom_layout.addWidget(QLabel("Raggio Storage [m]:"), 1, 0)
+        cyl_layout.addWidget(QLabel("Raggio [m]:"), 0, 0)
         self.radius_spin = QDoubleSpinBox()
         self.radius_spin.setRange(0.5, 20)
         self.radius_spin.setValue(2.0)
         self.radius_spin.setDecimals(2)
-        self.radius_spin.setToolTip("Raggio della zona di accumulo termico (sabbia con tubi e resistenze)")
-        geom_layout.addWidget(self.radius_spin, 1, 1)
+        cyl_layout.addWidget(self.radius_spin, 0, 1)
         
-        # Spessore isolamento
-        geom_layout.addWidget(QLabel("Spessore Isolamento [m]:"), 2, 0)
+        cyl_layout.addWidget(QLabel("Altezza [m]:"), 1, 0)
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(1, 30)
+        self.height_spin.setValue(4.0)
+        self.height_spin.setDecimals(1)
+        cyl_layout.addWidget(self.height_spin, 1, 1)
+        
+        cyl_layout.addWidget(QLabel("Sfasamento Tubi/Heaters [°]:"), 2, 0)
+        self.phase_offset_spin = QDoubleSpinBox()
+        self.phase_offset_spin.setRange(0, 180)
+        self.phase_offset_spin.setValue(15)
+        self.phase_offset_spin.setDecimals(1)
+        cyl_layout.addWidget(self.phase_offset_spin, 2, 1)
+        
+        cyl_group.setLayout(cyl_layout)
+        layout.addWidget(cyl_group)
+        
+        # Tetto
+        roof_group = QGroupBox("Tetto")
+        roof_layout = QGridLayout()
+        
+        self.enable_cone_roof_check = QCheckBox("Abilita tetto conico")
+        self.enable_cone_roof_check.setChecked(True)
+        roof_layout.addWidget(self.enable_cone_roof_check, 0, 0, 1, 2)
+        
+        roof_layout.addWidget(QLabel("Angolo [°]:"), 1, 0)
+        self.roof_angle_spin = QDoubleSpinBox()
+        self.roof_angle_spin.setRange(0, 45)
+        self.roof_angle_spin.setValue(15)
+        self.roof_angle_spin.setDecimals(1)
+        roof_layout.addWidget(self.roof_angle_spin, 1, 1)
+        
+        roof_layout.addWidget(QLabel("Slab acciaio [m]:"), 2, 0)
+        self.steel_slab_spin = QDoubleSpinBox()
+        self.steel_slab_spin.setRange(0.0, 0.1)
+        self.steel_slab_spin.setValue(0.005)
+        self.steel_slab_spin.setDecimals(3)
+        roof_layout.addWidget(self.steel_slab_spin, 2, 1)
+        
+        self.fill_cone_check = QCheckBox("Riempi cono con sabbia")
+        roof_layout.addWidget(self.fill_cone_check, 3, 0, 1, 2)
+        
+        roof_group.setLayout(roof_layout)
+        layout.addWidget(roof_group)
+        
+        layout.addStretch()
+        return self._create_scrollable_widget(content)
+    
+    def _create_insulation_subtab(self) -> QWidget:
+        """Sub-tab per configurazione isolamento"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        # Isolamento radiale
+        radial_group = QGroupBox("Isolamento Radiale")
+        radial_layout = QGridLayout()
+        
+        radial_layout.addWidget(QLabel("Spessore isolamento [m]:"), 0, 0)
         self.insulation_thickness_spin = QDoubleSpinBox()
         self.insulation_thickness_spin.setRange(0.05, 1.0)
         self.insulation_thickness_spin.setValue(0.3)
         self.insulation_thickness_spin.setDecimals(2)
         self.insulation_thickness_spin.setSingleStep(0.05)
-        self.insulation_thickness_spin.setToolTip("Spessore dell'isolamento termico attorno allo storage")
-        geom_layout.addWidget(self.insulation_thickness_spin, 2, 1)
+        radial_layout.addWidget(self.insulation_thickness_spin, 0, 1)
         
-        # Spessore guscio acciaio
-        geom_layout.addWidget(QLabel("Spessore Acciaio [m]:"), 3, 0)
+        radial_layout.addWidget(QLabel("Spessore acciaio [m]:"), 1, 0)
         self.shell_thickness_spin = QDoubleSpinBox()
         self.shell_thickness_spin.setRange(0.005, 0.1)
         self.shell_thickness_spin.setValue(0.02)
         self.shell_thickness_spin.setDecimals(3)
         self.shell_thickness_spin.setSingleStep(0.005)
-        self.shell_thickness_spin.setToolTip("Spessore del guscio in acciaio esterno")
-        geom_layout.addWidget(self.shell_thickness_spin, 3, 1)
+        radial_layout.addWidget(self.shell_thickness_spin, 1, 1)
         
-        # Altezza batteria
-        geom_layout.addWidget(QLabel("Altezza [m]:"), 4, 0)
-        self.height_spin = QDoubleSpinBox()
-        self.height_spin.setRange(1, 30)
-        self.height_spin.setValue(4.0)
-        self.height_spin.setDecimals(1)
-        geom_layout.addWidget(self.height_spin, 4, 1)
+        radial_group.setLayout(radial_layout)
+        layout.addWidget(radial_group)
         
-        # Sfasamento angolare tubi/resistenze
-        geom_layout.addWidget(QLabel("Sfasamento Tubi/Heaters [°]:"), 5, 0)
-        self.phase_offset_spin = QDoubleSpinBox()
-        self.phase_offset_spin.setRange(0, 180)
-        self.phase_offset_spin.setValue(15)
-        self.phase_offset_spin.setDecimals(1)
-        self.phase_offset_spin.setSingleStep(5)
-        self.phase_offset_spin.setToolTip("Sfasamento angolare tra tubi e resistenze per evitare sovrapposizioni")
-        geom_layout.addWidget(self.phase_offset_spin, 5, 1)
+        # Isolamento verticale
+        vert_group = QGroupBox("Isolamento Verticale (Slab)")
+        vert_layout = QGridLayout()
         
-        # === NUOVI CONTROLLI: SLAB ISOLANTI ===
-        geom_layout.addWidget(QLabel(""), 6, 0)  # Separatore
-        geom_layout.addWidget(QLabel("<b>Isolamento Verticale</b>"), 6, 0, 1, 2)
-        
-        # Slab isolante inferiore
-        geom_layout.addWidget(QLabel("Slab Isolante Inf. [m]:"), 7, 0)
+        vert_layout.addWidget(QLabel("Slab inferiore [m]:"), 0, 0)
         self.slab_bottom_spin = QDoubleSpinBox()
         self.slab_bottom_spin.setRange(0.0, 1.0)
         self.slab_bottom_spin.setValue(0.2)
         self.slab_bottom_spin.setDecimals(2)
         self.slab_bottom_spin.setSingleStep(0.05)
-        self.slab_bottom_spin.setToolTip("Altezza dello slab isolante sotto lo storage")
-        geom_layout.addWidget(self.slab_bottom_spin, 7, 1)
+        vert_layout.addWidget(self.slab_bottom_spin, 0, 1)
         
-        # Slab isolante superiore
-        geom_layout.addWidget(QLabel("Slab Isolante Sup. [m]:"), 8, 0)
+        vert_layout.addWidget(QLabel("Slab superiore [m]:"), 1, 0)
         self.slab_top_spin = QDoubleSpinBox()
         self.slab_top_spin.setRange(0.0, 1.0)
         self.slab_top_spin.setValue(0.2)
         self.slab_top_spin.setDecimals(2)
         self.slab_top_spin.setSingleStep(0.05)
-        self.slab_top_spin.setToolTip("Altezza dello slab isolante sopra lo storage")
-        geom_layout.addWidget(self.slab_top_spin, 8, 1)
+        vert_layout.addWidget(self.slab_top_spin, 1, 1)
         
-        # === NUOVI CONTROLLI: TETTO ===
-        geom_layout.addWidget(QLabel("<b>Tetto</b>"), 9, 0, 1, 2)
+        vert_group.setLayout(vert_layout)
+        layout.addWidget(vert_group)
         
-        # Checkbox per abilitare tetto conico
-        self.enable_cone_roof_check = QCheckBox("Abilita tetto conico")
-        self.enable_cone_roof_check.setChecked(True)
-        self.enable_cone_roof_check.setToolTip("Se disabilitato, il tetto è piatto (termina con slab acciaio)")
-        geom_layout.addWidget(self.enable_cone_roof_check, 10, 0, 1, 2)
+        layout.addStretch()
+        return self._create_scrollable_widget(content)
+    
+    def _create_mesh_subtab(self) -> QWidget:
+        """Sub-tab per configurazione mesh"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
         
-        # Angolo tetto
-        geom_layout.addWidget(QLabel("Angolo Tetto [°]:"), 11, 0)
-        self.roof_angle_spin = QDoubleSpinBox()
-        self.roof_angle_spin.setRange(0, 45)
-        self.roof_angle_spin.setValue(15)
-        self.roof_angle_spin.setDecimals(1)
-        self.roof_angle_spin.setSingleStep(5)
-        self.roof_angle_spin.setToolTip("Inclinazione del tetto conico (0 = piatto)")
-        geom_layout.addWidget(self.roof_angle_spin, 11, 1)
-        
-        # Slab acciaio sotto tetto
-        geom_layout.addWidget(QLabel("Slab Acciaio Top [m]:"), 12, 0)
-        self.steel_slab_spin = QDoubleSpinBox()
-        self.steel_slab_spin.setRange(0.0, 0.1)
-        self.steel_slab_spin.setValue(0.005)
-        self.steel_slab_spin.setDecimals(3)
-        self.steel_slab_spin.setSingleStep(0.005)
-        self.steel_slab_spin.setToolTip("Spessore slab acciaio sotto il tetto")
-        geom_layout.addWidget(self.steel_slab_spin, 12, 1)
-        
-        # Riempimento sabbia sotto cono
-        self.fill_cone_check = QCheckBox("Riempi cono con sabbia")
-        self.fill_cone_check.setChecked(False)
-        self.fill_cone_check.setToolTip("Riempie il volume sotto il tetto conico con sabbia")
-        geom_layout.addWidget(self.fill_cone_check, 13, 0, 1, 2)
-        
-        geom_group.setLayout(geom_layout)
-        layout.addWidget(geom_group)
-        
-        # === MESH ===
-        mesh_group = QGroupBox("Mesh")
+        mesh_group = QGroupBox("Parametri Mesh")
         mesh_layout = QGridLayout()
         
         mesh_layout.addWidget(QLabel("Spaziatura [m]:"), 0, 0)
@@ -439,7 +554,7 @@ class ThermalBatteryGUI(QMainWindow):
         self.mesh_info_label = QLabel("Celle: -")
         mesh_layout.addWidget(self.mesh_info_label, 1, 0, 1, 2)
         
-        self.memory_label = QLabel("Memoria: -")
+        self.memory_label = QLabel("Memoria stimata: -")
         self.memory_label.setStyleSheet("color: gray; font-size: 9px;")
         mesh_layout.addWidget(self.memory_label, 2, 0, 1, 2)
         
@@ -451,56 +566,205 @@ class ThermalBatteryGUI(QMainWindow):
         mesh_group.setLayout(mesh_layout)
         layout.addWidget(mesh_group)
         
-        # === MATERIALI ===
-        mat_group = QGroupBox("Materiali")
-        mat_layout = QGridLayout()
+        # Suggerimenti
+        tips_group = QGroupBox("⚡ Suggerimenti")
+        tips_layout = QVBoxLayout()
+        tips_text = QLabel(
+            "<b>0.3-0.5m</b>: Preview veloce (~1-5k celle)<br>"
+            "<b>0.1-0.2m</b>: Simulazione accurata (~20-100k)<br>"
+            "<b>0.05m</b>: Alta risoluzione (>500k, lento)"
+        )
+        tips_text.setWordWrap(True)
+        tips_text.setStyleSheet("padding: 5px; background: #e8f5e9;")
+        tips_layout.addWidget(tips_text)
+        tips_group.setLayout(tips_layout)
+        layout.addWidget(tips_group)
         
-        mat_layout.addWidget(QLabel("Stoccaggio:"), 0, 0)
+        layout.addStretch()
+        return self._create_scrollable_widget(content)
+    
+    # ================================================================
+    # SUB-TABS MATERIALI
+    # ================================================================
+    
+    def _create_storage_material_subtab(self) -> QWidget:
+        """Sub-tab per materiale storage"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        storage_group = QGroupBox("Materiale di Accumulo")
+        storage_layout = QGridLayout()
+        
+        storage_layout.addWidget(QLabel("Tipo:"), 0, 0)
         self.storage_combo = QComboBox()
         self.storage_combo.addItems([
             "steatite", "silica_sand", "olivine", 
             "basalt", "magnetite", "quartzite", "granite"
         ])
-        mat_layout.addWidget(self.storage_combo, 0, 1)
+        storage_layout.addWidget(self.storage_combo, 0, 1)
         
-        mat_layout.addWidget(QLabel("Isolamento:"), 1, 0)
+        storage_layout.addWidget(QLabel("Packing [%]:"), 1, 0)
+        self.packing_spin = QSpinBox()
+        self.packing_spin.setRange(50, 75)
+        self.packing_spin.setValue(63)
+        storage_layout.addWidget(self.packing_spin, 1, 1)
+        
+        # Info materiale
+        info_label = QLabel(
+            "<b>Proprietà tipiche:</b><br>"
+            "• ρ ≈ 2500-3000 kg/m³<br>"
+            "• cp ≈ 800-1000 J/kg·K<br>"
+            "• k ≈ 1-3 W/m·K"
+        )
+        info_label.setStyleSheet("color: #666; font-size: 9px; padding: 8px;")
+        storage_layout.addWidget(info_label, 2, 0, 1, 2)
+        
+        storage_group.setLayout(storage_layout)
+        layout.addWidget(storage_group)
+        
+        layout.addStretch()
+        return self._create_scrollable_widget(content)
+    
+    def _create_insulation_material_subtab(self) -> QWidget:
+        """Sub-tab per materiale isolamento"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        insulation_group = QGroupBox("Materiale Isolante")
+        insulation_layout = QGridLayout()
+        
+        insulation_layout.addWidget(QLabel("Tipo:"), 0, 0)
         self.insulation_combo = QComboBox()
         self.insulation_combo.addItems([
             "rock_wool", "glass_wool", "calcium_silicate",
             "ceramic_fiber", "perlite"
         ])
-        mat_layout.addWidget(self.insulation_combo, 1, 1)
+        insulation_layout.addWidget(self.insulation_combo, 0, 1)
         
-        mat_layout.addWidget(QLabel("Packing [%]:"), 2, 0)
-        self.packing_spin = QSpinBox()
-        self.packing_spin.setRange(50, 75)
-        self.packing_spin.setValue(63)
-        mat_layout.addWidget(self.packing_spin, 2, 1)
+        # Info materiale
+        info_label = QLabel(
+            "<b>Proprietà tipiche:</b><br>"
+            "• k ≈ 0.03-0.1 W/m·K<br>"
+            "• T max ≈ 600-1200°C"
+        )
+        info_label.setStyleSheet("color: #666; font-size: 9px; padding: 8px;")
+        insulation_layout.addWidget(info_label, 1, 0, 1, 2)
         
-        mat_group.setLayout(mat_layout)
-        layout.addWidget(mat_group)
-        
-        # === CONDIZIONI OPERATIVE ===
-        op_group = QGroupBox("Condizioni Operative")
-        op_layout = QGridLayout()
-        
-        op_layout.addWidget(QLabel("T ambiente [°C]:"), 0, 0)
-        self.t_amb_spin = QDoubleSpinBox()
-        self.t_amb_spin.setRange(-20, 50)
-        self.t_amb_spin.setValue(20)
-        op_layout.addWidget(self.t_amb_spin, 0, 1)
-        
-        op_layout.addWidget(QLabel("T terreno [°C]:"), 1, 0)
-        self.t_ground_spin = QDoubleSpinBox()
-        self.t_ground_spin.setRange(0, 30)
-        self.t_ground_spin.setValue(10)
-        op_layout.addWidget(self.t_ground_spin, 1, 1)
-        
-        op_group.setLayout(op_layout)
-        layout.addWidget(op_group)
+        insulation_group.setLayout(insulation_layout)
+        layout.addWidget(insulation_group)
         
         layout.addStretch()
         return self._create_scrollable_widget(content)
+    
+    def _create_conditions_subtab(self) -> QWidget:
+        """Sub-tab per condizioni operative"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        cond_group = QGroupBox("Condizioni Ambiente")
+        cond_layout = QGridLayout()
+        
+        cond_layout.addWidget(QLabel("T ambiente [°C]:"), 0, 0)
+        self.t_amb_spin = QDoubleSpinBox()
+        self.t_amb_spin.setRange(-20, 50)
+        self.t_amb_spin.setValue(20)
+        cond_layout.addWidget(self.t_amb_spin, 0, 1)
+        
+        cond_layout.addWidget(QLabel("T terreno [°C]:"), 1, 0)
+        self.t_ground_spin = QDoubleSpinBox()
+        self.t_ground_spin.setRange(0, 30)
+        self.t_ground_spin.setValue(10)
+        cond_layout.addWidget(self.t_ground_spin, 1, 1)
+        
+        cond_group.setLayout(cond_layout)
+        layout.addWidget(cond_group)
+        
+        layout.addStretch()
+        return self._create_scrollable_widget(content)
+    
+    # ================================================================
+    # SUB-TABS RISULTATI
+    # ================================================================
+    
+    def _create_statistics_subtab(self) -> QWidget:
+        """Sub-tab per statistiche temperatura"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        self.stats_text = QTextEdit()
+        self.stats_text.setReadOnly(True)
+        self.stats_text.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.stats_text)
+        
+        return content
+    
+    def _create_energy_balance_subtab(self) -> QWidget:
+        """Sub-tab per bilancio energetico"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        self.energy_text = QTextEdit()
+        self.energy_text.setReadOnly(True)
+        self.energy_text.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.energy_text)
+        
+        return content
+    
+    def _create_materials_info_subtab(self) -> QWidget:
+        """Sub-tab per distribuzione materiali"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        self.mat_text = QTextEdit()
+        self.mat_text.setReadOnly(True)
+        self.mat_text.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.mat_text)
+        
+        return content
+    
+    def _create_export_subtab(self) -> QWidget:
+        """Sub-tab per esportazione risultati"""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        
+        export_group = QGroupBox("Esporta Risultati")
+        export_layout = QVBoxLayout()
+        
+        csv_btn = QPushButton("📊 Esporta CSV...")
+        csv_btn.clicked.connect(self.save_results)
+        export_layout.addWidget(csv_btn)
+        
+        vtk_btn = QPushButton("🔲 Esporta VTK...")
+        vtk_btn.clicked.connect(self.export_vtk)
+        export_layout.addWidget(vtk_btn)
+        
+        screenshot_btn = QPushButton("📷 Screenshot...")
+        screenshot_btn.clicked.connect(self.take_screenshot)
+        export_layout.addWidget(screenshot_btn)
+        
+        export_group.setLayout(export_layout)
+        layout.addWidget(export_group)
+        
+        layout.addStretch()
+        return content
+    
+    def _create_scrollable_widget(self, content_widget: QWidget) -> QScrollArea:
+        """Crea un widget scrollabile contenente il content_widget"""
+        scroll = QScrollArea()
+        scroll.setWidget(content_widget)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return scroll
+    
+    # NOTA: La vecchia _create_geometry_tab è stata rimossa.
+    # Le sue funzionalità sono ora divise in:
+    # - _create_cylinder_subtab()
+    # - _create_insulation_subtab()
+    # - _create_mesh_subtab()
+    # - _create_storage_material_subtab()
+    # - _create_insulation_material_subtab()
+    # - _create_conditions_subtab()
     
     def _create_heater_tab(self) -> QWidget:
         """Crea il tab per configurazione resistenze"""
@@ -810,7 +1074,13 @@ class ThermalBatteryGUI(QMainWindow):
         row = 0
         prec_layout.addWidget(QLabel("Tipo:"), row, 0)
         self.preconditioner_combo = QComboBox()
-        self.preconditioner_combo.addItems(["jacobi", "none", "ilu", "amg"])
+        self.preconditioner_combo.addItems([
+            "jacobi", 
+            "none", 
+            "ilu", 
+            "amg (Ruge-Stuben)", 
+            "amg (Smoothed Aggregation)"
+        ])
         self.preconditioner_combo.setCurrentText("jacobi")  # Jacobi è più veloce per eq. calore
         self.preconditioner_combo.currentTextChanged.connect(self._on_preconditioner_changed)
         prec_layout.addWidget(self.preconditioner_combo, row, 1)
@@ -858,28 +1128,59 @@ class ThermalBatteryGUI(QMainWindow):
         self.max_iter_spin.setSingleStep(1000)
         conv_layout.addWidget(self.max_iter_spin, row, 1)
         
+        row += 1
+        conv_layout.addWidget(QLabel("Precisione:"), row, 0)
+        self.precision_combo = QComboBox()
+        self.precision_combo.addItems([
+            "float64 (doppia)",
+            "float32 (singola)",
+            "float16 (mezza)"
+        ])
+        self.precision_combo.setCurrentIndex(0)  # Default float64
+        self.precision_combo.currentTextChanged.connect(self._on_precision_changed)
+        conv_layout.addWidget(self.precision_combo, row, 1)
+        
+        row += 1
+        self.precision_desc = QLabel(
+            "<b>float64</b>: massima precisione, standard.<br>"
+            "<b>float32</b>: 2x meno memoria, leggermente più veloce.<br>"
+            "<b>float16</b>: 4x meno memoria, può avere problemi di convergenza."
+        )
+        self.precision_desc.setWordWrap(True)
+        self.precision_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        conv_layout.addWidget(self.precision_desc, row, 0, 1, 2)
+        
         conv_group.setLayout(conv_layout)
         layout.addWidget(conv_group)
         
         # === PERFORMANCE / THREAD ===
-        perf_group = QGroupBox("Performance (Multi-Core)")
+        perf_group = QGroupBox("Performance (CPU/GPU)")
         perf_layout = QGridLayout()
         
         row = 0
-        perf_layout.addWidget(QLabel("Thread CPU:"), row, 0)
+        perf_layout.addWidget(QLabel("Calcolo:"), row, 0)
         self.threads_combo = QComboBox()
-        self.threads_combo.addItems(["Auto (tutti)", "Tutti - 1", "4 core", "2 core", "1 core"])
+        self.threads_combo.addItems([
+            "CPU: Auto (tutti)", 
+            "CPU: Tutti - 1", 
+            "CPU: 4 core", 
+            "CPU: 2 core", 
+            "CPU: 1 core",
+            "GPU: CUDA (NVIDIA)",
+            "GPU: OpenCL (AMD/Intel/NVIDIA)"
+        ])
         self.threads_combo.setCurrentIndex(1)  # Default: tutti - 1
+        self.threads_combo.currentTextChanged.connect(self._on_compute_mode_changed)
         perf_layout.addWidget(self.threads_combo, row, 1)
         
         row += 1
-        threads_desc = QLabel(
-            "💡 <b>Auto</b>: massima velocità, può rallentare il sistema.\n"
+        self.threads_desc = QLabel(
+            "<b>Auto</b>: massima velocità, può rallentare il sistema.<br>"
             "<b>Tutti - 1</b>: raccomandato, lascia un core libero per la GUI."
         )
-        threads_desc.setWordWrap(True)
-        threads_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
-        perf_layout.addWidget(threads_desc, row, 0, 1, 2)
+        self.threads_desc.setWordWrap(True)
+        self.threads_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        perf_layout.addWidget(self.threads_desc, row, 0, 1, 2)
         
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
@@ -1088,30 +1389,35 @@ class ThermalBatteryGUI(QMainWindow):
     def _on_preconditioner_changed(self, prec: str):
         """Aggiorna descrizione precondizionatore"""
         descriptions = {
-            "jacobi": "⭐ <b>Jacobi (Diagonale)</b>: CONSIGLIATO! Velocissimo e multi-thread. "
+            "jacobi": "⭐ <b>Jacobi (Diagonale)</b>: CONSIGLIATO per mesh < 200k! Velocissimo e multi-thread. "
                       "Per l'equazione del calore è spesso il migliore.",
             "none": "⚡ <b>Nessuno</b>: CG puro. Sorprendentemente veloce per matrici ben condizionate. "
                     "Prova questa opzione se Jacobi è lento.",
             "ilu": "⚠️ <b>ILU (Incomplete LU)</b>: Single-threaded, può essere LENTO! "
                    "Riduce iterazioni ma ogni iterazione è più costosa. Usa solo per problemi difficili.",
-            "amg": "🚀 <b>AMG (Algebraic Multigrid)</b>: OTTIMO per mesh grandi (>100k celle). "
-                   "Complessità O(N), riduce iterazioni a ~10-20. Richiede PyAMG."
+            "amg (Ruge-Stuben)": "🚀 <b>AMG Ruge-Stuben</b>: OTTIMO per mesh grandi (>200k). "
+                   "Veloce setup, ottimo per eq. calore. Riduce iterazioni a ~5-10.",
+            "amg (Smoothed Aggregation)": "🔧 <b>AMG Smoothed Aggregation</b>: Più robusto di RS. "
+                   "Meglio per problemi difficili. Setup leggermente più lento."
         }
         self.precond_desc.setText(descriptions.get(prec, ""))
         
-        # Mostra warning per AMG se mesh piccola
-        if prec == "amg":
-            if self.mesh is not None and self.mesh.N_total < 100000:
+        # Mostra warning/info per AMG
+        is_amg = "amg" in prec.lower()
+        if is_amg:
+            if self.mesh is not None and self.mesh.N_total < 200000:
                 self.amg_warning.setText(
                     f"⚠️ La mesh attuale ha solo {self.mesh.N_total:,} celle. "
-                    "AMG è consigliato per mesh >100k celle. Per mesh piccole, usa Jacobi."
+                    "AMG è consigliato per mesh >200k celle. Il tempo di setup può superare il risparmio."
                 )
+                self.amg_warning.setStyleSheet("color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;")
                 self.amg_warning.show()
             elif self.mesh is None:
                 self.amg_warning.setText(
-                    "ℹ️ AMG è consigliato per mesh >100k celle. "
+                    "ℹ️ AMG è consigliato per mesh >200k celle. "
                     "Per mesh più piccole, Jacobi è generalmente più veloce."
                 )
+                self.amg_warning.setStyleSheet("color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;")
                 self.amg_warning.show()
             else:
                 self.amg_warning.setText(
@@ -1146,16 +1452,141 @@ class ThermalBatteryGUI(QMainWindow):
         }
         return tol_map.get(self.tolerance_combo.currentText(), 1e-8)
     
+    def _on_precision_changed(self, prec_str: str):
+        """Aggiorna descrizione precisione"""
+        if "float16" in prec_str:
+            self.precision_desc.setText(
+                "<b>float16</b>: 4x meno memoria, ma precisione limitata (~3 cifre).<br>"
+                "Potrebbe non convergere per problemi difficili."
+            )
+            self.precision_desc.setStyleSheet(
+                "color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;"
+            )
+        elif "float32" in prec_str:
+            self.precision_desc.setText(
+                "<b>float32</b>: 2x meno memoria, ~7 cifre di precisione.<br>"
+                "Buon compromesso per mesh grandi. Speedup memory-bound."
+            )
+            self.precision_desc.setStyleSheet(
+                "color: #1565C0; font-size: 9px; padding: 4px; background-color: #E3F2FD;"
+            )
+        else:
+            self.precision_desc.setText(
+                "<b>float64</b>: massima precisione (~15 cifre).<br>"
+                "Standard per calcoli scientifici."
+            )
+            self.precision_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+    
+    def _get_precision(self) -> str:
+        """Estrae il tipo di precisione dalla combo"""
+        prec_map = {
+            "float64 (doppia)": "float64",
+            "float32 (singola)": "float32",
+            "float16 (mezza)": "float16"
+        }
+        return prec_map.get(self.precision_combo.currentText(), "float64")
+    
+    def _get_preconditioner_value(self) -> str:
+        """Converte il testo della combo nel nome del precondizionatore per il solver"""
+        prec_map = {
+            "jacobi": "jacobi",
+            "none": "none",
+            "ilu": "ilu",
+            "amg (Ruge-Stuben)": "amg_rs",
+            "amg (Smoothed Aggregation)": "amg_sa"
+        }
+        return prec_map.get(self.preconditioner_combo.currentText(), "jacobi")
+    
     def _get_n_threads(self) -> int:
-        """Estrae il numero di thread dalla combo"""
+        """Estrae il numero di thread dalla combo (solo per CPU)"""
         thread_map = {
-            "Auto (tutti)": 0,
-            "Tutti - 1": -1,
-            "4 core": 4,
-            "2 core": 2,
-            "1 core": 1
+            "CPU: Auto (tutti)": 0,
+            "CPU: Tutti - 1": -1,
+            "CPU: 4 core": 4,
+            "CPU: 2 core": 2,
+            "CPU: 1 core": 1,
+            "GPU: CUDA (NVIDIA)": -1,
+            "GPU: OpenCL (AMD/Intel/NVIDIA)": -1
         }
         return thread_map.get(self.threads_combo.currentText(), -1)
+    
+    def _is_gpu_selected(self) -> bool:
+        """Verifica se è selezionata la modalità GPU"""
+        return "GPU:" in self.threads_combo.currentText()
+    
+    def _get_gpu_backend(self) -> str:
+        """Restituisce il backend GPU selezionato: 'cuda', 'opencl' o None"""
+        text = self.threads_combo.currentText()
+        if "CUDA" in text:
+            return "cuda"
+        elif "OpenCL" in text:
+            return "opencl"
+        return None
+    
+    def _on_compute_mode_changed(self, text: str):
+        """Callback quando cambia la modalità di calcolo (CPU/GPU)"""
+        from src.solver.steady_state import HAS_CUPY, HAS_OPENCL, get_gpu_info
+        
+        if "CUDA" in text:
+            # Verifica disponibilità CUDA
+            if HAS_CUPY:
+                info = get_gpu_info()
+                name = info.get('name', 'Unknown')
+                mem = info.get('memory_gb', 0)
+                desc = f"<b>NVIDIA CUDA disponibile</b><br>GPU: {name}<br>Memoria: {mem:.1f} GB - Speedup 5-50x"
+                color = "#1565c0"
+                bg = "#e3f2fd"
+            else:
+                desc = (
+                    "<b>CUDA NON disponibile!</b><br>"
+                    "Installa con: pip install cupy-cuda11x<br>"
+                    "(oppure cupy-cuda12x per CUDA 12)"
+                )
+                color = "#d84315"
+                bg = "#fff3e0"
+            
+            self.threads_desc.setText(desc)
+            self.threads_desc.setStyleSheet(
+                f"color: {color}; font-size: 9px; padding: 4px; "
+                f"background-color: {bg}; border-radius: 4px;"
+            )
+        
+        elif "OpenCL" in text:
+            # Verifica disponibilità OpenCL
+            if HAS_OPENCL:
+                info = get_gpu_info()
+                name = info.get('name', 'Unknown')
+                mem = info.get('memory_gb', 0)
+                backend = info.get('backend', 'opencl')
+                
+                if backend == 'opencl-cpu':
+                    desc = f"<b>OpenCL CPU disponibile</b><br>Device: {name}<br>Accelerazione parallela"
+                else:
+                    desc = f"<b>OpenCL GPU disponibile</b><br>GPU: {name}<br>Memoria: {mem:.1f} GB - Speedup 2-10x"
+                color = "#c62828"
+                bg = "#ffebee"
+            else:
+                desc = (
+                    "<b>OpenCL NON disponibile!</b><br>"
+                    "Installa con: pip install pyopencl<br>"
+                    "Richiede driver OpenCL (inclusi nei driver GPU)"
+                )
+                color = "#d84315"
+                bg = "#fff3e0"
+            
+            self.threads_desc.setText(desc)
+            self.threads_desc.setStyleSheet(
+                f"color: {color}; font-size: 9px; padding: 4px; "
+                f"background-color: {bg}; border-radius: 4px;"
+            )
+        
+        else:
+            # CPU mode
+            self.threads_desc.setText(
+                "<b>Auto</b>: massima velocità, può rallentare il sistema.<br>"
+                "<b>Tutti - 1</b>: raccomandato, lascia un core libero per la GUI."
+            )
+            self.threads_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
     
     def _on_heater_pattern_changed(self, index: int):
         """Callback quando cambia il pattern resistenze"""
@@ -1955,49 +2386,10 @@ class ThermalBatteryGUI(QMainWindow):
             f"{roof_text}, Total H: {cyl.total_height:.2f}m",
             position='upper_left', font_size=9
         )
-        
-    def run_simulation(self):
-        """Esegue la simulazione termica sulla mesh esistente"""
-        if self.mesh is None:
-            QMessageBox.warning(self, "Attenzione", "Prima costruisci la mesh!")
-            return
-        
-        self.log("=" * 50)
-        self.log("Avvio simulazione termica...")
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Stato: Configurazione solver...")
-        
-        try:
-            # Configura solver con parametri dalla GUI
-            config = SolverConfig(
-                method=self.solver_combo.currentText(),
-                tolerance=self._get_tolerance_value(),
-                max_iterations=self.max_iter_spin.value(),
-                preconditioner=self.preconditioner_combo.currentText(),
-                n_threads=self._get_n_threads(),
-                verbose=True
-            )
-            
-            self.log(f"Metodo: {config.method}, Tolleranza: {config.tolerance:.0e}")
-            self.log(f"Precondizionatore: {config.preconditioner}, Thread: {config.n_threads}")
-            
-            self.progress_bar.setValue(10)
-            
-            # Esegui simulazione in thread separato
-            self.simulation_thread = SimulationThread(self.mesh, config)
-            self.simulation_thread.progress.connect(self.on_simulation_progress)
-            self.simulation_thread.finished.connect(self.on_simulation_finished)
-            self.simulation_thread.error.connect(self.on_simulation_error)
-            self.simulation_thread.start()
-            
-            self.run_btn.setEnabled(False)
-            self.build_mesh_btn.setEnabled(False)
-            
-        except Exception as e:
-            self.log(f"ERRORE: {e}")
-            self.status_label.setText(f"Errore: {e}")
-            QMessageBox.critical(self, "Errore", str(e))
     
+    # NOTA: La funzione run_simulation() è stata spostata nella sezione
+    #       "NUOVI METODI PER SCHEDA ANALISI" in fondo alla classe
+        
     def on_simulation_progress(self, value: int, message: str):
         """Callback per il progresso della simulazione"""
         self.progress_bar.setValue(value)
@@ -2543,6 +2935,432 @@ MESH:
         """Gestisce la chiusura della finestra"""
         self.plotter.close()
         event.accept()
+    
+    # =========================================================================
+    # NUOVI METODI PER SCHEDA ANALISI
+    # =========================================================================
+    
+    def _on_analysis_type_changed(self, analysis_type: str):
+        """Callback quando cambia il tipo di analisi"""
+        self.log(f"[ANALISI] Tipo cambiato: {analysis_type}")
+        
+        # Aggiorna testo del pulsante in base al tipo
+        if analysis_type == "steady":
+            self.run_btn.setText("▶ Calcola Stazionario")
+        elif analysis_type == "losses":
+            self.run_btn.setText("▶ Calcola Perdite")
+        elif analysis_type == "transient":
+            self.run_btn.setText("▶ Simula Transitorio")
+    
+    def _on_state_loaded(self, state: SimulationState):
+        """Callback quando viene caricato uno stato salvato"""
+        self.log(f"[STATE] Caricato: {state.name}")
+        
+        # Verifica compatibilità geometria
+        if self.mesh is not None:
+            from src.io.state_manager import compute_geometry_hash
+            current_hash = compute_geometry_hash(self.mesh)
+            if current_hash != state.geometry_hash:
+                reply = QMessageBox.question(
+                    self, "Geometria diversa",
+                    "Lo stato salvato ha una geometria diversa dalla mesh attuale.\n"
+                    "Vuoi comunque caricare la temperatura (potrebbe non essere corretto)?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+            
+            # Carica temperatura
+            if state.T.shape == self.mesh.T.shape:
+                self.mesh.T[:] = state.T
+                self._simulation_completed = True
+                self.update_visualization()
+                self.update_statistics()
+                self.update_energy_balance()
+                self.log(f"[STATE] Temperatura caricata: T_mean = {state.T.mean():.1f} °C")
+            else:
+                QMessageBox.warning(
+                    self, "Errore", 
+                    f"Dimensioni incompatibili:\nMesh: {self.mesh.T.shape}\nFile: {state.T.shape}"
+                )
+        else:
+            QMessageBox.warning(self, "Attenzione", "Prima costruisci una mesh!")
+    
+    def _save_current_state(self):
+        """Salva lo stato corrente in un file HDF5"""
+        if self.mesh is None:
+            QMessageBox.warning(self, "Attenzione", "Prima costruisci la mesh!")
+            return
+        
+        # Prendi nome e descrizione dalla GUI
+        name = self.analysis_tab.save_load_widget.save_name_edit.text()
+        if not name:
+            name = "Simulation"
+        description = self.analysis_tab.save_load_widget.save_desc_edit.text()
+        
+        # Crea oggetto stato
+        analysis_type = self.analysis_tab.get_analysis_type()
+        state = SimulationState.from_mesh(
+            mesh=self.mesh,
+            name=name,
+            description=description,
+            analysis_type=analysis_type
+        )
+        
+        # Seleziona file
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Salva Stato", f"{name}.h5",
+            "File stato (*.h5)"
+        )
+        if filename:
+            StateManager.save_state(state, filename)
+            self.log(f"[STATE] Stato salvato: {filename}")
+            QMessageBox.information(self, "Salvato", f"Stato salvato in:\n{filename}")
+    
+    def run_simulation(self):
+        """Esegue la simulazione in base al tipo selezionato"""
+        if self.mesh is None:
+            QMessageBox.warning(self, "Attenzione", "Prima costruisci la mesh!")
+            return
+        
+        analysis_type = self.analysis_tab.get_analysis_type()
+        
+        if analysis_type == "steady":
+            self._run_steady_simulation()
+        elif analysis_type == "losses":
+            self._run_losses_analysis()
+        elif analysis_type == "transient":
+            self._run_transient_simulation()
+    
+    def _run_steady_simulation(self):
+        """Esegue simulazione stazionaria (come prima)"""
+        self.log("=" * 50)
+        self.log("[ANALISI] Simulazione Stazionaria...")
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Stato: Configurazione solver...")
+        
+        try:
+            # Configura solver con parametri dalla GUI
+            gpu_backend = self._get_gpu_backend()
+            precision = self._get_precision()
+            config = SolverConfig(
+                method=self.solver_combo.currentText(),
+                tolerance=self._get_tolerance_value(),
+                max_iterations=self.max_iter_spin.value(),
+                preconditioner=self._get_preconditioner_value(),
+                n_threads=self._get_n_threads(),
+                gpu_backend=gpu_backend,
+                precision=precision,
+                verbose=True
+            )
+            
+            self.log(f"[SOLVER] Metodo: {config.method}, Tolleranza: {config.tolerance:.0e}")
+            if gpu_backend == "cuda":
+                self.log("[GPU] Backend: CUDA (NVIDIA)")
+            elif gpu_backend == "opencl":
+                self.log("[GPU] Backend: OpenCL")
+            else:
+                self.log(f"[CPU] Precondizionatore: {config.preconditioner}, Thread: {config.n_threads}")
+            
+            self.progress_bar.setValue(10)
+            
+            # Esegui simulazione in thread separato
+            self.simulation_thread = SimulationThread(self.mesh, config)
+            self.simulation_thread.progress.connect(self.on_simulation_progress)
+            self.simulation_thread.finished.connect(self.on_simulation_finished)
+            self.simulation_thread.error.connect(self.on_simulation_error)
+            self.simulation_thread.start()
+            
+            self.run_btn.setEnabled(False)
+            self.build_mesh_btn.setEnabled(False)
+            
+        except Exception as e:
+            self.log(f"ERRORE: {e}")
+            self.status_label.setText(f"Errore: {e}")
+            QMessageBox.critical(self, "Errore", str(e))
+    
+    def _run_losses_analysis(self):
+        """Esegue analisi perdite impostando T media nello storage"""
+        self.log("=" * 50)
+        self.log("[ANALISI] Calcolo Perdite...")
+        self.progress_bar.setValue(0)
+        
+        try:
+            # Ottieni parametri da scheda analisi
+            T_storage = self.analysis_tab.analysis_type_widget.losses_T_spin.value() + 273.15
+            T_amb = self.analysis_tab.analysis_type_widget.losses_T_amb_spin.value() + 273.15
+            
+            self.log(f"  T storage: {T_storage - 273.15:.1f} °C")
+            self.log(f"  T ambiente: {T_amb - 273.15:.1f} °C")
+            
+            # Imposta temperatura nello storage
+            from src.core.mesh import MaterialID
+            storage_mask = (self.mesh.material_id == MaterialID.SAND.value)
+            self.mesh.T[storage_mask] = T_storage
+            
+            # Imposta condizione al contorno di Dirichlet per lo storage
+            # e calcola il flusso necessario per mantenerla
+            self.progress_bar.setValue(20)
+            
+            # Usa il solver con Q=0 e T fissata nello storage
+            # Per fare questo dovremmo fissare le celle storage come Dirichlet
+            # Approccio semplificato: calcoliamo direttamente le perdite
+            
+            self.progress_bar.setValue(50)
+            
+            # Usa EnergyBalanceAnalyzer
+            analyzer = EnergyBalanceAnalyzer(self.mesh, T_ambient=T_amb)
+            
+            # Per calcolare le perdite, impostiamo tutto lo storage a T_storage
+            # e calcoliamo il gradiente attraverso l'isolamento
+            self.mesh.T[storage_mask] = T_storage
+            
+            # Imposta condizioni al contorno
+            self.mesh.T[self.mesh.boundary_type == 1] = T_amb  # Pareti esterne
+            
+            # Calcola perdite
+            result = analyzer.compute_full_balance()
+            
+            self.progress_bar.setValue(90)
+            
+            # Log risultati
+            self.log(f"\n[RISULTATO] Perdite Termiche:")
+            self.log(f"  Superiore: {result.Q_loss_top/1000:.2f} kW")
+            self.log(f"  Laterale: {result.Q_loss_lateral/1000:.2f} kW")
+            self.log(f"  Inferiore: {result.Q_loss_bottom/1000:.2f} kW")
+            self.log(f"  TOTALE: {result.Q_loss_total/1000:.2f} kW")
+            self.log(f"\n  Efficienza exergetica: {result.exergy_efficiency*100:.1f}%")
+            
+            self.progress_bar.setValue(100)
+            self._simulation_completed = True
+            self.update_visualization()
+            self.update_statistics()
+            
+            # Mostra messaggio
+            QMessageBox.information(
+                self, "Analisi Perdite Completata",
+                f"Perdite termiche totali: {result.Q_loss_total/1000:.2f} kW\n\n"
+                f"  - Superiore: {result.Q_loss_top/1000:.2f} kW\n"
+                f"  - Laterale: {result.Q_loss_lateral/1000:.2f} kW\n"
+                f"  - Inferiore: {result.Q_loss_bottom/1000:.2f} kW"
+            )
+            
+        except Exception as e:
+            self.log(f"ERRORE: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Errore", str(e))
+    
+    def _run_transient_simulation(self):
+        """Esegue simulazione transitoria"""
+        self.log("=" * 50)
+        self.log("[ANALISI] Simulazione Transitoria...")
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Stato: Configurazione transitorio...")
+        
+        try:
+            # Ottieni configurazione transitoria
+            trans_config = self.analysis_tab.get_transient_config()
+            ic = self.analysis_tab.get_initial_condition()
+            power_profile = self.analysis_tab.get_power_profile()
+            
+            self.log(f"  Durata: {trans_config.t_final:.0f} s ({trans_config.t_final/3600:.1f} ore)")
+            self.log(f"  dt: {trans_config.dt:.1f} s")
+            self.log(f"  Condizione iniziale: {ic.mode}")
+            self.log(f"  Potenza: {power_profile.mode}")
+            
+            self.progress_bar.setValue(5)
+            
+            # Applica condizione iniziale
+            self._apply_initial_condition(ic)
+            
+            self.progress_bar.setValue(10)
+            
+            # Configura solver
+            gpu_backend = self._get_gpu_backend()
+            solver_config = SolverConfig(
+                method=self.solver_combo.currentText(),
+                tolerance=self._get_tolerance_value(),
+                max_iterations=self.max_iter_spin.value(),
+                preconditioner=self._get_preconditioner_value(),
+                n_threads=self._get_n_threads(),
+                gpu_backend=gpu_backend,
+                precision=self._get_precision(),
+                verbose=False  # Meno verbose per transitorio
+            )
+            
+            self.status_label.setText("Stato: Simulazione transitoria in corso...")
+            
+            # Avvia thread transitorio
+            self.transient_thread = TransientSimulationThread(
+                mesh=self.mesh,
+                solver_config=solver_config,
+                transient_config=trans_config,
+                power_profile=power_profile
+            )
+            self.transient_thread.progress.connect(self._on_transient_progress)
+            self.transient_thread.step_completed.connect(self._on_transient_step)
+            self.transient_thread.finished.connect(self._on_transient_finished)
+            self.transient_thread.error.connect(self.on_simulation_error)
+            self.transient_thread.start()
+            
+            self.run_btn.setEnabled(False)
+            self.build_mesh_btn.setEnabled(False)
+            
+        except Exception as e:
+            self.log(f"ERRORE: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Errore", str(e))
+    
+    def _apply_initial_condition(self, ic: InitialCondition):
+        """Applica la condizione iniziale alla mesh"""
+        from src.core.mesh import MaterialID
+        
+        if ic.mode == "uniform":
+            T_init = ic.T_uniform + 273.15
+            self.mesh.T[:] = T_init
+            self.log(f"  T iniziale uniforme: {ic.T_uniform:.1f} °C")
+            
+        elif ic.mode == "by_material":
+            self.mesh.T[self.mesh.material_id == MaterialID.SAND.value] = ic.T_sand + 273.15
+            self.mesh.T[self.mesh.material_id == MaterialID.INSULATION.value] = ic.T_insulation + 273.15
+            self.mesh.T[self.mesh.material_id == MaterialID.STEEL.value] = ic.T_steel + 273.15
+            self.mesh.T[self.mesh.material_id == MaterialID.AIR.value] = ic.T_air + 273.15
+            self.mesh.T[self.mesh.material_id == MaterialID.GROUND.value] = ic.T_ground + 273.15
+            self.mesh.T[self.mesh.material_id == MaterialID.CONCRETE.value] = ic.T_concrete + 273.15
+            self.log(f"  T per materiale applicata")
+            
+        elif ic.mode == "from_file":
+            if ic.file_path:
+                state = StateManager.load_state(ic.file_path)
+                if state and state.T.shape == self.mesh.T.shape:
+                    self.mesh.T[:] = state.T
+                    self.log(f"  T caricata da file: {ic.file_path}")
+                else:
+                    raise ValueError("File stato incompatibile con mesh attuale!")
+            else:
+                raise ValueError("Nessun file selezionato per condizione iniziale!")
+                
+        elif ic.mode == "from_steady":
+            # Calcola prima lo stazionario
+            self.log("  Calcolo stazionario preliminare...")
+            solver_config = SolverConfig(
+                method=self.solver_combo.currentText(),
+                tolerance=self._get_tolerance_value(),
+                max_iterations=self.max_iter_spin.value(),
+                preconditioner=self._get_preconditioner_value()
+            )
+            solver = SteadyStateSolver(self.mesh, solver_config)
+            solver.build_system()
+            result = solver.solve(rebuild=False)
+            if result.converged:
+                self.log(f"  Stazionario converguto: T_mean = {self.mesh.T.mean() - 273.15:.1f} °C")
+            else:
+                raise ValueError("Stazionario non converguto!")
+    
+    def _on_transient_progress(self, value: int, message: str):
+        """Callback per progresso transitorio"""
+        self.progress_bar.setValue(value)
+        self.status_label.setText(message)
+    
+    def _on_transient_step(self, step: int, t: float, T_mean: float):
+        """Callback per ogni step temporale completato"""
+        if step % 10 == 0:  # Log ogni 10 step
+            self.log(f"  t = {t:.0f} s, T_mean = {T_mean - 273.15:.1f} °C")
+        
+        # Aggiorna visualizzazione ogni N step
+        if step % 20 == 0:
+            self.update_visualization()
+    
+    def _on_transient_finished(self, results: TransientResults):
+        """Callback quando la simulazione transitoria è completata"""
+        self.progress_bar.setValue(100)
+        self.status_label.setText("Stato: Transitorio completato!")
+        self.run_btn.setEnabled(True)
+        self.build_mesh_btn.setEnabled(True)
+        self._simulation_completed = True
+        
+        self.log(f"\n[RISULTATO] Transitorio completato!")
+        self.log(f"  Durata simulata: {results.times[-1]:.0f} s")
+        self.log(f"  Step totali: {len(results.times)}")
+        self.log(f"  T finale media: {results.T_mean[-1] - 273.15:.1f} °C")
+        self.log(f"  T finale min: {results.T_min[-1] - 273.15:.1f} °C")
+        self.log(f"  T finale max: {results.T_max[-1] - 273.15:.1f} °C")
+        
+        # Salva riferimento ai risultati
+        self._transient_results = results
+        
+        # Aggiorna visualizzazione
+        self.update_visualization()
+        self.update_statistics()
+        self.update_energy_balance()
+        
+        # Chiedi se esportare
+        reply = QMessageBox.question(
+            self, "Transitorio Completato",
+            f"Simulazione completata!\n\n"
+            f"Durata: {results.times[-1]/3600:.1f} ore\n"
+            f"T finale: {results.T_mean[-1] - 273.15:.1f} °C\n\n"
+            f"Vuoi esportare i risultati in CSV?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._export_transient_results(results)
+    
+    def _export_transient_results(self, results: TransientResults):
+        """Esporta risultati transitorio in CSV"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Esporta Risultati Transitorio", "transient_results.csv",
+            "File CSV (*.csv)"
+        )
+        if filename:
+            results.export_csv(filename)
+            self.log(f"[EXPORT] Risultati esportati: {filename}")
+            QMessageBox.information(self, "Esportato", f"Risultati salvati in:\n{filename}")
+
+
+class TransientSimulationThread(QThread):
+    """Thread per eseguire simulazione transitoria"""
+    
+    progress = pyqtSignal(int, str)
+    step_completed = pyqtSignal(int, float, float)  # step, t, T_mean
+    finished = pyqtSignal(object)  # TransientResults
+    error = pyqtSignal(str)
+    
+    def __init__(self, mesh, solver_config, transient_config, power_profile):
+        super().__init__()
+        self.mesh = mesh
+        self.solver_config = solver_config
+        self.transient_config = transient_config
+        self.power_profile = power_profile
+    
+    def run(self):
+        try:
+            results = run_transient_simulation(
+                mesh=self.mesh,
+                solver_config=self.solver_config,
+                t_final=self.transient_config.t_final,
+                dt=self.transient_config.dt,
+                save_interval=self.transient_config.save_interval,
+                power_profile=self.power_profile,
+                callback=self._step_callback
+            )
+            self.finished.emit(results)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(e))
+    
+    def _step_callback(self, step, t, T_mean):
+        """Callback per ogni step temporale"""
+        n_steps = int(self.transient_config.t_final / self.transient_config.dt)
+        pct = int(10 + 80 * step / max(n_steps, 1))
+        self.progress.emit(pct, f"t = {t:.0f} s / {self.transient_config.t_final:.0f} s")
+        self.step_completed.emit(step, t, T_mean)
 
 
 def main():

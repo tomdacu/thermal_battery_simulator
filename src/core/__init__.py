@@ -11,6 +11,10 @@ from .geometry import (
     HeaterElement, TubeElement,
     create_small_test_geometry
 )
+from .profiles import (
+    PowerProfile, ExtractionProfile, 
+    InitialCondition, TransientConfig
+)
 
 __all__ = [
     'Mesh3D',

@@ -10,27 +10,36 @@ The graphical interface is developed in **PyQt6** and provides an integrated env
 
 The GUI is divided into three main areas:
 
-### 2.1 Side Panel (Input)
-Allows configuration of all simulation parameters:
-- **Geometry**: Domain dimensions, storage radius, insulation thickness.
-- **Mesh**: Grid resolution and target spacing.
-- **Materials**: Selection of storage and insulation materials.
-- **Heaters**: Total power, pattern, number of elements.
-- **Tubes**: Fluid temperature, convection coefficient, pattern.
-- **Solver**: Method selection (Direct, CG, BiCGStab, GMRES), tolerance, preconditioner.
+### 2.1 Side Panel (Input) - 2-Level Tab Structure
+
+The side panel uses a **2-level tab structure** for organized parameter access:
+
+**Level 1 (Main Tabs):**
+```
+[1. Geometria] [2. Materiali] [3. Analisi] [4. Risultati]
+```
+
+**Level 2 (Sub-tabs for each main tab):**
+
+| Main Tab | Sub-tabs |
+|----------|----------|
+| **1. Geometria** | Cilindro, Isolamento, Resistenze, Tubi, Mesh |
+| **2. Materiali** | Storage, Isolamento, Condizioni |
+| **3. Analisi** | Tipo, Condizioni Iniziali, Potenza, Estrazione, Solver, Salvataggio |
+| **4. Risultati** | Statistiche, Bilancio, Materiali, Esporta, 📖 Guida |
 
 ### 2.2 Central Area (3D Visualization)
 Uses `PyVistaQt` to integrate an interactive 3D rendering engine:
-- Temperature field visualization.
-- Material distribution visualization.
-- **Slicing** tools (X, Y, Z section planes) to inspect the battery interior.
-- Temperature isosurfaces.
+- Temperature field visualization
+- Material distribution visualization
+- **Slicing** tools (X, Y, Z section planes) to inspect the battery interior
+- Temperature isosurfaces
 
 ### 2.3 Bottom Panel (Results)
 Shows data derived from the simulation:
-- Solver log (computation time, residual, iterations).
-- Power balance (P_in, P_out, Losses).
-- Total stored energy [kWh, MWh].
+- Solver log (computation time, residual, iterations)
+- Power balance (P_in, P_out, Losses)
+- Total stored energy [kWh, MWh]
 
 ---
 
@@ -38,61 +47,157 @@ Shows data derived from the simulation:
 
 ### 3.1 Threading
 To avoid blocking the interface during intensive calculations, the simulation runs in a separate thread (`SimulationThread`). This allows:
-- Keeping the 3D visualization responsive.
-- Updating a progress bar in real time.
-- Stopping the simulation if needed.
+- Keeping the 3D visualization responsive
+- Updating a progress bar in real time
+- Stopping the simulation if needed
 
 ### 3.2 User Workflow
-1.  **Configuration**: User sets parameters in the widgets.
-2.  **Preview Geometry**: (Optional) Visualization of tubes/heaters without mesh.
-3.  **Build Mesh**: Create the 3D mesh and apply geometry.
-4.  **Run Simulation**: Execute the steady-state solver.
-5.  **Analysis**: Explore results using section planes and charts.
+1.  **Configure Geometry** (1. Geometria): Define cylinder, insulation, heaters, tubes, mesh
+2.  **Set Materials** (2. Materiali): Select storage/insulation materials, operating conditions
+3.  **Configure Analysis** (3. Analisi): Choose analysis type, set profiles, configure solver
+4.  **Build Mesh**: Click "Costruisci Mesh" button
+5.  **Run Simulation**: Click "Esegui Simulazione" button
+6.  **View Results** (4. Risultati): Analyze statistics, energy balance, export data
 
 ---
 
-## 4. Tab Organization
+## 4. Tab Organization (2-Level Structure)
 
-### 4.1 Geometry Tab
+### 4.1 GEOMETRIA Tab (Level 1)
+
+#### Sub-tab: Cilindro
 | Widget Group | Contents |
 |--------------|----------|
-| Domain | Lx, Ly, Lz domain dimensions |
-| Battery | Radius, height, center position |
-| Insulation | Lateral thickness, top/bottom slabs |
-| Roof | Enable cone, angle |
-| Mesh | Target spacing, resulting cell count |
+| Dominio | Lx, Ly, Lz domain dimensions [m] |
+| Cilindro Storage | Radius, height [m] |
+| Tetto | Enable cone, angle, steel slab, fill with sand |
 
-### 4.2 Heaters Tab
+#### Sub-tab: Isolamento
 | Widget Group | Contents |
 |--------------|----------|
-| Power | Total power [kW] |
+| Isolamento Radiale | Insulation thickness, shell thickness [m] |
+| Isolamento Verticale | Bottom slab, top slab thickness [m] |
+
+#### Sub-tab: Resistenze
+| Widget Group | Contents |
+|--------------|----------|
+| Potenza | Total power [kW] |
 | Pattern | Distribution pattern (Uniform, Grid, Radial, Spiral) |
-| Elements | Number, radius, spacing |
+| Elementi | Number, radius, spacing |
 | Preview | Visual preview of positions |
 
-### 4.3 Tubes Tab
+#### Sub-tab: Tubi
 | Widget Group | Contents |
 |--------------|----------|
-| Status | Active/inactive toggle |
-| Fluid | Temperature, convection coefficient |
+| Stato | Active/inactive toggle |
+| Fluido | Temperature, convection coefficient |
 | Pattern | Distribution pattern |
-| Elements | Number, diameter |
+| Elementi | Number, diameter |
 
-### 4.4 Solver Tab
+#### Sub-tab: Mesh
 | Widget Group | Contents |
 |--------------|----------|
-| Method | Direct, CG, BiCGStab, GMRES |
-| Preconditioner | None, Jacobi, ILU, AMG |
-| Tolerance | Convergence tolerance (1e-4 to 1e-12) |
-| Threads | Number of CPU threads |
-| Tips | Usage recommendations |
+| Spaziatura | Target cell spacing [m] |
+| Info | Resulting cell count, memory estimate |
 
-### 4.5 Help/Guide Tab
-Comprehensive guide with:
-- Usage instructions
-- Performance optimization tips
-- Solver recommendations
-- Troubleshooting
+### 4.2 MATERIALI Tab (Level 1)
+
+#### Sub-tab: Storage
+| Widget Group | Contents |
+|--------------|----------|
+| Materiale | Material selection (Steatite, Sand, etc.) |
+| Packing | Packing fraction [%] |
+| Proprietà | Display of k, ρ, cp values |
+
+#### Sub-tab: Isolamento
+| Widget Group | Contents |
+|--------------|----------|
+| Materiale | Insulation material selection |
+| Proprietà | Display of k, ρ, cp values |
+
+#### Sub-tab: Condizioni
+| Widget Group | Contents |
+|--------------|----------|
+| Ambiente | T_ambient [°C] |
+| Convezione | External convection coefficient h_ext [W/(m²·K)] |
+
+### 4.3 ANALISI Tab (Level 1)
+
+#### Sub-tab: Tipo
+| Widget Group | Contents |
+|--------------|----------|
+| Tipo Analisi | Steady-state, Losses analysis, Transient |
+| Parametri | Duration, time step (for transient) |
+
+#### Sub-tab: Condizioni Iniziali
+| Widget Group | Contents |
+|--------------|----------|
+| Tipo | Uniform, Custom, From file |
+| Temperatura | Initial temperature [°C] |
+
+#### Sub-tab: Potenza
+| Widget Group | Contents |
+|--------------|----------|
+| Tipo Profilo | Constant, Step, Ramp, Sinusoidal |
+| Parametri | Base power, amplitude, frequency, timing |
+
+#### Sub-tab: Estrazione
+| Widget Group | Contents |
+|--------------|----------|
+| Tipo Profilo | Constant, Modulated, Temperature-controlled |
+| Parametri | Flow rate, target temperature |
+
+#### Sub-tab: Solver
+| Widget Group | Contents |
+|--------------|----------|
+| Metodo | Direct, CG, BiCGStab, GMRES |
+| Preconditioner | None, Jacobi, ILU, AMG |
+| Tolleranza | Convergence tolerance (1e-4 to 1e-12) |
+| Performance | CPU threads / GPU selection |
+| Precisione | Float16/32/64 precision toggle |
+
+#### Sub-tab: Salvataggio
+| Widget Group | Contents |
+|--------------|----------|
+| Salva Stato | Save current simulation to HDF5 |
+| Carica Stato | Load simulation from HDF5 |
+| File Recenti | List of recent save files |
+
+### 4.4 RISULTATI Tab (Level 1)
+
+#### Sub-tab: Statistiche
+| Widget Group | Contents |
+|--------------|----------|
+| Temperature | T_min, T_max, T_mean, T_std |
+| Mesh | Dimensions, total nodes |
+| Tempo | Computation time |
+
+#### Sub-tab: Bilancio
+| Widget Group | Contents |
+|--------------|----------|
+| Potenza | P_input (heaters), P_output (tubes) |
+| Perdite | P_losses (top, lateral, bottom) |
+| Energia | E stored [kWh, MWh] |
+| Exergia | Exergy analysis (optional) |
+
+#### Sub-tab: Materiali
+| Widget Group | Contents |
+|--------------|----------|
+| Distribuzione | Volume fractions by material |
+| Proprietà | Selected material properties |
+
+#### Sub-tab: Esporta
+| Widget Group | Contents |
+|--------------|----------|
+| Formati | CSV, VTK, HDF5 |
+| Screenshot | Save current 3D view |
+
+#### Sub-tab: 📖 Guida
+| Widget Group | Contents |
+|--------------|----------|
+| Istruzioni | Usage guide |
+| Performance | Optimization tips |
+| Troubleshooting | Common issues and solutions |
 
 ---
 
@@ -177,7 +282,7 @@ For proper GUI functionality, the following are required:
 ---
 
 ## 10. Future Developments
-- 2D plots of temporal evolution (for transient simulations).
-- Result export in additional formats.
-- Editable material database directly from interface.
-- Parameter presets and project saving.
+- 2D plots of temporal evolution
+- Result export in additional formats
+- Editable material database directly from interface
+- Real-time collaboration features

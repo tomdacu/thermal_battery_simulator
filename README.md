@@ -1,4 +1,6 @@
-# 🔋 Thermal Battery Simulator 3D
+# 🔋 Thermal Battery Simulator
+
+![Banner](photo/Banner%20thermal%20battery%20simulator.png)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -31,10 +33,15 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 
 ### Core Simulation
 - **3D Finite Difference Method (FDM)** solver for heat equation
-- **Steady-state analysis** with future transient support planned
+- **Steady-state and Transient analysis** with Backward Euler implicit scheme
 - **Multiple solver methods**: Direct (LU), CG, BiCGSTAB, GMRES
 - **Preconditioners**: Jacobi, ILU, AMG (PyAMG)
-- **Vectorized matrix builder** for 10-50x faster assembly
+- **Vectorized matrix builder** with Numba JIT for 10-50x faster assembly
+
+### GPU Acceleration
+- **CUDA support** via CuPy for NVIDIA GPUs (5-50x speedup)
+- **OpenCL support** via PyOpenCL for AMD/Intel GPUs (2-10x speedup)
+- **Automatic backend selection** - GPU (Auto) mode chooses the best available
 
 ### Geometry Modeling
 - **4-zone concentric cylinder**: Storage, Insulation, Steel Shell, Air
@@ -47,18 +54,26 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 - **Built-in material database**: Steatite, silica sand, rock wool, glass wool, etc.
 - **Packing fraction adjustment** for porous media
 - **Convection, conduction, and Dirichlet boundary conditions**
-- **Energy balance calculations** with loss analysis
+- **Energy and exergy balance calculations** with detailed loss analysis
+
+### Transient Analysis
+- **Time-dependent power profiles**: constant, step, ramp, sinusoidal
+- **Extraction profiles**: constant, modulated, temperature-controlled
+- **State save/load**: HDF5 format with geometry hash verification
+- **Animation and time-series visualization**
 
 ### Visualization
 - **Interactive 3D visualization** with PyVista
 - **Slice planes** (X, Y, Z) for internal inspection
 - **Volume rendering** and isosurfaces
 - **Real-time updates** during parameter changes
+- **Transient animation** with playback controls
 
 ### User Interface
-- **Intuitive PyQt6 GUI** - no code modification needed
+- **Intuitive PyQt6 GUI** with 2-level tab structure
 - **Threaded simulation** - responsive UI during computation
-- **Export options**: CSV, VTK for ParaView
+- **Save/Load simulation states** in HDF5 format
+- **Export options**: CSV, VTK for ParaView, HDF5 for state persistence
 
 ---
 
@@ -159,28 +174,32 @@ python run_gui.py
 
 ### Basic Workflow
 
-1. **Configure Geometry** (Geometry tab)
-   - Set domain dimensions (Lx, Ly, Lz)
-   - Define battery radius and height
+1. **Configure Geometry** (1. Geometria tab)
+   - Set cylinder dimensions (radius, height)
    - Configure insulation thickness
+   - Set up heaters and tubes patterns
+   - Define mesh spacing
 
-2. **Set Heaters** (Heaters tab)
-   - Total power [kW]
-   - Distribution pattern
-   - Number of elements
+2. **Set Materials** (2. Materiali tab)
+   - Select storage material (Steatite, Sand, etc.)
+   - Choose insulation material
+   - Configure operating conditions (T_amb, h_ext)
 
-3. **Configure Tubes** (Tubes tab) - Optional
-   - Enable/disable heat extraction
-   - Fluid temperature and convection coefficient
+3. **Configure Analysis** (3. Analisi tab)
+   - Choose analysis type: Steady, Losses, or Transient
+   - Set power and extraction profiles (for transient)
+   - Configure initial conditions
+   - Select solver method and tolerance
 
-4. **Build Mesh**
+4. **Build & Run**
    - Click "Build Mesh" button
-   - Mesh preview appears in 3D view
-
-5. **Run Simulation**
    - Click "Run Simulation"
-   - View temperature distribution
+   - View results in 3D view
+
+5. **Analyze Results** (4. Risultati tab)
+   - View temperature statistics
    - Analyze energy balance
+   - Export results (CSV, VTK, HDF5)
 
 ---
 
@@ -262,6 +281,51 @@ Computation time depends on:
 
 > ⚠️ **Important**: ILU uses SuperLU which is single-threaded. For large meshes, Jacobi or no preconditioner is often faster!
 
+### Built-in Performance Optimizations
+
+The solver includes several automatic optimizations that require no user configuration:
+
+| Optimization | Speedup | Description |
+|--------------|---------|-------------|
+| **Numba JIT + fastmath** | 20-40% | Matrix construction uses parallel JIT compilation |
+| **AMG Ruge-Stuben** | 1.5-2x | Faster than Smoothed Aggregation for heat equation |
+| **AMG Hierarchy Cache** | 50-80% | Reuses multigrid setup on repeated solves |
+| **Warm Start** | 3-10x | Uses previous solution as initial guess |
+| **Unified Numba Kernel** | 1.2-1.5x | Single kernel for harmonic means + FDM coefficients |
+| **Vectorized Elements** | 5-20x | NumPy broadcasting for heaters/tubes geometry |
+| **Pre-allocated COO** | 1.2-1.5x | Pre-allocated arrays for sparse matrix construction |
+
+These optimizations are applied automatically when:
+- Running multiple simulations with the same geometry (AMG cache + warm start)
+- Using AMG preconditioner on large meshes (Ruge-Stuben)
+- Building the matrix (Numba parallel acceleration + unified kernel + COO pre-allocation)
+- Initializing geometry with many discrete elements (vectorized broadcasting)
+
+### GPU Acceleration (CUDA)
+
+For large meshes (>100k cells), GPU acceleration provides significant speedup:
+
+| Mesh Size | CPU Time | GPU (CUDA) | GPU (OpenCL) |
+|-----------|----------|------------|--------------|
+| 100k cells | ~2s | ~0.5s (4x) | ~0.8s (2.5x) |
+| 500k cells | ~15s | ~1.5s (10x) | ~3s (5x) |
+| 1M cells | ~60s | ~2s (30x) | ~8s (7x) |
+
+**Installation:**
+```bash
+# Per GPU NVIDIA (CUDA) - più veloce
+pip install cupy-cuda11x  # o cuda12x
+
+# Per GPU AMD/Intel (OpenCL) - universale
+pip install pyopencl
+```
+
+> 💡 **OpenCL** funziona su **qualsiasi GPU**: AMD Radeon, Intel (integrata e Arc), NVIDIA.
+> I driver OpenCL sono solitamente inclusi nei driver della GPU.
+
+**Usage:** Select **"🎮 GPU (Auto)"** in the Performance dropdown of the Solver panel.
+The system automatically chooses the best available backend (CUDA > OpenCL > CPU).
+
 ### Tolerance Guide
 
 | Value | Use Case | Notes |
@@ -271,19 +335,23 @@ Computation time depends on:
 | 1e-6 | Fast | Sufficient for visualization |
 | 1e-4 | Very fast | Only for quick tests |
 
-### Multi-Threading
+### Multi-Threading / GPU Selection
 
 - **Auto**: Uses all CPU cores → maximum speed, may slow system
 - **All - 1**: ⭐ **Recommended**. Leaves one core free for GUI
 - **N cores**: Limits to N specific cores
+- **🎮 GPU (Auto)**: Auto-selects best GPU backend:
+  - CUDA (NVIDIA) → 5-50x speedup
+  - OpenCL (AMD/Intel/NVIDIA) → 2-10x speedup
 
 ### Practical Tips
 
 1. **Start with small meshes** (30-40 points) for quick tests
-2. **Use BiCGSTAB + Jacobi** for most cases
+2. **Use BiCGSTAB + Jacobi** for most cases (or GPU for large meshes)
 3. **Increase mesh** only for final results
 4. **Tolerance 1e-6** is sufficient for visualization
 5. **Check energy balance** to validate results
+6. **Use GPU** for meshes >100k cells if available
 
 ---
 
@@ -296,10 +364,11 @@ Detailed documentation is available in the `docs/` folder:
 | [01_THEORY.md](docs/01_THEORY.md) | Heat transfer fundamentals and equations |
 | [02_FDM_DISCRETIZATION.md](docs/02_FDM_DISCRETIZATION.md) | Finite Difference Method details |
 | [03_GEOMETRY.md](docs/03_GEOMETRY.md) | Geometry model and mesh mapping |
-| [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md) | GUI structure and usage |
+| [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md) | GUI structure and 2-level tabs layout |
 | [05_ARCHITECTURE.md](docs/05_ARCHITECTURE.md) | Software architecture |
 | [06_GUI_CONFIGURATION.md](docs/06_GUI_CONFIGURATION.md) | Parameter configuration guide |
 | [07_CODE_STRUCTURE.md](docs/07_CODE_STRUCTURE.md) | Detailed code documentation |
+| [08_ANALYSIS_TAB.md](docs/08_ANALYSIS_TAB.md) | Analysis tab features and transient simulation |
 
 ---
 
@@ -312,20 +381,28 @@ battery_simulation/
 ├── requirements.txt        # Python dependencies
 │
 ├── gui/                    # User Interface
-│   └── main_window.py      # PyQt6 main window
+│   ├── main_window.py      # PyQt6 main window with 2-level tabs
+│   ├── analysis_tab.py     # Analysis widgets (type, profiles, save/load)
+│   └── transient_results_widget.py  # Transient visualization widgets
 │
 ├── src/                    # Source code
 │   ├── core/               # Domain model
 │   │   ├── mesh.py         # 3D mesh data structure
 │   │   ├── geometry.py     # Battery geometry definition
-│   │   └── materials.py    # Material manager
+│   │   ├── materials.py    # Material manager
+│   │   └── profiles.py     # Power/extraction profiles, transient config
 │   │
 │   ├── solver/             # Numerical engine
-│   │   ├── matrix_builder.py  # FDM matrix assembly
-│   │   └── steady_state.py    # Linear system solver
+│   │   ├── matrix_builder.py  # FDM matrix assembly (Numba JIT)
+│   │   ├── steady_state.py    # Linear system solver (CPU + GPU)
+│   │   └── transient.py       # Backward Euler transient solver
 │   │
 │   ├── analysis/           # Post-processing
-│   │   └── power_balance.py   # Energy balance calculations
+│   │   ├── power_balance.py   # Power balance calculations
+│   │   └── energy_balance.py  # Energy and exergy balance analyzer
+│   │
+│   ├── io/                 # Input/Output
+│   │   └── state_manager.py   # HDF5 state save/load manager
 │   │
 │   └── visualization/      # Rendering
 │       └── renderer.py     # Standalone PyVista renderer
@@ -334,7 +411,7 @@ battery_simulation/
 │   ├── test_core.py
 │   └── test_solver.py
 │
-├── docs/                   # Documentation
+├── docs/                   # Documentation (8 files)
 ├── config/                 # Configuration files
 └── photo/                  # Screenshots and images
 ```
@@ -351,14 +428,22 @@ battery_simulation/
 - **PyVista** - 3D visualization
 - **PyVistaQt** - PyVista-Qt integration
 - **PyYAML** - Configuration files
+- **h5py** - HDF5 state persistence
 
 ### Optional Dependencies
-- **Numba** - JIT acceleration (optional)
+- **Numba** - JIT acceleration (highly recommended)
 - **PyAMG** - Algebraic Multigrid preconditioner
+- **CuPy** - GPU acceleration for NVIDIA (CUDA)
+- **PyOpenCL** - GPU acceleration for AMD/Intel
 
 ### Installation
 ```bash
 pip install -r requirements.txt
+
+# Optional: GPU support
+pip install cupy-cuda11x  # NVIDIA CUDA 11.x
+pip install cupy-cuda12x  # NVIDIA CUDA 12.x
+pip install pyopencl      # AMD/Intel OpenCL
 ```
 
 ---
@@ -381,11 +466,10 @@ pytest tests/
 ```
 
 ### Future Enhancements
-- [ ] Transient simulation support
-- [ ] Parameter presets and project saving
 - [ ] Additional export formats
 - [ ] Editable material database in GUI
 - [ ] 2D temporal evolution plots
+- [ ] Multi-physics coupling (flow + heat)
 
 ---
 
