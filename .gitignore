@@ -16,7 +16,11 @@ dist/
 
 # Data/Logs
 *.log
-photo/
 results/
 *.vtk
 *.vti
+
+# Keep photo/ for README images and icons
+# Ignore only generated screenshots
+photo/screenshot*.png
+photo/temp_*.png
