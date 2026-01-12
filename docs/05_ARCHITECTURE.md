@@ -73,7 +73,7 @@ This document describes the software architecture of the Thermal Battery simulat
 ```
 battery_simulation/
 ├── gui/                     # User Interface Layer
-│   ├── main_window.py       # PyQt6 GUI - 2-level tabs, ALL user inputs
+│   ├── main_window.py       # PyQt6 GUI - 4-tab structure, ALL user inputs
 │   ├── analysis_tab.py      # Analysis widgets (type, profiles, save/load)
 │   └── transient_results_widget.py  # Transient visualization
 │
@@ -109,7 +109,7 @@ battery_simulation/
 ### 4.1 Mesh Build Phase (No Simulation)
 
 ```python
-# 1. User clicks "Costruisci Mesh" button
+# 1. User clicks "Build Mesh" button
 def build_mesh(self):
     # 2. Extract ALL parameters from GUI widgets
     d, Lx, Ly, Lz, geom = self._build_battery_geometry_from_inputs()
@@ -127,7 +127,7 @@ def build_mesh(self):
 ### 4.2 Simulation Phase
 
 ```python
-# 1. User clicks "Esegui Simulazione" button
+# 1. User clicks "Run Simulation" button
 def run_simulation(self):
     # 2. Solver config from GUI
     config = SolverConfig(method=self.solver_combo.currentText(), ...)

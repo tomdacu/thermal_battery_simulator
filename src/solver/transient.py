@@ -392,7 +392,7 @@ class TransientSolver:
             P_total: Potenza totale [W]
         """
         # Trova celle heater
-        mask = (self.mesh.material == MaterialID.HEATER)
+        mask = (self.mesh.material_id == MaterialID.HEATERS)
         n_heater_cells = np.sum(mask)
         
         if n_heater_cells == 0:
@@ -410,15 +410,15 @@ class TransientSolver:
     
     def _get_tube_temperature(self) -> float:
         """Restituisce temperatura media dei tubi"""
-        mask = (self.mesh.material == MaterialID.TUBE)
+        mask = (self.mesh.material_id == MaterialID.TUBES)
         if np.any(mask):
             return float(np.mean(self.mesh.T[mask]))
         return 20.0
     
     def _count_tubes(self) -> int:
         """Conta il numero di tubi"""
-        # Approssimazione: conta cluster di celle TUBE
-        mask = (self.mesh.material == MaterialID.TUBE)
+        # Approssimazione: conta cluster di celle TUBES
+        mask = (self.mesh.material_id == MaterialID.TUBES)
         return max(1, np.sum(mask) // 100)  # Stima grossolana
     
     def solve_steady_as_initial(self) -> SolverResult:

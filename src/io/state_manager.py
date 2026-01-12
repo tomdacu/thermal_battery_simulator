@@ -113,10 +113,9 @@ class StateManager:
             Hash string (SHA256 troncato)
         """
         data = (
-            f"{mesh.Nr},{mesh.Ntheta},{mesh.Nz},"
-            f"{mesh.r[0]:.6f},{mesh.r[-1]:.6f},"
-            f"{mesh.z[0]:.6f},{mesh.z[-1]:.6f},"
-            f"{mesh.material.sum()}"
+            f"{mesh.Nx},{mesh.Ny},{mesh.Nz},"
+            f"{mesh.Lx:.6f},{mesh.Ly:.6f},{mesh.Lz:.6f},"
+            f"{mesh.material_id.sum()}"
         ).encode()
         
         return hashlib.sha256(data).hexdigest()[:16]
@@ -282,7 +281,7 @@ class StateManager:
             (compatibile: bool, messaggio: str)
         """
         # Verifica dimensioni
-        current_shape = (mesh.Nr, mesh.Ntheta, mesh.Nz)
+        current_shape = (mesh.Nx, mesh.Ny, mesh.Nz)
         if state.mesh_shape != current_shape:
             return False, (
                 f"Dimensioni mesh non corrispondono!\n"
@@ -325,10 +324,10 @@ class StateManager:
             name=name,
             analysis_type=analysis_type,
             geometry_hash=StateManager.compute_geometry_hash(mesh),
-            mesh_shape=(mesh.Nr, mesh.Ntheta, mesh.Nz),
+            mesh_shape=(mesh.Nx, mesh.Ny, mesh.Nz),
             geometry_params=geometry_params or {},
             T=mesh.T.copy() if mesh.T is not None else None,
-            materials=mesh.material.copy()
+            materials=mesh.material_id.copy()
         )
         return state
     

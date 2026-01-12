@@ -107,6 +107,8 @@ class ThermalBatteryGUI(QMainWindow):
         self.mat_manager = MaterialManager()
         self.simulation_thread = None
         self._simulation_completed = False  # Flag per tracciare se simulazione eseguita
+        self._losses_result = None  # Risultato analisi perdite per bilancio energetico
+        self._transient_results = None  # Risultati simulazione transitoria
         
         self.init_ui()
         self.init_default_values()
@@ -120,12 +122,6 @@ class ThermalBatteryGUI(QMainWindow):
         icon_path = Path(__file__).parent.parent / "photo" / "Icona Thermal Battery.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        
-        # Menu bar
-        self.create_menu_bar()
-        
-        # Toolbar
-        self.create_toolbar()
         
         # Widget centrale
         central_widget = QWidget()
@@ -156,54 +152,6 @@ class ThermalBatteryGUI(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Pronto")
-        
-    def create_menu_bar(self):
-        """Crea la barra dei menu"""
-        menubar = self.menuBar()
-        
-        # Menu File
-        file_menu = menubar.addMenu("File")
-        
-        new_action = QAction("Nuova Simulazione", self)
-        new_action.setShortcut("Ctrl+N")
-        new_action.triggered.connect(self.new_simulation)
-        file_menu.addAction(new_action)
-        
-        save_action = QAction("Salva Risultati...", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_results)
-        file_menu.addAction(save_action)
-        
-        export_vtk = QAction("Esporta VTK...", self)
-        export_vtk.triggered.connect(self.export_vtk)
-        file_menu.addAction(export_vtk)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction("Esci", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Menu Visualizzazione
-        view_menu = menubar.addMenu("Visualizzazione")
-        
-        reset_view = QAction("Reset Vista", self)
-        reset_view.triggered.connect(self.reset_view)
-        view_menu.addAction(reset_view)
-        
-        screenshot = QAction("Screenshot...", self)
-        screenshot.triggered.connect(self.take_screenshot)
-        view_menu.addAction(screenshot)
-        
-    def create_toolbar(self):
-        """Crea la toolbar"""
-        toolbar = QToolBar("Toolbar principale")
-        self.addToolBar(toolbar)
-        
-        run_btn = QAction("▶ Simula", self)
-        run_btn.triggered.connect(self.run_simulation)
-        toolbar.addAction(run_btn)
         
     def create_left_panel(self) -> QWidget:
         """
@@ -311,45 +259,33 @@ class ThermalBatteryGUI(QMainWindow):
         self.extraction_widget = ExtractionProfileWidget()
         self.analysis_tabs.addTab(self.extraction_widget, "Estrazione")
         
+        self.main_tabs.addTab(self.analysis_tabs, "3. Analisi")
+        
+        # ============================================================
+        # TAB 4: TOOLS (con sub-tabs)
+        # ============================================================
+        self.tools_tabs = QTabWidget()
+        self.tools_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
+        
         # Sub-tab: Solver
         solver_tab = self._create_solver_tab()
-        self.analysis_tabs.addTab(solver_tab, "Solver")
+        self.tools_tabs.addTab(solver_tab, "Solver")
         
         # Sub-tab: Salvataggio
         self.save_load_widget = SaveLoadWidget()
         self.save_load_widget.state_loaded.connect(self._on_state_loaded)
         self.save_load_widget.save_btn.clicked.connect(self._save_current_state)
-        self.analysis_tabs.addTab(self.save_load_widget, "Salvataggio")
-        
-        self.main_tabs.addTab(self.analysis_tabs, "3. Analisi")
-        
-        # ============================================================
-        # TAB 4: RISULTATI (con sub-tabs)
-        # ============================================================
-        self.results_tabs = QTabWidget()
-        self.results_tabs.setStyleSheet("QTabBar::tab { padding: 5px 10px; font-size: 10px; }")
-        
-        # Sub-tab: Statistiche
-        stats_tab = self._create_statistics_subtab()
-        self.results_tabs.addTab(stats_tab, "Statistiche")
-        
-        # Sub-tab: Bilancio Energetico
-        balance_tab = self._create_energy_balance_subtab()
-        self.results_tabs.addTab(balance_tab, "Bilancio")
-        
-        # Sub-tab: Materiali (distribuzione)
-        mat_info_tab = self._create_materials_info_subtab()
-        self.results_tabs.addTab(mat_info_tab, "Materiali")
-        
-        # Sub-tab: Esporta
-        export_tab = self._create_export_subtab()
-        self.results_tabs.addTab(export_tab, "Esporta")
+        self.tools_tabs.addTab(self.save_load_widget, "Salvataggio")
         
         # Sub-tab: Guida
         help_tab = self._create_help_tab()
-        self.results_tabs.addTab(help_tab, "📖 Guida")
+        self.tools_tabs.addTab(help_tab, "Guida")
         
-        self.main_tabs.addTab(self.results_tabs, "4. Risultati")
+        # Sub-tab: Utilities
+        utilities_tab = self._create_utilities_subtab()
+        self.tools_tabs.addTab(utilities_tab, "Utilities")
+        
+        self.main_tabs.addTab(self.tools_tabs, "4. Tools")
         
         main_layout.addWidget(self.main_tabs)
         
@@ -683,50 +619,15 @@ class ThermalBatteryGUI(QMainWindow):
         return self._create_scrollable_widget(content)
     
     # ================================================================
-    # SUB-TABS RISULTATI
+    # SUB-TABS TOOLS
     # ================================================================
     
-    def _create_statistics_subtab(self) -> QWidget:
-        """Sub-tab per statistiche temperatura"""
+    def _create_utilities_subtab(self) -> QWidget:
+        """Sub-tab Utilities con funzioni di esportazione e visualizzazione"""
         content = QWidget()
         layout = QVBoxLayout(content)
         
-        self.stats_text = QTextEdit()
-        self.stats_text.setReadOnly(True)
-        self.stats_text.setFont(QFont("Consolas", 9))
-        layout.addWidget(self.stats_text)
-        
-        return content
-    
-    def _create_energy_balance_subtab(self) -> QWidget:
-        """Sub-tab per bilancio energetico"""
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        
-        self.energy_text = QTextEdit()
-        self.energy_text.setReadOnly(True)
-        self.energy_text.setFont(QFont("Consolas", 9))
-        layout.addWidget(self.energy_text)
-        
-        return content
-    
-    def _create_materials_info_subtab(self) -> QWidget:
-        """Sub-tab per distribuzione materiali"""
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        
-        self.mat_text = QTextEdit()
-        self.mat_text.setReadOnly(True)
-        self.mat_text.setFont(QFont("Consolas", 9))
-        layout.addWidget(self.mat_text)
-        
-        return content
-    
-    def _create_export_subtab(self) -> QWidget:
-        """Sub-tab per esportazione risultati"""
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        
+        # === ESPORTAZIONE ===
         export_group = QGroupBox("Esporta Risultati")
         export_layout = QVBoxLayout()
         
@@ -738,12 +639,23 @@ class ThermalBatteryGUI(QMainWindow):
         vtk_btn.clicked.connect(self.export_vtk)
         export_layout.addWidget(vtk_btn)
         
-        screenshot_btn = QPushButton("📷 Screenshot...")
-        screenshot_btn.clicked.connect(self.take_screenshot)
-        export_layout.addWidget(screenshot_btn)
-        
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
+        
+        # === VISUALIZZAZIONE ===
+        view_group = QGroupBox("Visualizzazione")
+        view_layout = QVBoxLayout()
+        
+        screenshot_btn = QPushButton("📷 Screenshot...")
+        screenshot_btn.clicked.connect(self.take_screenshot)
+        view_layout.addWidget(screenshot_btn)
+        
+        reset_view_btn = QPushButton("🔄 Reset Vista")
+        reset_view_btn.clicked.connect(self.reset_view)
+        view_layout.addWidget(reset_view_btn)
+        
+        view_group.setLayout(view_layout)
+        layout.addWidget(view_group)
         
         layout.addStretch()
         return content
@@ -1046,115 +958,80 @@ class ThermalBatteryGUI(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         
-        # === METODO DI SOLUZIONE ===
-        solver_group = QGroupBox("Metodo di Soluzione")
-        solver_layout = QGridLayout()
+        # =====================================================================
+        # === IMPOSTAZIONI COMUNI (Tutte le Analisi) ===
+        # =====================================================================
+        common_group = QGroupBox("⚙️ Impostazioni Comuni (Tutte le Analisi)")
+        common_layout = QGridLayout()
         
         row = 0
-        solver_layout.addWidget(QLabel("Metodo:"), row, 0)
+        common_layout.addWidget(QLabel("Metodo solver:"), row, 0)
         self.solver_combo = QComboBox()
         self.solver_combo.addItems(["bicgstab", "cg", "gmres", "direct"])
-        self.solver_combo.setCurrentText("bicgstab")  # Default: BiCGSTAB è più robusto
+        self.solver_combo.setCurrentText("bicgstab")
         self.solver_combo.currentTextChanged.connect(self._on_solver_method_changed)
-        solver_layout.addWidget(self.solver_combo, row, 1)
+        common_layout.addWidget(self.solver_combo, row, 1)
         
         row += 1
         self.solver_method_desc = QLabel("")
         self.solver_method_desc.setWordWrap(True)
         self.solver_method_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
-        solver_layout.addWidget(self.solver_method_desc, row, 0, 1, 2)
+        common_layout.addWidget(self.solver_method_desc, row, 0, 1, 2)
         
-        solver_group.setLayout(solver_layout)
-        layout.addWidget(solver_group)
-        
-        # === PRECONDIZIONATORE ===
-        prec_group = QGroupBox("Precondizionatore")
-        prec_layout = QGridLayout()
-        
-        row = 0
-        prec_layout.addWidget(QLabel("Tipo:"), row, 0)
+        row += 1
+        common_layout.addWidget(QLabel("Precondizionatore:"), row, 0)
         self.preconditioner_combo = QComboBox()
         self.preconditioner_combo.addItems([
-            "jacobi", 
-            "none", 
-            "ilu", 
-            "amg (Ruge-Stuben)", 
-            "amg (Smoothed Aggregation)"
+            "jacobi", "none", "ilu", 
+            "amg (Ruge-Stuben)", "amg (Smoothed Aggregation)"
         ])
-        self.preconditioner_combo.setCurrentText("jacobi")  # Jacobi è più veloce per eq. calore
+        self.preconditioner_combo.setCurrentText("jacobi")
         self.preconditioner_combo.currentTextChanged.connect(self._on_preconditioner_changed)
-        prec_layout.addWidget(self.preconditioner_combo, row, 1)
+        common_layout.addWidget(self.preconditioner_combo, row, 1)
         
         row += 1
         self.precond_desc = QLabel("")
         self.precond_desc.setWordWrap(True)
         self.precond_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
-        prec_layout.addWidget(self.precond_desc, row, 0, 1, 2)
+        common_layout.addWidget(self.precond_desc, row, 0, 1, 2)
         
         row += 1
         self.amg_warning = QLabel("")
         self.amg_warning.setWordWrap(True)
         self.amg_warning.setStyleSheet("color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;")
-        self.amg_warning.hide()  # Nascosto di default
-        prec_layout.addWidget(self.amg_warning, row, 0, 1, 2)
+        self.amg_warning.hide()
+        common_layout.addWidget(self.amg_warning, row, 0, 1, 2)
         
-        prec_group.setLayout(prec_layout)
-        layout.addWidget(prec_group)
-        
-        # === CONVERGENZA ===
-        conv_group = QGroupBox("Parametri di Convergenza")
-        conv_layout = QGridLayout()
-        
-        row = 0
-        conv_layout.addWidget(QLabel("Tolleranza:"), row, 0)
+        row += 1
+        common_layout.addWidget(QLabel("Tolleranza solver:"), row, 0)
         self.tolerance_combo = QComboBox()
         self.tolerance_combo.addItems(["1e-10 (Alta precisione)", "1e-8 (Default)", 
                                         "1e-6 (Veloce)", "1e-4 (Molto veloce)"])
-        self.tolerance_combo.setCurrentIndex(1)  # Default 1e-8
+        self.tolerance_combo.setCurrentIndex(1)
         self.tolerance_combo.currentTextChanged.connect(self._on_tolerance_changed)
-        conv_layout.addWidget(self.tolerance_combo, row, 1)
+        common_layout.addWidget(self.tolerance_combo, row, 1)
         
         row += 1
         self.tolerance_desc = QLabel("")
         self.tolerance_desc.setWordWrap(True)
         self.tolerance_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
-        conv_layout.addWidget(self.tolerance_desc, row, 0, 1, 2)
+        common_layout.addWidget(self.tolerance_desc, row, 0, 1, 2)
         
         row += 1
-        conv_layout.addWidget(QLabel("Max iterazioni:"), row, 0)
+        common_layout.addWidget(QLabel("Max iterazioni solver:"), row, 0)
         self.max_iter_spin = QSpinBox()
         self.max_iter_spin.setRange(100, 100000)
         self.max_iter_spin.setValue(5000)
         self.max_iter_spin.setSingleStep(1000)
-        conv_layout.addWidget(self.max_iter_spin, row, 1)
+        common_layout.addWidget(self.max_iter_spin, row, 1)
         
-        row += 1
-        conv_layout.addWidget(QLabel("Precisione:"), row, 0)
-        self.precision_combo = QComboBox()
-        self.precision_combo.addItems([
-            "float64 (doppia)",
-            "float32 (singola)",
-            "float16 (mezza)"
-        ])
-        self.precision_combo.setCurrentIndex(0)  # Default float64
-        self.precision_combo.currentTextChanged.connect(self._on_precision_changed)
-        conv_layout.addWidget(self.precision_combo, row, 1)
+        common_group.setLayout(common_layout)
+        layout.addWidget(common_group)
         
-        row += 1
-        self.precision_desc = QLabel(
-            "<b>float64</b>: massima precisione, standard.<br>"
-            "<b>float32</b>: 2x meno memoria, leggermente più veloce.<br>"
-            "<b>float16</b>: 4x meno memoria, può avere problemi di convergenza."
-        )
-        self.precision_desc.setWordWrap(True)
-        self.precision_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
-        conv_layout.addWidget(self.precision_desc, row, 0, 1, 2)
-        
-        conv_group.setLayout(conv_layout)
-        layout.addWidget(conv_group)
-        
-        # === PERFORMANCE / THREAD ===
-        perf_group = QGroupBox("Performance (CPU/GPU)")
+        # =====================================================================
+        # === PERFORMANCE (CPU/GPU) - Comune a Tutte ===
+        # =====================================================================
+        perf_group = QGroupBox("🚀 Performance (CPU/GPU) - Tutte le Analisi")
         perf_layout = QGridLayout()
         
         row = 0
@@ -1169,14 +1046,24 @@ class ThermalBatteryGUI(QMainWindow):
             "GPU: CUDA (NVIDIA)",
             "GPU: OpenCL (AMD/Intel/NVIDIA)"
         ])
-        self.threads_combo.setCurrentIndex(1)  # Default: tutti - 1
+        self.threads_combo.setCurrentIndex(1)
         self.threads_combo.currentTextChanged.connect(self._on_compute_mode_changed)
         perf_layout.addWidget(self.threads_combo, row, 1)
         
         row += 1
+        perf_layout.addWidget(QLabel("Precisione:"), row, 0)
+        self.precision_combo = QComboBox()
+        self.precision_combo.addItems([
+            "float64 (doppia)", "float32 (singola)", "float16 (mezza)"
+        ])
+        self.precision_combo.setCurrentIndex(0)
+        self.precision_combo.currentTextChanged.connect(self._on_precision_changed)
+        perf_layout.addWidget(self.precision_combo, row, 1)
+        
+        row += 1
         self.threads_desc = QLabel(
-            "<b>Auto</b>: massima velocità, può rallentare il sistema.<br>"
-            "<b>Tutti - 1</b>: raccomandato, lascia un core libero per la GUI."
+            "<b>Auto</b>: max velocità. <b>Tutti-1</b>: lascia 1 core per GUI. "
+            "<b>GPU</b>: usa scheda video (richiede driver)."
         )
         self.threads_desc.setWordWrap(True)
         self.threads_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
@@ -1185,18 +1072,88 @@ class ThermalBatteryGUI(QMainWindow):
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
         
+        # =====================================================================
+        # === ANALISI PERDITE (Parametri Specifici) ===
+        # =====================================================================
+        losses_group = QGroupBox("🔥 Analisi Perdite - Parametri Iterazione")
+        losses_layout = QGridLayout()
+        
+        row = 0
+        losses_layout.addWidget(QLabel("Tolleranza T (°C):"), row, 0)
+        self.losses_tol_spin = QDoubleSpinBox()
+        self.losses_tol_spin.setRange(0.1, 10.0)
+        self.losses_tol_spin.setValue(1.0)
+        self.losses_tol_spin.setSingleStep(0.1)
+        self.losses_tol_spin.setDecimals(1)
+        self.losses_tol_spin.setToolTip("Errore massimo accettabile su T media sabbia")
+        losses_layout.addWidget(self.losses_tol_spin, row, 1)
+        
+        row += 1
+        losses_layout.addWidget(QLabel("Max iterazioni:"), row, 0)
+        self.losses_max_iter_spin = QSpinBox()
+        self.losses_max_iter_spin.setRange(5, 100)
+        self.losses_max_iter_spin.setValue(20)
+        self.losses_max_iter_spin.setSingleStep(5)
+        self.losses_max_iter_spin.setToolTip("Numero massimo di iterazioni Q-T")
+        losses_layout.addWidget(self.losses_max_iter_spin, row, 1)
+        
+        row += 1
+        losses_layout.addWidget(QLabel("Underrelaxation α:"), row, 0)
+        self.losses_alpha_spin = QDoubleSpinBox()
+        self.losses_alpha_spin.setRange(0.1, 1.0)
+        self.losses_alpha_spin.setValue(0.5)
+        self.losses_alpha_spin.setSingleStep(0.1)
+        self.losses_alpha_spin.setDecimals(2)
+        self.losses_alpha_spin.setToolTip("Fattore di smorzamento (0.1=lento ma stabile, 1.0=veloce ma può oscillare)")
+        losses_layout.addWidget(self.losses_alpha_spin, row, 1)
+        
+        row += 1
+        losses_layout.addWidget(QLabel("h convezione (W/m²K):"), row, 0)
+        self.losses_h_conv_spin = QDoubleSpinBox()
+        self.losses_h_conv_spin.setRange(1.0, 50.0)
+        self.losses_h_conv_spin.setValue(10.0)
+        self.losses_h_conv_spin.setSingleStep(1.0)
+        self.losses_h_conv_spin.setDecimals(1)
+        self.losses_h_conv_spin.setToolTip("Coefficiente scambio convettivo esterno (5-10 naturale, 20-50 forzata)")
+        losses_layout.addWidget(self.losses_h_conv_spin, row, 1)
+        
+        row += 1
+        losses_layout.addWidget(QLabel("T terreno (°C):"), row, 0)
+        self.losses_T_ground_spin = QDoubleSpinBox()
+        self.losses_T_ground_spin.setRange(-10.0, 30.0)
+        self.losses_T_ground_spin.setValue(15.0)
+        self.losses_T_ground_spin.setSingleStep(1.0)
+        self.losses_T_ground_spin.setDecimals(1)
+        self.losses_T_ground_spin.setToolTip("Temperatura del terreno sotto la batteria")
+        losses_layout.addWidget(self.losses_T_ground_spin, row, 1)
+        
+        row += 1
+        losses_desc = QLabel(
+            "<b>α</b>: smorzamento iterazione (↓ = stabile, ↑ = veloce).<br>"
+            "<b>h</b>: scambio convettivo con aria esterna.<br>"
+            "<b>T terreno</b>: temperatura suolo (BC inferiore)."
+        )
+        losses_desc.setWordWrap(True)
+        losses_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        losses_layout.addWidget(losses_desc, row, 0, 1, 2)
+        
+        losses_group.setLayout(losses_layout)
+        layout.addWidget(losses_group)
+        
+        # =====================================================================
         # === SUGGERIMENTI RAPIDI ===
+        # =====================================================================
         tips_group = QGroupBox("⚡ Suggerimenti per Velocizzare")
         tips_layout = QVBoxLayout()
         
         tips_text = QLabel(
             "<b>Per mesh grandi (>50k celle):</b><br>"
-            "• Usa metodo <b>cg</b> + precondizionatore <b>jacobi</b> o <b>none</b><br>"
-            "• Tolleranza <b>1e-6</b> è sufficiente per visualizzazione<br>"
-            "• ⚠️ Evita <b>ilu</b>: è single-threaded e lento!<br><br>"
-            "<b>Per risultati precisi:</b><br>"
-            "• Metodo <b>cg</b> con tolleranza <b>1e-10</b><br>"
-            "• Metodo <b>direct</b> solo per mesh piccole (<20k celle)"
+            "• Metodo <b>cg</b> + precondizionatore <b>jacobi</b><br>"
+            "• Tolleranza <b>1e-6</b> è sufficiente<br>"
+            "• ⚠️ Evita <b>ilu</b>: è lento!<br><br>"
+            "<b>Analisi Perdite lenta?</b><br>"
+            "• Aumenta α (0.7-0.9) se converge bene<br>"
+            "• Aumenta tolleranza T (2-5°C) per risultati veloci"
         )
         tips_text.setWordWrap(True)
         tips_text.setStyleSheet("background-color: #e8f5e9; padding: 8px; border-radius: 4px;")
@@ -1453,29 +1410,8 @@ class ThermalBatteryGUI(QMainWindow):
         return tol_map.get(self.tolerance_combo.currentText(), 1e-8)
     
     def _on_precision_changed(self, prec_str: str):
-        """Aggiorna descrizione precisione"""
-        if "float16" in prec_str:
-            self.precision_desc.setText(
-                "<b>float16</b>: 4x meno memoria, ma precisione limitata (~3 cifre).<br>"
-                "Potrebbe non convergere per problemi difficili."
-            )
-            self.precision_desc.setStyleSheet(
-                "color: #E65100; font-size: 9px; padding: 4px; background-color: #FFF3E0;"
-            )
-        elif "float32" in prec_str:
-            self.precision_desc.setText(
-                "<b>float32</b>: 2x meno memoria, ~7 cifre di precisione.<br>"
-                "Buon compromesso per mesh grandi. Speedup memory-bound."
-            )
-            self.precision_desc.setStyleSheet(
-                "color: #1565C0; font-size: 9px; padding: 4px; background-color: #E3F2FD;"
-            )
-        else:
-            self.precision_desc.setText(
-                "<b>float64</b>: massima precisione (~15 cifre).<br>"
-                "Standard per calcoli scientifici."
-            )
-            self.precision_desc.setStyleSheet("color: #666; font-size: 9px; padding: 4px;")
+        """Aggiorna descrizione precisione (no-op, la descrizione è statica)"""
+        pass  # Descrizione rimossa per interfaccia compatta
     
     def _get_precision(self) -> str:
         """Estrae il tipo di precisione dalla combo"""
@@ -1799,39 +1735,15 @@ class ThermalBatteryGUI(QMainWindow):
         self.opacity_label = QLabel("80%")
         viz_layout.addWidget(self.opacity_label, 2, 5)
         
-        viz_group.setLayout(viz_layout)
-        layout.addWidget(viz_group)
-        
-        # Colormap controls
-        cmap_group = QGroupBox("Colormap")
-        cmap_layout = QHBoxLayout()
-        
-        cmap_layout.addWidget(QLabel("Colormap:"))
+        # Riga 4: Colormap
+        viz_layout.addWidget(QLabel("Colormap:"), 3, 0)
         self.cmap_combo = QComboBox()
         self.cmap_combo.addItems(["coolwarm", "jet", "viridis", "plasma", "inferno", "turbo"])
         self.cmap_combo.currentTextChanged.connect(self.update_visualization)
-        cmap_layout.addWidget(self.cmap_combo)
+        viz_layout.addWidget(self.cmap_combo, 3, 1, 1, 2)
         
-        cmap_layout.addWidget(QLabel("  T min:"))
-        self.tmin_spin = QDoubleSpinBox()
-        self.tmin_spin.setRange(-100, 1000)
-        self.tmin_spin.setValue(0)
-        self.tmin_spin.valueChanged.connect(self.update_visualization)
-        cmap_layout.addWidget(self.tmin_spin)
-        
-        cmap_layout.addWidget(QLabel("  T max:"))
-        self.tmax_spin = QDoubleSpinBox()
-        self.tmax_spin.setRange(0, 2000)
-        self.tmax_spin.setValue(500)
-        self.tmax_spin.valueChanged.connect(self.update_visualization)
-        cmap_layout.addWidget(self.tmax_spin)
-        
-        self.auto_range_check = QCheckBox("Auto")
-        self.auto_range_check.setChecked(True)
-        cmap_layout.addWidget(self.auto_range_check)
-        
-        cmap_group.setLayout(cmap_layout)
-        layout.addWidget(cmap_group)
+        viz_group.setLayout(viz_layout)
+        layout.addWidget(viz_group)
         
         return panel
     
@@ -2489,6 +2401,64 @@ MESH:
 """
         self.energy_text.setText(text)
     
+    def _update_energy_balance_losses(self):
+        """Aggiorna bilancio energetico con risultati analisi perdite"""
+        if not hasattr(self, '_losses_result') or self._losses_result is None:
+            return
+        
+        r = self._losses_result
+        
+        # Calcola anche energia immagazzinata
+        if self.mesh is not None:
+            analyzer = PowerBalanceAnalyzer(self.mesh)
+            stored = analyzer.compute_stored_energy()
+            E_kWh = stored['E_kWh']
+            E_MWh = stored['E_MWh']
+            
+            # Calcola autonomia: quanto tempo può mantenere T con queste perdite
+            if r['Q_total_kW'] > 0:
+                autonomy_h = E_kWh / r['Q_total_kW']  # ore
+            else:
+                autonomy_h = float('inf')
+        else:
+            E_kWh = 0
+            E_MWh = 0
+            autonomy_h = 0
+        
+        status = "✓ CONVERGUTO" if r['converged'] else "⚠ NON CONVERGUTO"
+        
+        text = f"""
+╔══════════════════════════════════════════════╗
+║      BILANCIO ENERGETICO - ANALISI PERDITE   ║
+╠══════════════════════════════════════════════╣
+║ CONDIZIONI                                   ║
+╠──────────────────────────────────────────────╣
+║ T target sabbia:  {r['T_target_C']:6.1f} °C               ║
+║ T finale media:   {r['T_final_C']:6.1f} °C               ║
+║ T ambiente:       {r['T_amb_C']:6.1f} °C               ║
+║ T terreno:        {r['T_ground_C']:6.1f} °C               ║
+║ h convezione:     {r['h_conv']:6.1f} W/(m²·K)          ║
+╠══════════════════════════════════════════════╣
+║ PERDITE TERMICHE                             ║
+╠──────────────────────────────────────────────╣
+║ TOTALE:          {r['Q_total_kW']:7.2f} kW               ║
+║   - Superiore:   {r['Q_top_kW']:7.2f} kW               ║
+║   - Laterali:    {r['Q_side_kW']:7.2f} kW               ║
+║   - Inferiore:   {r['Q_bottom_kW']:7.2f} kW               ║
+╠──────────────────────────────────────────────╣
+║ Densità perdita: {r['Q_total_kW']*1000/r['V_sand_m3']:7.1f} W/m³              ║
+╠══════════════════════════════════════════════╣
+║ ENERGIA IMMAGAZZINATA                        ║
+╠──────────────────────────────────────────────╣
+║ E termica:       {E_kWh:7.0f} kWh              ║
+║                  {E_MWh:7.2f} MWh              ║
+║ Autonomia:       {autonomy_h:7.1f} ore              ║
+╠══════════════════════════════════════════════╣
+║ CONVERGENZA: {status:15s} ({r['iterations']} iter) ║
+╚══════════════════════════════════════════════╝
+"""
+        self.energy_text.setText(text)
+    
     def update_material_info(self):
         """Aggiorna le informazioni sui materiali"""
         if self.mesh is None:
@@ -2595,7 +2565,11 @@ MESH:
         
         # Handle special "Geometry" field - shows real analytic geometry
         if field == "Geometry":
-            self._render_geometry_view(opacity)
+            if self.battery_geometry is None:
+                self.plotter.add_text("Nessuna geometria - Costruisci prima la geometria", 
+                                      position='upper_left', font_size=12, color='red')
+                return
+            self._render_geometry_view_standalone(self.mesh.Lx, self.mesh.Ly, self.mesh.Lz)
             if reset_camera:
                 self.plotter.reset_camera()
             return
@@ -2607,20 +2581,15 @@ MESH:
             origin=(0, 0, 0)
         )
         
-        # Add data
-        grid.cell_data["Temperature"] = self.mesh.T.ravel(order='F')
+        # Add data (Temperature converted from Kelvin to Celsius for display)
+        grid.cell_data["Temperature"] = (self.mesh.T - 273.15).ravel(order='F')
         grid.cell_data["Material"] = self.mesh.material_id.ravel(order='F').astype(float)
         grid.cell_data["k"] = self.mesh.k.ravel(order='F')
         grid.cell_data["Q"] = self.mesh.Q.ravel(order='F')
         
-        # Color range
-        if self.auto_range_check.isChecked():
-            data = grid.cell_data[field]
-            clim = [float(data.min()), float(data.max())]
-            self.tmin_spin.setValue(clim[0])
-            self.tmax_spin.setValue(clim[1])
-        else:
-            clim = [self.tmin_spin.value(), self.tmax_spin.value()]
+        # Color range - sempre auto
+        data = grid.cell_data[field]
+        clim = [float(data.min()), float(data.max())]
         
         # Clip plane position and normal
         axis = self.axis_combo.currentText()
@@ -2661,9 +2630,17 @@ MESH:
                     clim=[0, 7], opacity=opacity, show_scalar_bar=False
                 )
             else:
+                # Scalar bar automatica di PyVista, configurata verticale
+                unit = "°C" if field == "Temperature" else ("W/m³" if field == "Q" else "W/(m·K)")
                 self.plotter.add_mesh(
                     clipped_no_air, scalars=field, 
-                    cmap=cmap, clim=clim, opacity=opacity
+                    cmap=cmap, clim=clim, opacity=opacity,
+                    scalar_bar_args={
+                        'vertical': True,
+                        'title': f"{field} ({unit})",
+                        'position_x': 0.85,  # Spostata leggermente a sinistra
+                        'position_y': 0.05
+                    }
                 )
         
         # Add domain outline for reference
@@ -2672,12 +2649,6 @@ MESH:
         # === LEGEND / SCALAR BAR ===
         if field == "Material":
             self._add_material_legend()
-        else:
-            unit = "°C" if field == "Temperature" else ("W/m³" if field == "Q" else "W/(m·K)")
-            self.plotter.add_scalar_bar(
-                title=f"{field} [{unit}]",
-                vertical=True
-            )
         
         # Axes
         self.plotter.add_axes()
@@ -2690,115 +2661,6 @@ MESH:
             self.plotter.reset_camera()
         else:
             self.plotter.render()
-    
-    def _render_geometry_view(self, opacity: float):
-        """
-        Render the analytic geometry view with proper colors and legend.
-        
-        Shows the 4 concentric zones:
-        - STORAGE: central zone with storage material (beige)
-        - INSULATION: thermal insulation (yellow)  
-        - STEEL: external shell (dark gray)
-        - TUBES and HEATERS: discrete elements inside storage
-        """
-        if self.battery_geometry is None:
-            self.plotter.add_text("Nessuna geometria - Costruisci prima la geometria", 
-                                  position='upper_left', font_size=12, color='red')
-            return
-        
-        geom = self.battery_geometry
-        cyl = geom.cylinder
-        
-        # Domain outline
-        domain = pv.Cube(
-            center=(self.mesh.Lx / 2, self.mesh.Ly / 2, self.mesh.Lz / 2),
-            x_length=self.mesh.Lx,
-            y_length=self.mesh.Ly,
-            z_length=self.mesh.Lz
-        )
-        self.plotter.add_mesh(domain.outline(), color='gray', line_width=1)
-        
-        z_center = cyl.base_z + cyl.height / 2
-        
-        # Zone colors - 4 zone semplificate
-        zone_info = [
-            (cyl.r_shell, cyl.r_insulation, "STEEL", [0.40, 0.40, 0.45]),
-            (cyl.r_insulation, cyl.r_storage, "INSULATION", [0.95, 0.85, 0.55]),
-            (cyl.r_storage, 0, "STORAGE", [0.85, 0.65, 0.45]),
-        ]
-        
-        legend_entries = []
-        
-        for r_outer, r_inner, name, color in zone_info:
-            if r_outer <= 0:
-                continue
-            cyl_mesh = pv.Cylinder(
-                center=(cyl.center_x, cyl.center_y, z_center),
-                direction=(0, 0, 1),
-                radius=float(r_outer),
-                height=float(cyl.height),
-                resolution=72
-            )
-            self.plotter.add_mesh(cyl_mesh, color=color, opacity=opacity * 0.7, 
-                                  show_edges=False)
-            legend_entries.append([name, color])
-        
-        # Add individual heater elements if discrete pattern (inside storage)
-        heater_elems = []
-        if geom.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
-            heater_elems = geom.heaters.generate_positions(
-                cyl.center_x, cyl.center_y,
-                0, cyl.r_storage * 0.9,
-                cyl.base_z, cyl.top_z,
-                phase_offset=cyl.phase_offset_rad
-            )
-            for htr in heater_elems:
-                h_center = (htr.x, htr.y, (htr.z_bottom + htr.z_top) / 2)
-                h_cyl = pv.Cylinder(
-                    center=h_center,
-                    direction=(0, 0, 1),
-                    radius=float(htr.radius),
-                    height=float(htr.z_top - htr.z_bottom),
-                    resolution=24
-                )
-                self.plotter.add_mesh(h_cyl, color=[0.95, 0.2, 0.1], opacity=0.9)
-            if heater_elems:
-                legend_entries.append(["HEATERS", [0.95, 0.2, 0.1]])
-        
-        # Add individual tube elements (inside storage)
-        tube_elems = geom.tubes.generate_positions(
-            cyl.center_x, cyl.center_y,
-            cyl.r_storage * 0.9,
-            cyl.base_z, cyl.top_z
-        )
-        for tube in tube_elems:
-            t_center = (tube.x, tube.y, (tube.z_bottom + tube.z_top) / 2)
-            t_cyl = pv.Cylinder(
-                center=t_center,
-                direction=(0, 0, 1),
-                radius=float(tube.radius),
-                height=float(tube.z_top - tube.z_bottom),
-                resolution=24
-            )
-            self.plotter.add_mesh(t_cyl, color=[0.3, 0.3, 0.8], opacity=0.8)
-        if tube_elems:
-            legend_entries.append(["TUBES", [0.3, 0.3, 0.8]])
-        
-        # Legend
-        if legend_entries:
-            self.plotter.add_legend(legend_entries, bcolor='white', 
-                                    face='rectangle', loc='upper right')
-        
-        # Axes
-        self.plotter.add_axes()
-        
-        # Info text
-        self.plotter.add_text(
-            f"Geometria Analitica (4 Zone)\n"
-            f"R_storage={cyl.r_storage:.2f}m, H={cyl.height:.2f}m\n"
-            f"Insulation: {cyl.insulation_thickness:.2f}m, Steel: {cyl.shell_thickness:.3f}m",
-            position='upper_left', font_size=10
-        )
     
     def _add_material_legend(self):
         """Add legend for material visualization"""
@@ -2958,8 +2820,8 @@ MESH:
         
         # Verifica compatibilità geometria
         if self.mesh is not None:
-            from src.io.state_manager import compute_geometry_hash
-            current_hash = compute_geometry_hash(self.mesh)
+            from src.io.state_manager import StateManager
+            current_hash = StateManager.compute_geometry_hash(self.mesh)
             if current_hash != state.geometry_hash:
                 reply = QMessageBox.question(
                     self, "Geometria diversa",
@@ -2994,19 +2856,19 @@ MESH:
             return
         
         # Prendi nome e descrizione dalla GUI
-        name = self.analysis_tab.save_load_widget.save_name_edit.text()
+        name = self.save_load_widget.save_name_edit.text()
         if not name:
             name = "Simulation"
-        description = self.analysis_tab.save_load_widget.save_desc_edit.text()
+        description = self.save_load_widget.save_desc_edit.text()
         
         # Crea oggetto stato
-        analysis_type = self.analysis_tab.get_analysis_type()
-        state = SimulationState.from_mesh(
+        analysis_type = self.analysis_type_widget.get_analysis_type()
+        state = StateManager.create_state_from_mesh(
             mesh=self.mesh,
             name=name,
-            description=description,
             analysis_type=analysis_type
         )
+        state.description = description
         
         # Seleziona file
         filename, _ = QFileDialog.getSaveFileName(
@@ -3024,7 +2886,7 @@ MESH:
             QMessageBox.warning(self, "Attenzione", "Prima costruisci la mesh!")
             return
         
-        analysis_type = self.analysis_tab.get_analysis_type()
+        analysis_type = self.analysis_type_widget.get_analysis_type()
         
         if analysis_type == "steady":
             self._run_steady_simulation()
@@ -3081,75 +2943,261 @@ MESH:
             QMessageBox.critical(self, "Errore", str(e))
     
     def _run_losses_analysis(self):
-        """Esegue analisi perdite impostando T media nello storage"""
+        """
+        Esegue analisi perdite con algoritmo iterativo.
+        
+        Algoritmo:
+        1. Inizializzazione intelligente: T_sabbia = T_target, isolamento con gradiente
+        2. Imposta BC convettive sulle facce esterne
+        3. Loop iterativo:
+           - Imposta Q_sabbia come sorgente uniforme
+           - Risolvi steady-state
+           - Calcola T_media_sabbia
+           - Aggiusta Q usando feedback proporzionale
+           - Ripeti fino a |T_media - T_target| < tolleranza
+        4. Q_finale = perdite termiche
+        """
         self.log("=" * 50)
-        self.log("[ANALISI] Calcolo Perdite...")
+        self.log("[ANALISI PERDITE] Metodo Stazionario Iterativo")
         self.progress_bar.setValue(0)
+        self.status_label.setText("Stato: Analisi perdite...")
         
         try:
-            # Ottieni parametri da scheda analisi
-            T_storage = self.analysis_tab.analysis_type_widget.losses_T_spin.value() + 273.15
-            T_amb = self.analysis_tab.analysis_type_widget.losses_T_amb_spin.value() + 273.15
-            
-            self.log(f"  T storage: {T_storage - 273.15:.1f} °C")
-            self.log(f"  T ambiente: {T_amb - 273.15:.1f} °C")
-            
-            # Imposta temperatura nello storage
             from src.core.mesh import MaterialID
-            storage_mask = (self.mesh.material_id == MaterialID.SAND.value)
-            self.mesh.T[storage_mask] = T_storage
             
-            # Imposta condizione al contorno di Dirichlet per lo storage
-            # e calcola il flusso necessario per mantenerla
-            self.progress_bar.setValue(20)
+            # ========== PARAMETRI INPUT ==========
+            T_target_C = self.analysis_type_widget.losses_T_spin.value()  # °C
+            T_amb_C = self.analysis_type_widget.losses_T_amb_spin.value()  # °C
+            T_target_K = T_target_C + 273.15
+            T_amb_K = T_amb_C + 273.15
             
-            # Usa il solver con Q=0 e T fissata nello storage
-            # Per fare questo dovremmo fissare le celle storage come Dirichlet
-            # Approccio semplificato: calcoliamo direttamente le perdite
+            # Parametri iterazione (dal tab Solver)
+            tol_C = self.losses_tol_spin.value()
+            max_iter = self.losses_max_iter_spin.value()
+            alpha = self.losses_alpha_spin.value()
+            h_conv = self.losses_h_conv_spin.value()
+            T_ground_C = self.losses_T_ground_spin.value()
+            T_ground_K = T_ground_C + 273.15
+            h_ground = 5.0  # W/(m²·K) - fissato per il terreno
             
-            self.progress_bar.setValue(50)
+            self.log(f"  T target sabbia: {T_target_C:.1f} °C")
+            self.log(f"  T ambiente: {T_amb_C:.1f} °C")
+            self.log(f"  T terreno: {T_ground_C:.1f} °C, h_conv: {h_conv:.1f} W/(m²·K)")
+            self.log(f"  Tolleranza: {tol_C:.1f} °C, Max iter: {max_iter}, α: {alpha:.2f}")
             
-            # Usa EnergyBalanceAnalyzer
-            analyzer = EnergyBalanceAnalyzer(self.mesh, T_ambient=T_amb)
+            # ========== MASCHERA SABBIA E VOLUME ==========
+            sand_mask = (self.mesh.material_id == MaterialID.SAND.value)
+            n_sand_cells = np.sum(sand_mask)
+            if n_sand_cells == 0:
+                raise ValueError("Nessuna cella di sabbia trovata nella mesh!")
             
-            # Per calcolare le perdite, impostiamo tutto lo storage a T_storage
-            # e calcoliamo il gradiente attraverso l'isolamento
-            self.mesh.T[storage_mask] = T_storage
+            # Volume totale sabbia (somma volumi celle)
+            V_cell = self.mesh.dx * self.mesh.dy * self.mesh.dz
+            V_sand = n_sand_cells * V_cell  # m³
+            self.log(f"  Volume sabbia: {V_sand:.2f} m³ ({n_sand_cells} celle)")
             
-            # Imposta condizioni al contorno
-            self.mesh.T[self.mesh.boundary_type == 1] = T_amb  # Pareti esterne
+            # ========== 1. INIZIALIZZAZIONE INTELLIGENTE ==========
+            # Sabbia a T_target
+            self.mesh.T[sand_mask] = T_target_K
             
-            # Calcola perdite
-            result = analyzer.compute_full_balance()
+            # Isolamento: gradiente lineare tra T_target e T_ambiente
+            ins_mask = (self.mesh.material_id == MaterialID.INSULATION.value)
+            T_ins_avg = (T_target_K + T_amb_K) / 2
+            self.mesh.T[ins_mask] = T_ins_avg
             
-            self.progress_bar.setValue(90)
+            # Esterno (aria, acciaio, ecc.) a T_ambiente
+            external_mask = ~sand_mask & ~ins_mask
+            self.mesh.T[external_mask] = T_amb_K
             
-            # Log risultati
-            self.log(f"\n[RISULTATO] Perdite Termiche:")
-            self.log(f"  Superiore: {result.Q_loss_top/1000:.2f} kW")
-            self.log(f"  Laterale: {result.Q_loss_lateral/1000:.2f} kW")
-            self.log(f"  Inferiore: {result.Q_loss_bottom/1000:.2f} kW")
-            self.log(f"  TOTALE: {result.Q_loss_total/1000:.2f} kW")
-            self.log(f"\n  Efficienza exergetica: {result.exergy_efficiency*100:.1f}%")
+            # ========== 2. CONDIZIONI AL CONTORNO CONVETTIVE ==========
+            self.mesh.set_convection_bc('x_min', h_conv, T_amb_K)
+            self.mesh.set_convection_bc('x_max', h_conv, T_amb_K)
+            self.mesh.set_convection_bc('y_min', h_conv, T_amb_K)
+            self.mesh.set_convection_bc('y_max', h_conv, T_amb_K)
+            self.mesh.set_convection_bc('z_max', h_conv, T_amb_K)  # Top
+            self.mesh.bc_h[:, :, 0] = h_ground  # Bottom
+            self.mesh.bc_T_inf[:, :, 0] = T_ground_K
+            
+            self.progress_bar.setValue(10)
+            
+            # ========== 3. STIMA INIZIALE Q ==========
+            # Stima grossolana: Q ≈ (T_target - T_amb) * k_eff * A / L
+            # Dove A = superficie esterna, L = spessore isolamento medio
+            # Per semplicità, partiamo da un valore tipico: ~50-200 W/m³ di sabbia
+            Q_initial_density = 100.0  # W/m³ (valore iniziale ragionevole)
+            Q_total = Q_initial_density * V_sand  # W totali
+            
+            # ========== 4. CONFIGURAZIONE SOLVER (con GPU/Thread) ==========
+            gpu_backend = self._get_gpu_backend()
+            precision = self._get_precision()
+            
+            solver_config = SolverConfig(
+                method=self.solver_combo.currentText(),
+                tolerance=self._get_tolerance_value(),
+                max_iterations=self.max_iter_spin.value(),
+                preconditioner=self._get_preconditioner_value(),
+                n_threads=self._get_n_threads(),
+                gpu_backend=gpu_backend,
+                precision=precision,
+                verbose=False  # Silenzioso durante iterazioni
+            )
+            
+            if gpu_backend:
+                self.log(f"  Backend GPU: {gpu_backend.upper()}")
+            else:
+                self.log(f"  CPU, threads: {self._get_n_threads()}")
+            
+            # ========== 5. LOOP ITERATIVO (Metodo Secante + Underrelaxation) ==========
+            converged = False
+            iteration = 0
+            
+            # Storage per metodo secante: (Q, T_mean) delle ultime due iterazioni
+            Q_prev = None
+            T_prev = None
+            Q_current = Q_total
+            
+            self.log(f"\n  Inizio iterazioni (metodo secante, α={alpha:.2f})...")
+            
+            while not converged and iteration < max_iter:
+                iteration += 1
+                
+                # Imposta sorgente di calore Q nella sabbia
+                self.mesh.Q[:] = 0.0  # Reset
+                Q_density = Q_current / V_sand  # W/m³
+                self.mesh.Q[sand_mask] = Q_density
+                
+                # Risolvi steady-state
+                solver = SteadyStateSolver(self.mesh, solver_config)
+                result = solver.solve()
+                
+                if not result.converged:
+                    self.log(f"  [Iter {iteration}] ATTENZIONE: solver non converguto")
+                
+                # Calcola temperatura media sabbia
+                T_mean_sand_K = self.mesh.T[sand_mask].mean()
+                T_mean_sand_C = T_mean_sand_K - 273.15
+                T_error = T_mean_sand_C - T_target_C  # Positivo se troppo caldo
+                
+                # Log iterazione
+                self.log(f"  [Iter {iteration}] Q={Q_current/1000:.2f} kW, T_mean={T_mean_sand_C:.1f}°C, err={T_error:+.2f}°C")
+                
+                # Check convergenza
+                if abs(T_error) < tol_C:
+                    converged = True
+                    Q_total = Q_current
+                else:
+                    # Calcola nuovo Q con metodo secante (dopo la prima iterazione)
+                    if Q_prev is not None and T_prev is not None:
+                        # Metodo secante: Q_new = Q - f(Q) * (Q - Q_prev) / (f(Q) - f(Q_prev))
+                        # dove f(Q) = T_mean(Q) - T_target
+                        dT = T_mean_sand_C - T_prev
+                        dQ = Q_current - Q_prev
+                        
+                        if abs(dT) > 0.01:  # Evita divisione per zero
+                            # Stima derivata dT/dQ
+                            dT_dQ = dT / dQ
+                            # Correzione Newton-Raphson: Q_new = Q - f(Q) / f'(Q)
+                            Q_newton = Q_current - T_error / dT_dQ
+                            # Applica underrelaxation
+                            Q_new = Q_current + alpha * (Q_newton - Q_current)
+                        else:
+                            # Se dT è troppo piccolo, usa perturbazione
+                            Q_new = Q_current * (1.0 - 0.1 * np.sign(T_error))
+                    else:
+                        # Prima iterazione: perturba Q basandosi sull'errore
+                        # Stima grossolana: 1°C di errore ≈ 1% di Q
+                        perturbation = -0.02 * T_error / max(abs(T_error), 1.0)
+                        Q_new = Q_current * (1.0 + perturbation)
+                    
+                    # Salva valori correnti per prossima iterazione
+                    Q_prev = Q_current
+                    T_prev = T_mean_sand_C
+                    
+                    # Aggiorna Q (assicura che sia positivo)
+                    Q_current = max(100.0, Q_new)  # Minimo 100W per evitare Q=0
+                
+                # Aggiorna progress bar
+                progress = 10 + int(80 * iteration / max_iter)
+                self.progress_bar.setValue(min(progress, 90))
+                
+                # Processa eventi per mantenere GUI responsive
+                from PyQt6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+            
+            # Usa l'ultimo Q valido
+            Q_total = Q_current
+            
+            self.progress_bar.setValue(95)
+            
+            # ========== 6. RISULTATI FINALI ==========
+            T_final_mean_C = self.mesh.T[sand_mask].mean() - 273.15
+            T_final_min_C = self.mesh.T[sand_mask].min() - 273.15
+            T_final_max_C = self.mesh.T[sand_mask].max() - 273.15
+            Q_losses_kW = Q_total / 1000.0
+
+            
+            status_str = "CONVERGUTO" if converged else f"NON CONVERGUTO (max iter={max_iter})"
+            
+            self.log(f"\n[RISULTATO] {status_str} dopo {iteration} iterazioni")
+            self.log(f"  T media sabbia finale: {T_final_mean_C:.2f} °C (target: {T_target_C:.1f} °C)")
+            self.log(f"  T min/max sabbia: {T_final_min_C:.2f} / {T_final_max_C:.2f} °C")
+            self.log(f"  Perdite termiche: {Q_losses_kW:.2f} kW")
+            self.log(f"  Densità potenza sabbia: {Q_total/V_sand:.1f} W/m³")
+            
+            # ========== 7. ANALISI BILANCIO ENERGETICO ==========
+            # Usa EnergyBalanceAnalyzer per breakdown per facce
+            analyzer = EnergyBalanceAnalyzer(self.mesh, T_ambient=T_amb_C)
+            balance = analyzer.compute_full_balance()
+            
+            self.log(f"\n  Breakdown perdite per faccia:")
+            self.log(f"    Superiore (z+): {balance.Q_losses_top/1000:.2f} kW")
+            self.log(f"    Laterali (x,y): {balance.Q_losses_side/1000:.2f} kW")
+            self.log(f"    Inferiore (z-): {balance.Q_losses_bottom/1000:.2f} kW")
+            self.log(f"    Totale calcolato: {balance.Q_losses_total/1000:.2f} kW")
             
             self.progress_bar.setValue(100)
             self._simulation_completed = True
+            
+            # Salva risultato per bilancio energetico
+            self._losses_result = {
+                'Q_total_kW': Q_losses_kW,
+                'Q_top_kW': balance.Q_losses_top / 1000,
+                'Q_side_kW': balance.Q_losses_side / 1000,
+                'Q_bottom_kW': balance.Q_losses_bottom / 1000,
+                'T_target_C': T_target_C,
+                'T_final_C': T_final_mean_C,
+                'T_amb_C': T_amb_C,
+                'T_ground_C': T_ground_C,
+                'h_conv': h_conv,
+                'V_sand_m3': V_sand,
+                'converged': converged,
+                'iterations': iteration
+            }
+            
+            # Aggiorna tutte le schede
             self.update_visualization()
             self.update_statistics()
+            self._update_energy_balance_losses()
             
-            # Mostra messaggio
-            QMessageBox.information(
-                self, "Analisi Perdite Completata",
-                f"Perdite termiche totali: {result.Q_loss_total/1000:.2f} kW\n\n"
-                f"  - Superiore: {result.Q_loss_top/1000:.2f} kW\n"
-                f"  - Laterale: {result.Q_loss_lateral/1000:.2f} kW\n"
-                f"  - Inferiore: {result.Q_loss_bottom/1000:.2f} kW"
-            )
+            # Mostra messaggio finale
+            msg = (f"Analisi Perdite Completata - {status_str}\n\n"
+                   f"T media sabbia: {T_final_mean_C:.1f} °C (target: {T_target_C:.1f} °C)\n"
+                   f"Iterazioni: {iteration}\n\n"
+                   f"PERDITE TERMICHE: {Q_losses_kW:.2f} kW\n\n"
+                   f"Breakdown:\n"
+                   f"  - Superiore: {balance.Q_losses_top/1000:.2f} kW\n"
+                   f"  - Laterali: {balance.Q_losses_side/1000:.2f} kW\n"
+                   f"  - Inferiore: {balance.Q_losses_bottom/1000:.2f} kW")
+            
+            QMessageBox.information(self, "Analisi Perdite", msg)
+            
+            self.status_label.setText(f"Stato: Perdite = {Q_losses_kW:.2f} kW")
             
         except Exception as e:
             self.log(f"ERRORE: {e}")
             import traceback
             traceback.print_exc()
+            self.status_label.setText(f"Errore: {e}")
             QMessageBox.critical(self, "Errore", str(e))
     
     def _run_transient_simulation(self):
@@ -3161,9 +3209,9 @@ MESH:
         
         try:
             # Ottieni configurazione transitoria
-            trans_config = self.analysis_tab.get_transient_config()
-            ic = self.analysis_tab.get_initial_condition()
-            power_profile = self.analysis_tab.get_power_profile()
+            trans_config = self.analysis_type_widget.get_transient_config()
+            ic = self.initial_cond_widget.get_initial_condition()
+            power_profile = self.power_widget.get_power_profile()
             
             self.log(f"  Durata: {trans_config.t_final:.0f} s ({trans_config.t_final/3600:.1f} ore)")
             self.log(f"  dt: {trans_config.dt:.1f} s")
@@ -3285,7 +3333,7 @@ MESH:
         self.log(f"\n[RISULTATO] Transitorio completato!")
         self.log(f"  Durata simulata: {results.times[-1]:.0f} s")
         self.log(f"  Step totali: {len(results.times)}")
-        self.log(f"  T finale media: {results.T_mean[-1] - 273.15:.1f} °C")
+        self.log(f"  T finale media: {results.T_mean_storage[-1] - 273.15:.1f} °C")
         self.log(f"  T finale min: {results.T_min[-1] - 273.15:.1f} °C")
         self.log(f"  T finale max: {results.T_max[-1] - 273.15:.1f} °C")
         
@@ -3302,7 +3350,7 @@ MESH:
             self, "Transitorio Completato",
             f"Simulazione completata!\n\n"
             f"Durata: {results.times[-1]/3600:.1f} ore\n"
-            f"T finale: {results.T_mean[-1] - 273.15:.1f} °C\n\n"
+            f"T finale: {results.T_mean_storage[-1] - 273.15:.1f} °C\n\n"
             f"Vuoi esportare i risultati in CSV?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No

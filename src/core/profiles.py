@@ -326,14 +326,14 @@ class InitialCondition:
             Array temperatura [Nr, Ntheta, Nz]
         """
         if self.mode == "uniform":
-            return np.full((mesh.Nr, mesh.Ntheta, mesh.Nz), self.T_uniform)
+            return np.full((mesh.Nx, mesh.Ny, mesh.Nz), self.T_uniform)
         
         elif self.mode == "by_material":
-            T = np.zeros((mesh.Nr, mesh.Ntheta, mesh.Nz))
-            for i in range(mesh.Nr):
-                for j in range(mesh.Ntheta):
+            T = np.zeros((mesh.Nx, mesh.Ny, mesh.Nz))
+            for i in range(mesh.Nx):
+                for j in range(mesh.Ny):
                     for k in range(mesh.Nz):
-                        mat_id = mesh.material[i, j, k]
+                        mat_id = mesh.material_id[i, j, k]
                         T[i, j, k] = self.get_T_for_material(mat_id)
             return T
         
@@ -345,7 +345,7 @@ class InitialCondition:
             # Sarà gestito dal solver
             return None
         
-        return np.full((mesh.Nr, mesh.Ntheta, mesh.Nz), self.T_uniform)
+        return np.full((mesh.Nx, mesh.Ny, mesh.Nz), self.T_uniform)
 
 
 @dataclass

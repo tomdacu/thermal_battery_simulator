@@ -4,42 +4,46 @@
 
 The graphical interface is developed in **PyQt6** and provides an integrated environment for configuration, execution, and analysis of simulations. The main file is `gui/main_window.py`.
 
+The GUI uses a clean, streamlined design with:
+- **No menu bar** - all functions accessible through tabs
+- **No toolbar** - actions via buttons in the interface
+- **4 main tabs** for organized parameter access
+
 ---
 
 ## 2. Window Structure
 
 The GUI is divided into three main areas:
 
-### 2.1 Side Panel (Input) - 2-Level Tab Structure
+### 2.1 Side Panel (Input) - 4-Tab Structure
 
-The side panel uses a **2-level tab structure** for organized parameter access:
+The side panel uses a **4-tab structure** for organized parameter access:
 
-**Level 1 (Main Tabs):**
 ```
-[1. Geometria] [2. Materiali] [3. Analisi] [4. Risultati]
+[Geometry] [Materials] [Analysis] [Tools]
 ```
 
-**Level 2 (Sub-tabs for each main tab):**
+Each main tab contains sub-tabs for detailed configuration:
 
 | Main Tab | Sub-tabs |
 |----------|----------|
-| **1. Geometria** | Cilindro, Isolamento, Resistenze, Tubi, Mesh |
-| **2. Materiali** | Storage, Isolamento, Condizioni |
-| **3. Analisi** | Tipo, Condizioni Iniziali, Potenza, Estrazione, Solver, Salvataggio |
-| **4. Risultati** | Statistiche, Bilancio, Materiali, Esporta, 📖 Guida |
+| **Geometry** | Cylinder, Insulation, Heaters, Tubes, Mesh |
+| **Materials** | Storage, Insulation, Operating Conditions |
+| **Analysis** | Type, Initial Conditions, Power Profile, Extraction, Save/Load |
+| **Tools** | Solver, Statistics, Energy Balance, Materials Info, Export, Help |
 
 ### 2.2 Central Area (3D Visualization)
 Uses `PyVistaQt` to integrate an interactive 3D rendering engine:
-- Temperature field visualization
+- Temperature field visualization (in Celsius)
 - Material distribution visualization
 - **Slicing** tools (X, Y, Z section planes) to inspect the battery interior
-- Temperature isosurfaces
+- Single vertical colorbar for clean display
 
 ### 2.3 Bottom Panel (Results)
 Shows data derived from the simulation:
 - Solver log (computation time, residual, iterations)
-- Power balance (P_in, P_out, Losses)
-- Total stored energy [kWh, MWh]
+- Progress bar during computation
+- Status messages
 
 ---
 
@@ -49,153 +53,153 @@ Shows data derived from the simulation:
 To avoid blocking the interface during intensive calculations, the simulation runs in a separate thread (`SimulationThread`). This allows:
 - Keeping the 3D visualization responsive
 - Updating a progress bar in real time
-- Stopping the simulation if needed
+- Processing events during iterative analysis
 
 ### 3.2 User Workflow
-1.  **Configure Geometry** (1. Geometria): Define cylinder, insulation, heaters, tubes, mesh
-2.  **Set Materials** (2. Materiali): Select storage/insulation materials, operating conditions
-3.  **Configure Analysis** (3. Analisi): Choose analysis type, set profiles, configure solver
-4.  **Build Mesh**: Click "Costruisci Mesh" button
-5.  **Run Simulation**: Click "Esegui Simulazione" button
-6.  **View Results** (4. Risultati): Analyze statistics, energy balance, export data
+1. **Configure Geometry** (Geometry tab): Define domain, cylinder, insulation, heaters, tubes, mesh
+2. **Set Materials** (Materials tab): Select storage/insulation materials, operating conditions
+3. **Configure Analysis** (Analysis tab): Choose analysis type, set profiles
+4. **Configure Solver** (Tools > Solver): Select method, tolerance, CPU/GPU, losses parameters
+5. **Build Mesh**: Click "Build Mesh" button
+6. **Run Simulation**: Click "Run Simulation" button
+7. **View Results** (Tools tab): Analyze statistics, energy balance, export data
 
 ---
 
-## 4. Tab Organization (2-Level Structure)
+## 4. Tab Organization
 
-### 4.1 GEOMETRIA Tab (Level 1)
+### 4.1 GEOMETRY Tab
 
-#### Sub-tab: Cilindro
+#### Sub-tab: Cylinder
 | Widget Group | Contents |
 |--------------|----------|
-| Dominio | Lx, Ly, Lz domain dimensions [m] |
-| Cilindro Storage | Radius, height [m] |
-| Tetto | Enable cone, angle, steel slab, fill with sand |
+| Domain | Lx, Ly, Lz domain dimensions [m] |
+| Storage Cylinder | Radius, height [m] |
+| Roof | Enable cone, angle, steel slab, fill with sand |
 
-#### Sub-tab: Isolamento
+#### Sub-tab: Insulation
 | Widget Group | Contents |
 |--------------|----------|
-| Isolamento Radiale | Insulation thickness, shell thickness [m] |
-| Isolamento Verticale | Bottom slab, top slab thickness [m] |
+| Radial Insulation | Insulation thickness, shell thickness [m] |
+| Vertical Insulation | Bottom slab, top slab thickness [m] |
 
-#### Sub-tab: Resistenze
+#### Sub-tab: Heaters
 | Widget Group | Contents |
 |--------------|----------|
-| Potenza | Total power [kW] |
+| Power | Total power [kW] |
 | Pattern | Distribution pattern (Uniform, Grid, Radial, Spiral) |
-| Elementi | Number, radius, spacing |
+| Elements | Number, radius, spacing |
 | Preview | Visual preview of positions |
 
-#### Sub-tab: Tubi
+#### Sub-tab: Tubes
 | Widget Group | Contents |
 |--------------|----------|
-| Stato | Active/inactive toggle |
-| Fluido | Temperature, convection coefficient |
+| Status | Active/inactive toggle |
+| Fluid | Temperature, convection coefficient |
 | Pattern | Distribution pattern |
-| Elementi | Number, diameter |
+| Elements | Number, diameter |
 
 #### Sub-tab: Mesh
 | Widget Group | Contents |
 |--------------|----------|
-| Spaziatura | Target cell spacing [m] |
+| Spacing | Target cell spacing [m] |
 | Info | Resulting cell count, memory estimate |
 
-### 4.2 MATERIALI Tab (Level 1)
+### 4.2 MATERIALS Tab
 
 #### Sub-tab: Storage
 | Widget Group | Contents |
 |--------------|----------|
-| Materiale | Material selection (Steatite, Sand, etc.) |
+| Material | Material selection (Steatite, Sand, etc.) |
 | Packing | Packing fraction [%] |
-| Proprietà | Display of k, ρ, cp values |
+| Properties | Display of k, ρ, cp values |
 
-#### Sub-tab: Isolamento
+#### Sub-tab: Insulation
 | Widget Group | Contents |
 |--------------|----------|
-| Materiale | Insulation material selection |
-| Proprietà | Display of k, ρ, cp values |
+| Material | Insulation material selection |
+| Properties | Display of k, ρ, cp values |
 
-#### Sub-tab: Condizioni
+#### Sub-tab: Conditions
 | Widget Group | Contents |
 |--------------|----------|
-| Ambiente | T_ambient [°C] |
-| Convezione | External convection coefficient h_ext [W/(m²·K)] |
+| Environment | T_ambient [°C] |
+| Convection | External convection coefficient h_ext [W/(m²·K)] |
 
-### 4.3 ANALISI Tab (Level 1)
+### 4.3 ANALYSIS Tab
 
-#### Sub-tab: Tipo
+#### Sub-tab: Type
 | Widget Group | Contents |
 |--------------|----------|
-| Tipo Analisi | Steady-state, Losses analysis, Transient |
-| Parametri | Duration, time step (for transient) |
+| Analysis Type | Steady-state, Losses analysis, Transient |
+| Steady | Heater power configuration |
+| Losses | Target temperature, ambient temperature |
+| Transient | Duration, time step, save interval |
 
-#### Sub-tab: Condizioni Iniziali
+#### Sub-tab: Initial Conditions
 | Widget Group | Contents |
 |--------------|----------|
-| Tipo | Uniform, Custom, From file |
-| Temperatura | Initial temperature [°C] |
+| Type | Uniform, By Material, From File, From Steady |
+| Temperature | Initial temperature settings per mode |
 
-#### Sub-tab: Potenza
+#### Sub-tab: Power
 | Widget Group | Contents |
 |--------------|----------|
-| Tipo Profilo | Constant, Step, Ramp, Sinusoidal |
-| Parametri | Base power, amplitude, frequency, timing |
+| Profile Type | Off, Constant, Scheduled, From CSV |
+| Parameters | Power values, timing |
 
-#### Sub-tab: Estrazione
+#### Sub-tab: Extraction
 | Widget Group | Contents |
 |--------------|----------|
-| Tipo Profilo | Constant, Modulated, Temperature-controlled |
-| Parametri | Flow rate, target temperature |
+| Profile Type | Off, Imposed Power, Flow Rate, Target Outlet T |
+| Parameters | Flow rate, fluid type, temperature |
+
+#### Sub-tab: Save/Load
+| Widget Group | Contents |
+|--------------|----------|
+| Save State | Save current simulation to HDF5 |
+| Load State | Load simulation from HDF5 |
+
+### 4.4 TOOLS Tab
 
 #### Sub-tab: Solver
 | Widget Group | Contents |
 |--------------|----------|
-| Metodo | Direct, CG, BiCGStab, GMRES |
-| Preconditioner | None, Jacobi, ILU, AMG |
-| Tolleranza | Convergence tolerance (1e-4 to 1e-12) |
-| Performance | CPU threads / GPU selection |
-| Precisione | Float16/32/64 precision toggle |
+| **Common Settings** | Method (cg, bicgstab, gmres, direct), Preconditioner, Tolerance, Max iterations |
+| **Performance** | CPU threads / GPU selection (CUDA, OpenCL), Precision (float64/32/16) |
+| **Losses Analysis** | Temperature tolerance, Max iterations, Underrelaxation α, h_conv, T_ground |
+| **Tips** | Performance optimization suggestions |
 
-#### Sub-tab: Salvataggio
+#### Sub-tab: Statistics
 | Widget Group | Contents |
 |--------------|----------|
-| Salva Stato | Save current simulation to HDF5 |
-| Carica Stato | Load simulation from HDF5 |
-| File Recenti | List of recent save files |
+| Temperature | T_min, T_max, T_mean, T_std (all in °C) |
+| Mesh | Dimensions (Nx × Ny × Nz), total nodes |
 
-### 4.4 RISULTATI Tab (Level 1)
-
-#### Sub-tab: Statistiche
+#### Sub-tab: Energy Balance
 | Widget Group | Contents |
 |--------------|----------|
-| Temperature | T_min, T_max, T_mean, T_std |
-| Mesh | Dimensions, total nodes |
-| Tempo | Computation time |
+| Conditions | T_target, T_final, T_ambient, T_ground, h_conv |
+| Losses | Total losses (kW), breakdown by face (top, side, bottom) |
+| Energy | E_stored (kWh, MWh), Thermal autonomy (hours) |
+| Convergence | Status, number of iterations |
 
-#### Sub-tab: Bilancio
+#### Sub-tab: Materials Info
 | Widget Group | Contents |
 |--------------|----------|
-| Potenza | P_input (heaters), P_output (tubes) |
-| Perdite | P_losses (top, lateral, bottom) |
-| Energia | E stored [kWh, MWh] |
-| Exergia | Exergy analysis (optional) |
+| Distribution | Volume fractions by material type |
+| Properties | Selected material thermal properties |
 
-#### Sub-tab: Materiali
+#### Sub-tab: Export
 | Widget Group | Contents |
 |--------------|----------|
-| Distribuzione | Volume fractions by material |
-| Proprietà | Selected material properties |
-
-#### Sub-tab: Esporta
-| Widget Group | Contents |
-|--------------|----------|
-| Formati | CSV, VTK, HDF5 |
+| Formats | CSV, VTK, HDF5 options |
 | Screenshot | Save current 3D view |
 
-#### Sub-tab: 📖 Guida
+#### Sub-tab: Help
 | Widget Group | Contents |
 |--------------|----------|
-| Istruzioni | Usage guide |
+| Quick Guide | Usage instructions |
 | Performance | Optimization tips |
 | Troubleshooting | Common issues and solutions |
 
@@ -218,12 +222,10 @@ To avoid blocking the interface during intensive calculations, the simulation ru
 | Position slider | Position along axis (0-100%) |
 | Field selector | Field to display (Temperature, Material, k, Q) |
 
-### 5.3 Colormap Controls
-| Widget | Purpose |
-|--------|---------|
-| Colormap | Color scheme (coolwarm, jet, viridis, plasma...) |
-| T_min, T_max | Manual color range |
-| Auto range | Auto-compute range from data |
+### 5.3 Colorbar
+- **Single vertical colorbar** on the right side
+- Temperature displayed in **Celsius** (converted from internal Kelvin)
+- Auto-ranging or manual T_min/T_max
 
 ---
 
@@ -233,42 +235,86 @@ To avoid blocking the interface during intensive calculations, the simulation ru
 |--------|--------|---------|
 | 👁 Preview Geometry | Preview cylinders/tubes/heaters without mesh | - |
 | 🔧 Build Mesh | Create mesh + apply geometry | Run Simulation |
-| ▶ Run Simulation | Run steady-state solver | Results panels |
-| 📊 Export Results | Export to CSV/VTK | - |
+| ▶ Run Simulation | Run selected analysis type | Results panels |
 
 ---
 
-## 7. Output Panels
+## 7. Analysis Types
 
-### 7.1 Statistics Tab
-- T_min, T_max, T_mean, T_std
-- Mesh dimensions and total nodes
-- Computation time
+### 7.1 Steady-State Analysis
+- Solves equilibrium temperature distribution with constant heater power
+- Single solver call
+- Results: temperature field, power balance
 
-### 7.2 Energy Balance Tab
-- P_input (heaters)
-- P_output (tubes, if active)
-- P_losses (top, lateral, bottom)
-- Energy stored (kWh, MWh)
+### 7.2 Losses Analysis (Iterative)
+Uses an **iterative secant method** to find thermal losses:
 
-### 7.3 Materials Tab
-- Distribution of material types
-- Properties of selected storage material
-- Volume fractions
+1. **Input**: Target sand temperature (T_target), Ambient temperature (T_amb)
+2. **Algorithm**:
+   - Initialize temperatures (sand=T_target, insulation=interpolated, external=T_amb)
+   - Set convection BC on external faces
+   - Iterate:
+     - Apply heat source Q to sand cells
+     - Solve steady-state
+     - Compute T_mean of sand
+     - Adjust Q using secant method with underrelaxation
+     - Repeat until |T_mean - T_target| < tolerance
+3. **Output**: 
+   - Q_total = thermal losses [kW]
+   - Breakdown by face (top, side, bottom)
+   - Thermal autonomy estimate
+   - Physically consistent temperature profile
 
-### 7.4 Log Tab
-- Chronological log of operations
-- Solver messages and convergence info
+**Configurable Parameters** (in Solver sub-tab):
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| Tolerance (°C) | Acceptable error on T_mean | 1.0 |
+| Max iterations | Limit for Q-T iterations | 20 |
+| α (underrelaxation) | Damping factor (0.1=stable, 1.0=fast) | 0.5 |
+| h_conv | External convection coefficient | 10.0 W/(m²·K) |
+| T_ground | Ground temperature | 15.0 °C |
+
+### 7.3 Transient Analysis
+- Time-dependent simulation with power/extraction profiles
+- Backward Euler implicit scheme
+- State save/load capability
 
 ---
 
-## 8. Export Options
+## 8. Energy Balance Panel
 
-| Menu Item | Format | Content |
-|-----------|--------|---------|
-| Save Results | CSV | Temperature statistics |
-| Export VTK | VTI | Full 3D field data (PyVista/ParaView) |
-| Screenshot | PNG/JPG | Current 3D view |
+After Losses Analysis, the Energy Balance panel shows:
+
+```
+╔══════════════════════════════════════════════╗
+║      ENERGY BALANCE - LOSSES ANALYSIS        ║
+╠══════════════════════════════════════════════╣
+║ CONDITIONS                                   ║
+╠──────────────────────────────────────────────╣
+║ T target sand:    600.0 °C                   ║
+║ T final mean:     599.8 °C                   ║
+║ T ambient:         20.0 °C                   ║
+║ T ground:          15.0 °C                   ║
+║ h convection:      10.0 W/(m²·K)             ║
+╠══════════════════════════════════════════════╣
+║ THERMAL LOSSES                               ║
+╠──────────────────────────────────────────────╣
+║ TOTAL:            12.50 kW                   ║
+║   - Top:           3.20 kW                   ║
+║   - Side:          7.80 kW                   ║
+║   - Bottom:        1.50 kW                   ║
+╠──────────────────────────────────────────────╣
+║ Loss density:     125.0 W/m³                 ║
+╠══════════════════════════════════════════════╣
+║ STORED ENERGY                                ║
+╠──────────────────────────────────────────────╣
+║ E thermal:       1250 kWh                    ║
+║                   1.25 MWh                   ║
+║ Autonomy:        100.0 hours                 ║
+╠══════════════════════════════════════════════╣
+║ CONVERGENCE: ✓ CONVERGED (8 iter)            ║
+╚══════════════════════════════════════════════╝
+```
 
 ---
 
@@ -285,4 +331,4 @@ For proper GUI functionality, the following are required:
 - 2D plots of temporal evolution
 - Result export in additional formats
 - Editable material database directly from interface
-- Real-time collaboration features
+- Multi-physics coupling (flow + heat)

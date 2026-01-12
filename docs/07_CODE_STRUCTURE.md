@@ -40,15 +40,17 @@ This is the **recommended** way to run the application. All parameters are confi
 
 | Array | Shape | Type | Description |
 |-------|-------|------|-------------|
-| `T` | (Nx, Ny, Nz) | float64 | Temperature field [°C] |
+| `T` | (Nx, Ny, Nz) | float64 | Temperature field [K] (Kelvin internally) |
 | `k` | (Nx, Ny, Nz) | float64 | Thermal conductivity [W/(m·K)] |
 | `rho` | (Nx, Ny, Nz) | float64 | Density [kg/m³] |
 | `cp` | (Nx, Ny, Nz) | float64 | Specific heat [J/(kg·K)] |
 | `Q` | (Nx, Ny, Nz) | float64 | Volumetric heat source [W/m³] |
-| `material_id` | (Nx, Ny, Nz) | int32 | Material identifier |
-| `boundary_type` | (Nx, Ny, Nz) | int32 | Boundary condition type |
+| `material_id` | (Nx, Ny, Nz) | int32 | Material identifier (MaterialID enum) |
+| `boundary_type` | (Nx, Ny, Nz) | int32 | Boundary condition type (BoundaryType enum) |
 | `bc_h` | (Nx, Ny, Nz) | float64 | Convection coefficient [W/(m²·K)] |
-| `bc_T_inf` | (Nx, Ny, Nz) | float64 | Reference temperature [°C] |
+| `bc_T_inf` | (Nx, Ny, Nz) | float64 | Reference temperature [K] (Kelvin internally) |
+
+**Temperature Convention**: The mesh uses **Kelvin** internally. The GUI displays temperatures in **Celsius** (converted on display).
 
 **Key Methods**:
 
@@ -287,30 +289,30 @@ def _build_battery_geometry_from_inputs(self):
 
 **Widget Organization**:
 
-| Tab | Contains |
-|-----|----------|
-| Geometria | Domain size, mesh spacing, materials |
-| Resistenze | Heater power, pattern, count |
-| Tubi | Tube h_fluid, T_fluid, pattern |
-| Solver | Solution method, tolerance |
+| Tab | Sub-tabs | Contains |
+|-----|----------|----------|
+| Geometry | Cylinder, Insulation, Heaters, Tubes, Mesh | Domain, dimensions, element patterns |
+| Materials | Storage, Insulation, Conditions | Material selection, operating conditions |
+| Analysis | Type, Conditions, Power, Extraction, Save/Load | Analysis config, profiles |
+| Tools | Solver, Statistics, Energy Balance, Materials, Export, Help | Solver settings, results, export |
 
 **Action Flow**:
 
 ```
-[Costruisci Mesh] → build_mesh()
+[Build Mesh] → build_mesh()
     → _build_battery_geometry_from_inputs()
     → Mesh3D()
     → BatteryGeometry.apply_to_mesh()
     → update_visualization()
 
-[Anteprima Geometria] → preview_geometry()
+[Preview Geometry] → preview_geometry()
     → _build_battery_geometry_from_inputs()
     → Render cylinders/elements (no mesh)
 
-[Esegui Simulazione] → run_simulation()
-    → SteadyStateSolver.solve()
+[Run Simulation] → run_simulation()
+    → SteadyStateSolver.solve() OR _run_losses_analysis()
     → update_visualization()
-    → update_energy_balance()
+    → update_energy_balance() OR _update_energy_balance_losses()
 ```
 
 ---

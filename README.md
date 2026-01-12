@@ -34,6 +34,7 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 ### Core Simulation
 - **3D Finite Difference Method (FDM)** solver for heat equation
 - **Steady-state and Transient analysis** with Backward Euler implicit scheme
+- **Iterative Losses Analysis** with secant method convergence
 - **Multiple solver methods**: Direct (LU), CG, BiCGSTAB, GMRES
 - **Preconditioners**: Jacobi, ILU, AMG (PyAMG)
 - **Vectorized matrix builder** with Numba JIT for 10-50x faster assembly
@@ -44,8 +45,9 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 - **Automatic backend selection** - GPU (Auto) mode chooses the best available
 
 ### Geometry Modeling
-- **4-zone concentric cylinder**: Storage, Insulation, Steel Shell, Air
-- **Vertical insulation slabs**: Top and bottom thermal protection
+- **Cartesian 3D mesh** with flexible dimensions (Lx, Ly, Lz)
+- **Cylindrical storage region** centered in domain
+- **Multi-layer insulation**: radial, top, and bottom slabs
 - **Optional conical roof** for realistic industrial designs
 - **Flexible heater patterns**: Uniform, Grid, Radial, Spiral, Custom
 - **Heat exchanger tubes**: Various patterns with internal convection BC
@@ -55,6 +57,12 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 - **Packing fraction adjustment** for porous media
 - **Convection, conduction, and Dirichlet boundary conditions**
 - **Energy and exergy balance calculations** with detailed loss analysis
+- **Thermal autonomy estimation** based on stored energy and losses
+
+### Analysis Types
+- **Steady-State**: Equilibrium temperature distribution with constant power
+- **Losses Analysis**: Iterative solver to find thermal losses at target temperature
+- **Transient**: Time-dependent simulation with power and extraction profiles
 
 ### Transient Analysis
 - **Time-dependent power profiles**: constant, step, ramp, sinusoidal
@@ -67,11 +75,12 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 - **Slice planes** (X, Y, Z) for internal inspection
 - **Volume rendering** and isosurfaces
 - **Real-time updates** during parameter changes
-- **Transient animation** with playback controls
+- **Temperature display in Celsius** with single vertical colorbar
 
 ### User Interface
-- **Intuitive PyQt6 GUI** with 2-level tab structure
+- **Clean PyQt6 GUI** with 4-tab structure (Geometry, Materials, Analysis, Tools)
 - **Threaded simulation** - responsive UI during computation
+- **Detailed energy balance panel** with losses breakdown
 - **Save/Load simulation states** in HDF5 format
 - **Export options**: CSV, VTK for ParaView, HDF5 for state persistence
 
@@ -99,10 +108,10 @@ The system follows a **GUI-driven design** where all simulation parameters origi
 ┌─────────────────────────────────────────────────────────────────┐
 │                        GUI (PyQt6)                               │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-│  │  Geometry    │  │  Materials   │  │   Solver     │           │
-│  │  - radius    │  │  - storage   │  │  - method    │           │
-│  │  - height    │  │  - insulation│  │  - tolerance │           │
-│  │  - slabs     │  │  - packing % │  │  - threads   │           │
+│  │  Geometry    │  │  Materials   │  │   Analysis   │           │
+│  │  - Lx,Ly,Lz  │  │  - storage   │  │  - type      │           │
+│  │  - cylinder  │  │  - insulation│  │  - profiles  │           │
+│  │  - heaters   │  │  - packing % │  │  - solver    │           │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
 └─────────┼──────────────────┼──────────────────┼─────────────────┘
           │                  │                  │
@@ -115,18 +124,18 @@ The system follows a **GUI-driven design** where all simulation parameters origi
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Mesh3D                                   │
-│            3D arrays: T, k, ρ, cp, Q, boundaries                │
+│            3D arrays: T, k, ρ, cp, Q, material_id                │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    SteadyStateSolver                             │
-│                    Solves A·T = b                                │
+│                 SteadyStateSolver / TransientSolver              │
+│                    Solves A·T = b  (iterative)                   │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│               3D Temperature Field + Analysis                    │
+│               3D Temperature Field + Energy Balance              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -174,31 +183,40 @@ python run_gui.py
 
 ### Basic Workflow
 
-1. **Configure Geometry** (1. Geometria tab)
-   - Set cylinder dimensions (radius, height)
-   - Configure insulation thickness
-   - Set up heaters and tubes patterns
+1. **Configure Geometry** (Geometry tab)
+   - Set domain dimensions (Lx, Ly, Lz)
+   - Configure cylinder dimensions (radius, height)
+   - Set up insulation layers (radial, top, bottom slabs)
+   - Configure heaters pattern and power
    - Define mesh spacing
 
-2. **Set Materials** (2. Materiali tab)
+2. **Set Materials** (Materials tab)
    - Select storage material (Steatite, Sand, etc.)
    - Choose insulation material
-   - Configure operating conditions (T_amb, h_ext)
+   - Set packing fraction
+   - Configure operating conditions (T_ambient, h_external)
 
-3. **Configure Analysis** (3. Analisi tab)
+3. **Configure Analysis** (Analysis tab)
    - Choose analysis type: Steady, Losses, or Transient
-   - Set power and extraction profiles (for transient)
+   - For Losses: set target temperature and ambient conditions
+   - For Transient: set power and extraction profiles
    - Configure initial conditions
-   - Select solver method and tolerance
 
-4. **Build & Run**
+4. **Configure Solver** (Tools > Solver sub-tab)
+   - Select solver method and preconditioner
+   - Set tolerance and max iterations
+   - Choose CPU/GPU backend
+   - For Losses: adjust iteration parameters (α, h_conv, T_ground)
+
+5. **Build & Run**
    - Click "Build Mesh" button
    - Click "Run Simulation"
-   - View results in 3D view
+   - View results in 3D visualization
 
-5. **Analyze Results** (4. Risultati tab)
+6. **Analyze Results** (Tools > Results sub-tabs)
    - View temperature statistics
-   - Analyze energy balance
+   - Analyze energy balance with losses breakdown
+   - Check thermal autonomy
    - Export results (CSV, VTK, HDF5)
 
 ---
@@ -313,15 +331,15 @@ For large meshes (>100k cells), GPU acceleration provides significant speedup:
 
 **Installation:**
 ```bash
-# Per GPU NVIDIA (CUDA) - più veloce
-pip install cupy-cuda11x  # o cuda12x
+# For NVIDIA GPU (CUDA) - fastest
+pip install cupy-cuda11x  # or cuda12x
 
-# Per GPU AMD/Intel (OpenCL) - universale
+# For AMD/Intel GPU (OpenCL) - universal
 pip install pyopencl
 ```
 
-> 💡 **OpenCL** funziona su **qualsiasi GPU**: AMD Radeon, Intel (integrata e Arc), NVIDIA.
-> I driver OpenCL sono solitamente inclusi nei driver della GPU.
+> 💡 **OpenCL** works on **any GPU**: AMD Radeon, Intel (integrated and Arc), NVIDIA.
+> OpenCL drivers are usually included with GPU drivers.
 
 **Usage:** Select **"🎮 GPU (Auto)"** in the Performance dropdown of the Solver panel.
 The system automatically chooses the best available backend (CUDA > OpenCL > CPU).
@@ -364,11 +382,11 @@ Detailed documentation is available in the `docs/` folder:
 | [01_THEORY.md](docs/01_THEORY.md) | Heat transfer fundamentals and equations |
 | [02_FDM_DISCRETIZATION.md](docs/02_FDM_DISCRETIZATION.md) | Finite Difference Method details |
 | [03_GEOMETRY.md](docs/03_GEOMETRY.md) | Geometry model and mesh mapping |
-| [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md) | GUI structure and 2-level tabs layout |
+| [04_GUI_DESIGN.md](docs/04_GUI_DESIGN.md) | GUI structure with 4-tab layout |
 | [05_ARCHITECTURE.md](docs/05_ARCHITECTURE.md) | Software architecture |
 | [06_GUI_CONFIGURATION.md](docs/06_GUI_CONFIGURATION.md) | Parameter configuration guide |
 | [07_CODE_STRUCTURE.md](docs/07_CODE_STRUCTURE.md) | Detailed code documentation |
-| [08_ANALYSIS_TAB.md](docs/08_ANALYSIS_TAB.md) | Analysis tab features and transient simulation |
+| [08_ANALYSIS_TAB.md](docs/08_ANALYSIS_TAB.md) | Analysis types including iterative losses |
 
 ---
 
@@ -381,13 +399,13 @@ battery_simulation/
 ├── requirements.txt        # Python dependencies
 │
 ├── gui/                    # User Interface
-│   ├── main_window.py      # PyQt6 main window with 2-level tabs
+│   ├── main_window.py      # PyQt6 main window with 4-tab structure
 │   ├── analysis_tab.py     # Analysis widgets (type, profiles, save/load)
 │   └── transient_results_widget.py  # Transient visualization widgets
 │
 ├── src/                    # Source code
 │   ├── core/               # Domain model
-│   │   ├── mesh.py         # 3D mesh data structure
+│   │   ├── mesh.py         # 3D mesh with material_id, T, k, rho, cp, Q
 │   │   ├── geometry.py     # Battery geometry definition
 │   │   ├── materials.py    # Material manager
 │   │   └── profiles.py     # Power/extraction profiles, transient config
@@ -399,7 +417,7 @@ battery_simulation/
 │   │
 │   ├── analysis/           # Post-processing
 │   │   ├── power_balance.py   # Power balance calculations
-│   │   └── energy_balance.py  # Energy and exergy balance analyzer
+│   │   └── energy_balance.py  # Energy/exergy balance with loss breakdown
 │   │
 │   ├── io/                 # Input/Output
 │   │   └── state_manager.py   # HDF5 state save/load manager

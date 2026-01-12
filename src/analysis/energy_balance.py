@@ -95,8 +95,9 @@ class EnergyBalanceAnalyzer:
             T_ambient: Temperatura ambiente [°C]
         """
         self.mesh = mesh
-        self.T_ambient = T_ambient
-        self.T0 = T_ambient + 273.15  # Kelvin
+        self.T_ambient = T_ambient  # °C
+        self.T_ambient_K = T_ambient + 273.15  # Kelvin (per calcoli)
+        self.T0 = T_ambient + 273.15  # Kelvin (per exergia)
     
     def compute_full_balance(self) -> EnergyBalanceResult:
         """
@@ -111,7 +112,7 @@ class EnergyBalanceAnalyzer:
         result.T_mean_storage = self._compute_mean_T_storage()
         result.T_max = float(np.max(self.mesh.T))
         result.T_min = float(np.min(self.mesh.T))
-        result.T_mean_shell = self._compute_mean_T_material(MaterialID.STEEL_SHELL)
+        result.T_mean_shell = self._compute_mean_T_material(MaterialID.STEEL)
         result.T_mean_insulation = self._compute_mean_T_insulation()
         
         # Calcola perdite
@@ -145,28 +146,25 @@ class EnergyBalanceAnalyzer:
         return result
     
     def _compute_mean_T_storage(self) -> float:
-        """Calcola temperatura media nella zona di storage (sabbia)"""
-        mask = (self.mesh.material == MaterialID.SAND)
+        """Calcola temperatura media nella zona di storage (sabbia) [K]"""
+        mask = (self.mesh.material_id == MaterialID.SAND)
         if np.any(mask):
             return float(np.mean(self.mesh.T[mask]))
-        return self.T_ambient
+        return self.T_ambient_K
     
     def _compute_mean_T_material(self, material_id: int) -> float:
-        """Calcola temperatura media per un materiale specifico"""
-        mask = (self.mesh.material == material_id)
+        """Calcola temperatura media per un materiale specifico [K]"""
+        mask = (self.mesh.material_id == material_id)
         if np.any(mask):
             return float(np.mean(self.mesh.T[mask]))
-        return self.T_ambient
+        return self.T_ambient_K
     
     def _compute_mean_T_insulation(self) -> float:
-        """Calcola temperatura media dell'isolamento (tutti i tipi)"""
-        mask = (
-            (self.mesh.material == MaterialID.ITE_INSULATION) |
-            (self.mesh.material == MaterialID.ITE_TOP_INSULATION)
-        )
+        """Calcola temperatura media dell'isolamento (tutti i tipi) [K]"""
+        mask = (self.mesh.material_id == MaterialID.INSULATION)
         if np.any(mask):
             return float(np.mean(self.mesh.T[mask]))
-        return self.T_ambient
+        return self.T_ambient_K
     
     def _compute_losses_top(self) -> float:
         """
@@ -179,21 +177,17 @@ class EnergyBalanceAnalyzer:
         
         Q_total = 0.0
         d = self.mesh.d
+        A_cell = d * d  # Area cella in coordinate cartesiane
         
-        for i in range(self.mesh.Nr):
-            for j in range(self.mesh.Ntheta):
+        for i in range(self.mesh.Nx):
+            for j in range(self.mesh.Ny):
                 bt = self.mesh.boundary_type[i, j, k_top]
                 
                 if bt == BoundaryType.CONVECTION:
                     T_surf = self.mesh.T[i, j, k_top]
-                    h = self.mesh.h_conv[i, j, k_top]
+                    h = self.mesh.bc_h[i, j, k_top]
                     
-                    # Area della cella (approssimazione)
-                    r = self.mesh.r[i]
-                    dtheta = 2 * np.pi / self.mesh.Ntheta
-                    A = r * dtheta * d
-                    
-                    Q_total += h * A * (T_surf - self.T_ambient)
+                    Q_total += h * A_cell * (T_surf - self.T_ambient_K)
         
         return float(Q_total)
     
@@ -204,58 +198,60 @@ class EnergyBalanceAnalyzer:
         
         Q_total = 0.0
         d = self.mesh.d
+        A_cell = d * d  # Area cella cartesiana
         
-        for i in range(self.mesh.Nr):
-            for j in range(self.mesh.Ntheta):
+        for i in range(self.mesh.Nx):
+            for j in range(self.mesh.Ny):
                 bt = self.mesh.boundary_type[i, j, k_bot]
                 
                 if bt in (BoundaryType.CONVECTION, BoundaryType.DIRICHLET):
                     T_surf = self.mesh.T[i, j, k_bot]
                     
                     if bt == BoundaryType.CONVECTION:
-                        h = self.mesh.h_conv[i, j, k_bot]
+                        h = self.mesh.bc_h[i, j, k_bot]
                     else:
                         # Per Dirichlet, stima h da conducibilità
                         h = self.mesh.k[i, j, k_bot] / d
                     
-                    r = self.mesh.r[i]
-                    dtheta = 2 * np.pi / self.mesh.Ntheta
-                    A = r * dtheta * d
-                    
-                    T_ref = self.mesh.T_bc.get((i, j, k_bot), self.T_ambient)
-                    Q_total += h * A * (T_surf - T_ref)
+                    T_ref = self.mesh.bc_T_inf[i, j, k_bot]
+                    Q_total += h * A_cell * (T_surf - T_ref)
         
         return float(Q_total)
     
     def _compute_losses_side(self) -> float:
-        """Calcola perdite dalla superficie laterale"""
-        # Celle al bordo esterno (r = r_max)
-        i_ext = self.mesh.Nr - 1
-        
+        """Calcola perdite dalle superfici laterali (x=0, x=Lx, y=0, y=Ly)"""
         Q_total = 0.0
         d = self.mesh.d
+        A_cell = d * d  # Area cella cartesiana
         
-        for j in range(self.mesh.Ntheta):
-            for k in range(self.mesh.Nz):
-                bt = self.mesh.boundary_type[i_ext, j, k]
-                
-                if bt == BoundaryType.CONVECTION:
-                    T_surf = self.mesh.T[i_ext, j, k]
-                    h = self.mesh.h_conv[i_ext, j, k]
+        # Perdite da x = 0 e x = Lx
+        for i_ext in [0, self.mesh.Nx - 1]:
+            for j in range(self.mesh.Ny):
+                for k in range(self.mesh.Nz):
+                    bt = self.mesh.boundary_type[i_ext, j, k]
                     
-                    # Area laterale
-                    r = self.mesh.r[i_ext]
-                    dtheta = 2 * np.pi / self.mesh.Ntheta
-                    A = r * dtheta * d
+                    if bt == BoundaryType.CONVECTION:
+                        T_surf = self.mesh.T[i_ext, j, k]
+                        h = self.mesh.bc_h[i_ext, j, k]
+                        Q_total += h * A_cell * (T_surf - self.T_ambient_K)
+        
+        # Perdite da y = 0 e y = Ly
+        for j_ext in [0, self.mesh.Ny - 1]:
+            for i in range(self.mesh.Nx):
+                for k in range(self.mesh.Nz):
+                    bt = self.mesh.boundary_type[i, j_ext, k]
                     
-                    Q_total += h * A * (T_surf - self.T_ambient)
+                    if bt == BoundaryType.CONVECTION:
+                        T_surf = self.mesh.T[i, j_ext, k]
+                        h = self.mesh.bc_h[i, j_ext, k]
+                        Q_total += h * A_cell * (T_surf - self.T_ambient_K)
         
         return float(Q_total)
     
     def _compute_power_input(self) -> float:
         """Calcola potenza totale immessa dalle resistenze"""
         # Somma Q nella zona heater
-        mask = (self.mesh.material == MaterialID.HEATER)
+        mask = (self.mesh.material_id == MaterialID.HEATERS)
         if np.any(mask):
             # Q è potenza volumetrica [W/m³]
             # Volume cella = d³
@@ -273,15 +269,15 @@ class EnergyBalanceAnalyzer:
         Returns:
             (energia_totale, dict per materiale)
         """
-        T_ref = self.T_ambient
+        T_ref = self.T_ambient_K  # Kelvin, come mesh.T
         V_cell = self.mesh.d ** 3
         
         E_total = 0.0
         E_by_material = {}
         
         # Calcola per ogni materiale
-        for mat_id in np.unique(self.mesh.material):
-            mask = (self.mesh.material == mat_id)
+        for mat_id in np.unique(self.mesh.material_id):
+            mask = (self.mesh.material_id == mat_id)
             
             rho = self.mesh.rho[mask]
             cp = self.mesh.cp[mask]
@@ -299,12 +295,12 @@ class EnergyBalanceAnalyzer:
         
         Assumendo T_max = 600°C per la sabbia
         """
-        T_max = 600.0  # °C
-        T_ref = self.T_ambient
+        T_max = 600.0 + 273.15  # Kelvin
+        T_ref = self.T_ambient_K  # Kelvin
         V_cell = self.mesh.d ** 3
         
         # Solo zona storage (sabbia)
-        mask = (self.mesh.material == MaterialID.SAND)
+        mask = (self.mesh.material_id == MaterialID.SAND)
         if np.any(mask):
             rho = self.mesh.rho[mask]
             cp = self.mesh.cp[mask]
@@ -325,13 +321,13 @@ class EnergyBalanceAnalyzer:
         T0 = self.T0  # Kelvin
         
         # Solo zona storage
-        mask = (self.mesh.material == MaterialID.SAND)
+        mask = (self.mesh.material_id == MaterialID.SAND)
         if not np.any(mask):
             return 0.0
         
         rho = self.mesh.rho[mask]
         cp = self.mesh.cp[mask]
-        T_K = self.mesh.T[mask] + 273.15  # Converti in Kelvin
+        T_K = self.mesh.T[mask]  # Già in Kelvin
         
         # Evita log di numeri <= 0
         T_K = np.maximum(T_K, 1.0)
@@ -365,28 +361,24 @@ class EnergyBalanceAnalyzer:
         
         S_gen = 0.0
         
-        T_K = self.mesh.T + 273.15  # Kelvin
+        T_K = self.mesh.T  # Già in Kelvin
         
-        # Calcola gradiente temperatura (differenze finite)
-        for i in range(1, self.mesh.Nr - 1):
-            for j in range(self.mesh.Ntheta):
+        # Calcola gradiente temperatura (differenze finite) - coordinate cartesiane
+        for i in range(1, self.mesh.Nx - 1):
+            for j in range(1, self.mesh.Ny - 1):
                 for k in range(1, self.mesh.Nz - 1):
                     T_P = T_K[i, j, k]
                     
                     if T_P < 1.0:
                         continue
                     
-                    # Gradienti
-                    dT_dr = (T_K[i+1, j, k] - T_K[i-1, j, k]) / (2 * d)
-                    
-                    j_prev = (j - 1) % self.mesh.Ntheta
-                    j_next = (j + 1) % self.mesh.Ntheta
-                    dT_dtheta = (T_K[i, j_next, k] - T_K[i, j_prev, k]) / (2 * d)
-                    
+                    # Gradienti cartesiani
+                    dT_dx = (T_K[i+1, j, k] - T_K[i-1, j, k]) / (2 * d)
+                    dT_dy = (T_K[i, j+1, k] - T_K[i, j-1, k]) / (2 * d)
                     dT_dz = (T_K[i, j, k+1] - T_K[i, j, k-1]) / (2 * d)
                     
                     # Magnitudine gradiente
-                    grad_T_sq = dT_dr**2 + dT_dtheta**2 + dT_dz**2
+                    grad_T_sq = dT_dx**2 + dT_dy**2 + dT_dz**2
                     
                     # Conducibilità
                     k_local = self.mesh.k[i, j, k]
