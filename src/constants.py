@@ -25,6 +25,9 @@ CP_AIR = 1005.0                # [J/(kg*K)]
 K_AIR = 0.026                  # [W/(m*K)]
 PACKING_FRACTION_DEFAULT = 0.63
 
+# --- environment ----------------------------------------------------------
+GRAVITY = 9.81                 # [m/s^2] used by the natural-convection correlations
+
 # --- geometry / numerics --------------------------------------------------
 MIN_CELLS_PER_AXIS = 3
 DEFAULT_SPACING = 0.2          # [m] target cell size

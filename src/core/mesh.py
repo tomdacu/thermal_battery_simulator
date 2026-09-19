@@ -204,6 +204,16 @@ class Mesh3D:
         self.cp = np.full(shape, CP_AIR)
         self.Q_source = np.zeros(shape)
         self.Q_sink = np.zeros(shape)
+        #: cells that are NOT part of the thermal problem (the air around the vessel):
+        #: no conduction into them, and their interface carries the outside film
+        self.excluded = np.zeros(shape, dtype=bool)
+        #: film coefficient of the outer surface [W/(m^2 K)] (natural + wind)
+        self.h_out = 0.0
+        #: ambient temperature driving that film [K]
+        self.t_ambient = T_AMBIENT_DEFAULT
+        #: contact conductance between materials [W/(m^2 K)]: real interfaces are not
+        #: perfect, so a finite resistance sits in series with the half cells
+        self.h_contact = 0.0
         self.source_mask = np.zeros(shape, dtype=bool)
         self.T = np.full(shape, T_INITIAL_DEFAULT)
         self.bc_h = np.zeros(shape)

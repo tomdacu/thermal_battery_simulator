@@ -99,7 +99,12 @@ def compute_balance(mesh: Mesh3D, t_ambient: float = T_AMBIENT_DEFAULT,
     """
     index = index or GridIndex.from_mesh(mesh)
     q_dom = fluxes.domain_fluxes(mesh, radiation=radiation)
+    # the outside film of an excluded-air model is an internal boundary: it belongs to
+    # the domain loss, otherwise the balance identity would not close
+    environment = fluxes.environment_flux(mesh, index)
+    q_dom["total"] += environment
     q_bat = fluxes.envelope_fluxes(mesh)
+    q_bat["total"] += environment
 
     # a source inside a pinned (Dirichlet) cell never reaches the solver: counting
     # it as input made the reported balance miss the energy the identity rows drop

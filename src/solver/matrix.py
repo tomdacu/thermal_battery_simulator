@@ -55,13 +55,30 @@ def face_coefficients(mesh: Mesh3D, index: GridIndex) -> np.ndarray:
     ``d_centers`` the centre-to-centre distance of the two cells.
     """
     k = mesh.k.ravel(order="F")
+    excluded = mesh.excluded.ravel(order="F")
+    material = mesh.material_id.ravel(order="F")
     out = np.zeros((6, k.size))
     for face_index, nb in enumerate(index.neighbours):
         k_e = k[nb]
         # harmonic mean of the two conductivities = conductivity of the interface
         k_face = 2.0 * k * k_e / (k + k_e + EPS)
         coeff = k_face * index.face_factors[face_index]
+        if mesh.h_contact > 0.0:
+            # a real interface between two materials is not perfect: the contact
+            # resistance sits in series with the two half cells
+            axis = FACE_AXIS[FACES[face_index]]
+            d_self = index.sizes[axis]
+            d_nb = d_self[nb]
+            r_series = (0.5 * d_self / (k + EPS) + 1.0 / mesh.h_contact
+                        + 0.5 * d_nb / (k_e + EPS))
+            k_eff = 0.5 * (d_self + d_nb) / r_series
+            coeff = np.where(material != material[nb], k_eff * index.face_factors[face_index],
+                             coeff)
         coeff[index.on_face[FACES[face_index]]] = 0.0
+        if excluded.any():
+            # the excluded cells are not part of the problem: no conduction into them,
+            # their interface is a film (added in build_steady_matrix)
+            coeff = np.where(excluded[nb], 0.0, coeff)
         out[face_index] = coeff
     return out
 
@@ -122,6 +139,21 @@ def build_steady_matrix(mesh: Mesh3D, index: GridIndex = None, radiation: bool =
     for face in FACES:
         _face_diag_rhs(mesh, index, face, a_p, b, radiation)
 
+    excluded = mesh.excluded.ravel(order="F")
+    if excluded.any() and mesh.h_out > 0.0:
+        # the outer surface: every active cell that faces an excluded one exchanges
+        # h_out * A * (T_ambient - T) with the environment.  This replaces the air
+        # domain entirely - no conduction through the air, no cells spent on it.
+        for face_index, nb in enumerate(index.neighbours):
+            mask = ~excluded & excluded[nb] & ~index.on_face[FACES[face_index]]
+            if not mask.any():
+                continue
+            axis = FACE_AXIS[FACES[face_index]]
+            area_over_v = index.areas[axis][mask] / index.volume[mask]
+            a_conv = mesh.h_out * area_over_v
+            a_p[mask] += a_conv
+            b[mask] += a_conv * mesh.t_ambient
+
     tube = index.interior_tube
     if tube.any():
         a_tube = mesh.bc_h.ravel(order="F")[tube] / mesh.h_char.ravel(order="F")[tube]
@@ -129,6 +161,12 @@ def build_steady_matrix(mesh: Mesh3D, index: GridIndex = None, radiation: bool =
         b[tube] += a_tube * mesh.bc_T_inf.ravel(order="F")[tube]
 
     dirichlet, values = dirichlet_rows(mesh, index)
+    if mesh.excluded.any():
+        # excluded cells carry no physics: pin them at the ambient temperature so the
+        # system stays non-singular and the report can still show the whole box
+        flat_excluded = mesh.excluded.ravel(order="F")
+        dirichlet = dirichlet | flat_excluded
+        values = np.where(flat_excluded, mesh.t_ambient, values)
     a = _assemble(index, coeff, a_p)
     if enforce_dirichlet:
         a = apply_dirichlet(a, b, dirichlet, values)

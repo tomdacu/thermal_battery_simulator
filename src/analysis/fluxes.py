@@ -91,6 +91,32 @@ def _face_size(mesh: Mesh3D, axis: int, selector) -> np.ndarray:
     return mesh.axis_size(axis)[selector]
 
 
+def environment_flux(mesh: Mesh3D, index: GridIndex = None) -> float:
+    """Heat leaving the *active* region through the outside film [W].
+
+    When the air is excluded from the problem, the outer surface is an internal
+    boundary: the box faces see nothing of it, so the loss must be integrated here or
+    the energy balance of the domain would not close.
+    """
+    if mesh.h_out <= 0.0:
+        return 0.0
+    excluded = mesh.excluded.ravel(order="F")
+    if not excluded.any():
+        return 0.0
+    index = index or GridIndex.from_mesh(mesh)
+    temperature = mesh.T.ravel(order="F")
+    total = 0.0
+    for face_index, nb in enumerate(index.neighbours):
+        mask = ~excluded & excluded[nb] & ~index.on_face[FACES[face_index]]
+        if not mask.any():
+            continue
+        axis = FACE_AXIS[FACES[face_index]]
+        area = index.areas[axis][mask]
+        total += float(np.sum(mesh.h_out * area
+                              * (temperature[mask] - mesh.t_ambient)))
+    return total
+
+
 def domain_fluxes(mesh: Mesh3D, radiation: bool = False) -> dict[str, float]:
     """``{face: W}`` for the six box faces plus the total."""
     index = GridIndex.from_mesh(mesh)
