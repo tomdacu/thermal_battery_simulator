@@ -202,13 +202,25 @@ def test_the_pressure_drop_scales_with_the_square_of_the_flow():
 
 
 def test_pressure_is_the_cheap_lever_of_a_gas_loop():
-    """At constant mass flow, pressure raises h and lowers the pressure drop."""
+    """What pressure buys, stated exactly.
+
+    At a *fixed mass flow* the Reynolds number is independent of the density, so the
+    film coefficient does not move - but the velocity falls as 1/rho, so the pressure
+    drop (and the fan power) falls.  At a fixed *velocity* the mass flow and the
+    Reynolds number rise with rho, so the film coefficient rises.  That is why a
+    pressurised loop reaches the same heat transfer with less fan work.
+    """
     from src.solver.fluid import pipe_h, pressure_drop
     cold = Fluid().at(500.0)
-    dense = Fluid().at_pressure(20.0 * 101325.0, 500.0)   # 20 atm (the reference is 1 atm)
+    dense = Fluid().at_pressure(20.0 * 101325.0, 500.0)
     assert dense.rho == pytest.approx(cold.rho * 20.0, rel=1e-9)
-    assert pipe_h(0.05, 0.05, dense) > pipe_h(0.05, 0.05, cold)
-    assert pressure_drop(0.05, 0.05, 4.0, dense) < pressure_drop(0.05, 0.05, 4.0, cold)
+
+    # fixed mass flow: same h, much smaller pressure drop
+    assert pipe_h(0.05, 0.05, dense) == pytest.approx(pipe_h(0.05, 0.05, cold), rel=1e-9)
+    assert pressure_drop(0.05, 0.05, 4.0, dense) < 0.1 * pressure_drop(0.05, 0.05, 4.0, cold)
+
+    # fixed velocity: same pressure drop per unit length, much larger h
+    assert pipe_h(0.05 * 20.0, 0.05, dense) > 5.0 * pipe_h(0.05, 0.05, cold)
 
 
 def test_the_loop_reports_its_circulation_loss():
