@@ -1,334 +1,125 @@
-# User Interface (GUI)
+# 4. GUI design
 
-## 1. Introduction
+`gui/`.  The window owns no physics: it collects parameters, starts jobs and
+displays results.
 
-The graphical interface is developed in **PyQt6** and provides an integrated environment for configuration, execution, and analysis of simulations. The main file is `gui/main_window.py`.
-
-The GUI uses a clean, streamlined design with:
-- **No menu bar** - all functions accessible through tabs
-- **No toolbar** - actions via buttons in the interface
-- **4 main tabs** for organized parameter access
-
----
-
-## 2. Window Structure
-
-The GUI is divided into three main areas:
-
-### 2.1 Side Panel (Input) - 4-Tab Structure
-
-The side panel uses a **4-tab structure** for organized parameter access:
+## 1. Layout
 
 ```
-[Geometry] [Materials] [Analysis] [Tools]
+┌───────────────┬──────────────────────────────┬───────────────────────┐
+│ left panel    │  3D view (PyVista)           │ results tabs          │
+│  1 Geometry   │  field / clip / opacity      │  Statistics           │
+│  2 Materials  │  colormap controls           │  Energy balance       │
+│  3 Analysis   │                              │  Materials            │
+│  4 Tools      │                              │  Transient            │
+│               │                              │  Log                  │
+├───────────────┤                              │                       │
+│ Build mesh    │                              │                       │
+│ Preview       │                              │                       │
+│ Run │ Cancel  │                              │                       │
+│ progress bar  │                              │                       │
+└───────────────┴──────────────────────────────┴───────────────────────┘
 ```
 
-Each main tab contains sub-tabs for detailed configuration:
+* **Geometry** – domain, cylinder, insulation, heaters, tubes, cell size.
+* **Materials** – storage medium, insulation and shell, ambient/ground
+  conditions and the radiation switch.  This tab is the *only* place where
+  ambient and ground values are defined; the analyses read them.
+* **Analysis** – analysis type, initial condition, power profile, extraction
+  profile, state save/load.
+* **Tools** – linear solver settings, losses-iteration controls, help.
 
-| Main Tab | Sub-tabs |
-|----------|----------|
-| **Geometry** | Cylinder, Insulation, Heaters, Tubes, Mesh |
-| **Materials** | Storage, Insulation, Operating Conditions |
-| **Analysis** | Type, Initial Conditions, Power Profile, Extraction, Save/Load |
-| **Tools** | Solver, Statistics, Energy Balance, Materials Info, Export, Help |
+## 2. Panels and getters
 
-### 2.2 Central Area (3D Visualization)
-Uses `PyVistaQt` to integrate an interactive 3D rendering engine:
-- Temperature field visualization (in Celsius)
-- Material distribution visualization
-- **Slicing** tools (X, Y, Z section planes) to inspect the battery interior
-- Single vertical colorbar for clean display
+Each panel exposes pure getters that return `src` objects, so the window never
+parses strings:
 
-### 2.3 Bottom Panel (Results)
-Shows data derived from the simulation:
-- Solver log (computation time, residual, iterations)
-- Progress bar during computation
-- Status messages
+| panel | getters |
+|---|---|
+| `GeometryPanel` | `domain()`, `cylinder()`, `heaters()`, `tubes()`, `apply_geometry(battery)`, `set_mesh_info(...)` |
+| `MaterialsPanel` | `storage_key()`, `insulation_key()`, `shell_key()`, `packing_fraction()`, `conditions()`, `radiation_enabled()` |
+| `AnalysisPanel` | `analysis_type()`, `initial_condition()`, `wants_steady_initial_condition()`, `power_profile()`, `extraction_profile()`, `transient_settings()`, `losses_target_kelvin()` |
+| `SolverPanel` | `settings()`, `losses_settings()`, `backend()` |
+| `ResultsPanel` | `update_statistics/energy/materials/transient`, `log` |
 
----
+Combos store their machine value in `itemData` (`gui/widgets.py::combo`), which
+removes the class of bug that silently pinned tolerance/precision/thread
+selections to defaults.
 
-## 3. Simulation Management
-
-### 3.1 Threading
-To avoid blocking the interface during intensive calculations, the simulation runs in a separate thread (`SimulationThread`). This allows:
-- Keeping the 3D visualization responsive
-- Updating a progress bar in real time
-- Processing events during iterative analysis
-
-### 3.2 User Workflow
-1. **Configure Geometry** (Geometry tab): Define domain, cylinder, insulation, heaters, tubes, mesh
-2. **Set Materials** (Materials tab): Select storage/insulation materials, operating conditions
-3. **Configure Analysis** (Analysis tab): Choose analysis type, set profiles
-4. **Configure Solver** (Tools > Solver): Select method, tolerance, CPU/GPU, losses parameters
-5. **Build Mesh**: Click "Build Mesh" button
-6. **Run Simulation**: Click "Run Simulation" button
-7. **View Results** (Tools tab): Analyze statistics, energy balance, export data
-
----
-
-## 4. Tab Organization
-
-### 4.1 GEOMETRY Tab
-
-#### Sub-tab: Cylinder
-| Widget Group | Contents |
-|--------------|----------|
-| Domain | Lx, Ly, Lz domain dimensions [m] |
-| Storage Cylinder | Radius, height [m] |
-| Roof | Enable cone, angle, steel slab, fill with sand |
-
-#### Sub-tab: Insulation
-| Widget Group | Contents |
-|--------------|----------|
-| Radial Insulation | Insulation thickness, shell thickness [m] |
-| Vertical Insulation | Bottom slab, top slab thickness [m] |
-
-#### Sub-tab: Heaters
-| Widget Group | Contents |
-|--------------|----------|
-| Power | Total power [kW] |
-| Pattern | Distribution pattern (Uniform, Grid, Radial, Spiral) |
-| Elements | Number, radius, spacing |
-| Preview | Visual preview of positions |
-
-#### Sub-tab: Tubes
-| Widget Group | Contents |
-|--------------|----------|
-| Status | Active/inactive toggle |
-| Fluid | Temperature, convection coefficient |
-| Pattern | Distribution pattern |
-| Elements | Number, diameter |
-
-#### Sub-tab: Mesh
-| Widget Group | Contents |
-|--------------|----------|
-| Spacing | Target cell spacing [m] |
-| Info | Resulting cell count, memory estimate |
-
-### 4.2 MATERIALS Tab
-
-#### Sub-tab: Storage
-| Widget Group | Contents |
-|--------------|----------|
-| Material | Material selection (Steatite, Sand, etc.) |
-| Packing | Packing fraction [%] |
-| Properties | Display of k, ρ, cp values |
-
-#### Sub-tab: Insulation
-| Widget Group | Contents |
-|--------------|----------|
-| Material | Insulation material selection |
-| Properties | Display of k, ρ, cp values |
-
-#### Sub-tab: Conditions
-| Widget Group | Contents |
-|--------------|----------|
-| Environment | T_ambient [°C] |
-| Convection | External convection coefficient h_ext [W/(m²·K)] |
-
-### 4.3 ANALYSIS Tab
-
-#### Sub-tab: Type
-| Widget Group | Contents |
-|--------------|----------|
-| Analysis Type | Steady-state, Losses analysis, Transient |
-| Steady | Heater power configuration |
-| Losses | Target temperature, ambient temperature |
-| Transient | Duration, time step, save interval |
-
-#### Sub-tab: Initial Conditions
-| Widget Group | Contents |
-|--------------|----------|
-| Type | Uniform, By Material, From File, From Steady |
-| Temperature | Initial temperature settings per mode |
-
-#### Sub-tab: Power
-| Widget Group | Contents |
-|--------------|----------|
-| Profile Type | Off, Constant, Scheduled, From CSV |
-| Parameters | Power values, timing |
-
-#### Sub-tab: Extraction
-| Widget Group | Contents |
-|--------------|----------|
-| Profile Type | Off, Imposed Power, Flow Rate, Target Outlet T |
-| Parameters | Flow rate, fluid type, temperature |
-
-#### Sub-tab: Save/Load
-| Widget Group | Contents |
-|--------------|----------|
-| Save State | Save current simulation to HDF5 |
-| Load State | Load simulation from HDF5 |
-
-### 4.4 TOOLS Tab
-
-#### Sub-tab: Solver
-| Widget Group | Contents |
-|--------------|----------|
-| **Common Settings** | Method (cg, bicgstab, gmres, direct), Preconditioner, Tolerance, Max iterations |
-| **Performance** | CPU threads / GPU selection (CUDA, OpenCL), Precision (float64/32/16) |
-| **Losses Analysis** | Temperature tolerance, Max iterations, Underrelaxation α, h_conv, T_ground |
-| **Tips** | Performance optimization suggestions |
-
-#### Sub-tab: Statistics
-| Widget Group | Contents |
-|--------------|----------|
-| Temperature | T_min, T_max, T_mean, T_std (all in °C) |
-| Mesh | Dimensions (Nx × Ny × Nz), total nodes |
-
-#### Sub-tab: Energy Balance
-| Widget Group | Contents |
-|--------------|----------|
-| Conditions | T_target, T_final, T_ambient, T_ground, h_conv |
-| Losses | Total losses (kW), breakdown by face (top, side, bottom) |
-| Energy | E_stored (kWh, MWh), Thermal autonomy (hours) |
-| Convergence | Status, number of iterations |
-
-#### Sub-tab: Materials Info
-| Widget Group | Contents |
-|--------------|----------|
-| Distribution | Volume fractions by material type |
-| Properties | Selected material thermal properties |
-
-#### Sub-tab: Export
-| Widget Group | Contents |
-|--------------|----------|
-| Formats | CSV, VTK, HDF5 options |
-| Screenshot | Save current 3D view |
-
-#### Sub-tab: Help
-| Widget Group | Contents |
-|--------------|----------|
-| Quick Guide | Usage instructions |
-| Performance | Optimization tips |
-| Troubleshooting | Common issues and solutions |
-
----
-
-## 5. Visualization Controls
-
-### 5.1 Visualization Mode
-| Mode | Description |
-|------|-------------|
-| Clip Section | Clips the volume at a plane, shows solid behind |
-| Multi-Slice | Shows 5 parallel slices |
-| Volume 3D | Semi-transparent volume rendering |
-| Isosurface | Isosurfaces at constant temperature |
-
-### 5.2 Slice Controls
-| Widget | Purpose |
-|--------|---------|
-| Axis selector | X, Y, or Z axis |
-| Position slider | Position along axis (0-100%) |
-| Field selector | Field to display (Temperature, Material, k, Q) |
-
-### 5.3 Colorbar
-- **Single vertical colorbar** on the right side
-- Temperature displayed in **Celsius** (converted from internal Kelvin)
-- Auto-ranging or manual T_min/T_max
-
----
-
-## 6. Action Buttons
-
-| Button | Action | Enables |
-|--------|--------|---------|
-| 👁 Preview Geometry | Preview cylinders/tubes/heaters without mesh | - |
-| 🔧 Build Mesh | Create mesh + apply geometry | Run Simulation |
-| ▶ Run Simulation | Run selected analysis type | Results panels |
-
----
-
-## 7. Analysis Types
-
-### 7.1 Steady-State Analysis
-- Solves equilibrium temperature distribution with constant heater power
-- Single solver call
-- Results: temperature field, power balance
-
-### 7.2 Losses Analysis (Iterative)
-Uses an **iterative secant method** to find thermal losses:
-
-1. **Input**: Target sand temperature (T_target), Ambient temperature (T_amb)
-2. **Algorithm**:
-   - Initialize temperatures (sand=T_target, insulation=interpolated, external=T_amb)
-   - Set convection BC on external faces
-   - Iterate:
-     - Apply heat source Q to sand cells
-     - Solve steady-state
-     - Compute T_mean of sand
-     - Adjust Q using secant method with underrelaxation
-     - Repeat until |T_mean - T_target| < tolerance
-3. **Output**: 
-   - Q_total = thermal losses [kW]
-   - Breakdown by face (top, side, bottom)
-   - Thermal autonomy estimate
-   - Physically consistent temperature profile
-
-**Configurable Parameters** (in Solver sub-tab):
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| Tolerance (°C) | Acceptable error on T_mean | 1.0 |
-| Max iterations | Limit for Q-T iterations | 20 |
-| α (underrelaxation) | Damping factor (0.1=stable, 1.0=fast) | 0.5 |
-| h_conv | External convection coefficient | 10.0 W/(m²·K) |
-| T_ground | Ground temperature | 15.0 °C |
-
-### 7.3 Transient Analysis
-- Time-dependent simulation with power/extraction profiles
-- Backward Euler implicit scheme
-- State save/load capability
-
----
-
-## 8. Energy Balance Panel
-
-After Losses Analysis, the Energy Balance panel shows:
+## 3. The run cycle
 
 ```
-╔══════════════════════════════════════════════╗
-║      ENERGY BALANCE - LOSSES ANALYSIS        ║
-╠══════════════════════════════════════════════╣
-║ CONDITIONS                                   ║
-╠──────────────────────────────────────────────╣
-║ T target sand:    600.0 °C                   ║
-║ T final mean:     599.8 °C                   ║
-║ T ambient:         20.0 °C                   ║
-║ T ground:          15.0 °C                   ║
-║ h convection:      10.0 W/(m²·K)             ║
-╠══════════════════════════════════════════════╣
-║ THERMAL LOSSES                               ║
-╠──────────────────────────────────────────────╣
-║ TOTAL:            12.50 kW                   ║
-║   - Top:           3.20 kW                   ║
-║   - Side:          7.80 kW                   ║
-║   - Bottom:        1.50 kW                   ║
-╠──────────────────────────────────────────────╣
-║ Loss density:     125.0 W/m³                 ║
-╠══════════════════════════════════════════════╣
-║ STORED ENERGY                                ║
-╠──────────────────────────────────────────────╣
-║ E thermal:       1250 kWh                    ║
-║                   1.25 MWh                   ║
-║ Autonomy:        100.0 hours                 ║
-╠══════════════════════════════════════════════╣
-║ CONVERGENCE: ✓ CONVERGED (8 iter)            ║
-╚══════════════════════════════════════════════╝
+Build mesh ─► Mesh3D(spacing) ─► BatteryGeometry.apply_to_mesh ─► BuildReport
+                                   │ (validation errors → dialog, no silent clip)
+                                   ▼
+Run ─► _run_config() ─► RunConfig ─► SimulationController.start(config, mesh)
+                                      │
+                    ┌─────────────────┴──────────────────┐
+                    ▼                                    ▼
+             SimulationJob (QThread)             buttons disabled,
+             progress / cancel                   Cancel enabled
+                    │
+        ┌───────────┼────────────┬─────────────────┐
+        ▼           ▼            ▼                 ▼
+   steady run   losses run   transient run    (results)
+        └───────────┴────────────┘
+                    ▼
+      _on_finished → results tabs + 3D refresh + status
 ```
 
----
+* `SimulationController` serialises runs: a second run cannot start while one is
+  in flight, and `running_changed` owns button enablement.
+* Every job callable receives `progress_callback` and `should_stop`; **Cancel**
+  sets the flag and the loops exit at the next checkpoint, leaving the mesh in a
+  consistent state.
+* Exceptions inside a job are reported through the `failed` signal and shown in a
+  dialog with the message; nothing is swallowed.
 
-## 9. GUI Requirements
+## 4. Results
 
-For proper GUI functionality, the following are required:
-- `PyQt6`: Window framework
-- `pyvista`: Rendering engine
-- `pyvistaqt`: Integration between PyVista and Qt
+| tab | content |
+|---|---|
+| Statistics | min/max/mean/std and percentiles in degC, for the whole domain and for the storage region; grid size, cell size, domain |
+| Energy balance | `P_in`, `P_extracted`, envelope losses (top/side/bottom) and the box-face audit, stored energy and exergy in kWh, thermal autonomy, the imbalance self-check; after a losses run the required power and density; after a transient the cumulative energies |
+| Materials | cell counts per material, packed-bed properties of the storage and insulation |
+| Transient | one row per saved sample (T mean/max/min, P heaters/extracted, losses) and the CSV export |
+| Log | every message from the controller and the solvers (solver notes, geometry report, warnings), capped to avoid unbounded growth |
 
----
+## 5. 3D view
 
-## 10. Future Developments
-- 2D plots of temporal evolution
-- Result export in additional formats
-- Editable material database directly from interface
-- Multi-physics coupling (flow + heat)
+`VizView` builds a PyVista `ImageData` from the mesh (`src/viz/scene.py`) with
+**cell data in Fortran order** - the same ordering as every field in the code -
+applies a clip plane along x/y/z with an opacity, and shows the material legend.
+The colormap is fixed to `coolwarm` (a single, consistent scale).  Temperature is
+displayed in degC; the conversion happens here and nowhere else.
+
+`Preview geometry` uses the same controls: the cut and the opacity apply to the
+schematic view as well, so the battery can be inspected from the inside before
+building the mesh.
+
+The scene itself is built by `src/viz/scene.py` (`add_field`, `add_material_legend`,
+`add_geometry_preview`), which is also what the tests exercise off-screen; the
+widget only maps its controls onto those calls.  A clip plane that leaves nothing
+to draw returns `None` and the view prints "nothing to show" instead of handing an
+empty mesh to PyVista (which raises).
+
+If no OpenGL context is available (head-less session, VM, remote desktop) the
+widget degrades to a placeholder explaining why, and the rest of the application
+keeps working; `THERMAL_DISABLE_3D=1` forces that mode (used by the test suite).
+
+`Preview geometry` draws the schematic configuration (shell, insulation, storage,
+roof, tubes) straight from the geometry object, so what you see is what
+`apply_to_mesh` will paint.
+
+## 6. Units at the boundary
+
+`gui/units.py` is the only module that converts:
+
+* every spin box is labelled in degC and converted with `c_to_k` when the config
+  object is built;
+* every displayed temperature is converted back for the labels, tables and
+  exports;
+* powers are W, lengths m, time s throughout the GUI.
+
+A `ValueError` from `check_kelvin` therefore means a bug in the GUI layer, not in
+the physics.

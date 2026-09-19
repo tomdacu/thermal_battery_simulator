@@ -1,20 +1,41 @@
-"""
-mesh.py - Classe Mesh3D per la discretizzazione del dominio
+"""Structured Cartesian 3D mesh for the FDM heat solver.
 
-Implementa una mesh cartesiana 3D strutturata con:
-- Allocazione memoria per campi scalari (temperatura, materiali, sorgenti)
-- Mapping indici 3D <-> 1D
-- Supporto per mesh non uniforme (futuro)
+Indexing contract: node ``(i, j, k)`` has linear index ``i + j*Nx + k*Nx*Ny``
+(Fortran order), matching ``field.ravel(order="F")`` used everywhere else.
+
+Unit contract: ``T``, ``bc_T_inf`` and every ``FaceBC`` temperature are KELVIN.
 """
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Tuple, Optional, Dict, Any
-from enum import IntEnum
+
+from ..constants import (
+    CP_AIR,
+    DEFAULT_SPACING,
+    K_AIR,
+    MIN_CELLS_PER_AXIS,
+    RHO_AIR,
+    T_AMBIENT_DEFAULT,
+    T_GROUND_DEFAULT,
+    T_INITIAL_DEFAULT,
+)
+from ..units import check_kelvin
+from .refinement import (GridSpec, edges_to_centers,
+                        edges_to_sizes, size_at, worst_ratio)
+
+FACES = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+
+
+def _find(edges: np.ndarray, position: float) -> int:
+    """Index of the cell of ``edges`` containing ``position``, clamped."""
+    return int(np.clip(np.searchsorted(edges, position, side="right") - 1,
+                       0, edges.size - 2))
 
 
 class MaterialID(IntEnum):
-    """Identificatori dei materiali"""
     AIR = 0
     SAND = 1
     INSULATION = 2
@@ -26,409 +47,380 @@ class MaterialID(IntEnum):
 
 
 class BoundaryType(IntEnum):
-    """Tipi di condizione al contorno"""
-    INTERNAL = 0        # Nodo interno
-    DIRICHLET = 1       # Temperatura fissa
-    NEUMANN = 2         # Flusso imposto
-    CONVECTION = 3      # Convezione (Robin)
-    SYMMETRY = 4        # Simmetria (flusso nullo)
+    INTERNAL = 0
+    DIRICHLET = 1
+    NEUMANN = 2
+    CONVECTION = 3
+    SYMMETRY = 4
+
+
+@dataclass
+class FaceBC:
+    """Boundary condition of one domain face.
+
+    ``kind`` INTERNAL means adiabatic (zero flux); CONVECTION uses ``h`` and
+    ``value`` (fluid temperature, K); DIRICHLET fixes ``value`` (K); NEUMANN
+    imposes the heat flux ``value`` [W/m^2] flowing INTO the domain.
+    """
+
+    kind: BoundaryType = BoundaryType.INTERNAL
+    h: float = 0.0
+    value: float = T_AMBIENT_DEFAULT
+    emissivity: float = 0.0
+
+    def is_active(self) -> bool:
+        if self.kind == BoundaryType.DIRICHLET:
+            return True
+        if self.kind == BoundaryType.CONVECTION:
+            return self.h > 0.0 or self.emissivity > 0.0
+        if self.kind == BoundaryType.NEUMANN:
+            return self.value != 0.0
+        return False
 
 
 @dataclass
 class NodeProperties:
-    """Proprietà termiche di un singolo nodo"""
-    k: float = 1.0          # Conducibilità termica [W/(m·K)]
-    rho: float = 1000.0     # Densità [kg/m³]
-    cp: float = 1000.0      # Calore specifico [J/(kg·K)]
-    Q: float = 0.0          # Sorgente di calore volumetrica [W/m³]
-    
+    """Thermal properties of a single material."""
+
+    k: float
+    rho: float
+    cp: float
+
     @property
     def alpha(self) -> float:
-        """Diffusività termica [m²/s]"""
+        """Thermal diffusivity [m^2/s]."""
         return self.k / (self.rho * self.cp)
 
 
 @dataclass
 class Mesh3D:
+    """Structured Cartesian grid, uniform or graded.
+
+    Two ways to describe it:
+
+    * ``spacing`` - legacy uniform grid ``dx = dy = dz = spacing``, snapped to the
+      box (``snapped`` reports the leftover);
+    * ``grid`` - a :class:`~src.core.refinement.GridSpec`, i.e. per-axis *physical*
+      refinement targets: cells are small where the gradients are and coarse in the
+      far field.
+
+    Either way the public contract is the same: ``dx``/``dy``/``dz`` are per-axis
+    cell sizes and ``V``/``Ax``/``Ay``/``Az`` the cell volume and face areas.  The
+    scalar shortcuts ``d``, ``V_cell`` and ``A_cell`` stay available for uniform
+    grids only: on a graded grid a single cell size does not exist and asking for
+    one raises instead of silently using the first cell.
     """
-    Mesh cartesiana 3D strutturata con spaziatura UNIFORME (dx = dy = dz).
-    
-    Attributes:
-        Lx, Ly, Lz: Dimensioni del dominio [m]
-        Nx, Ny, Nz: Numero di celle per direzione (calcolato automaticamente se uniform=True)
-        dx, dy, dz: Spaziatura delle celle [m] (uguali se uniform=True)
-        d: Spaziatura uniforme [m]
-    """
-    
-    # Dimensioni dominio
+
     Lx: float = 10.0
     Ly: float = 10.0
     Lz: float = 8.0
-    
-    # Numero di celle (usato solo se uniform=False)
-    Nx: int = 50
-    Ny: int = 50
-    Nz: int = 40
-    
-    # Spaziatura target (usato se uniform=True)
-    target_spacing: float = 0.2  # [m] - spaziatura desiderata
-    uniform: bool = True  # Se True, forza dx = dy = dz
-    
-    # Campi calcolati dopo __post_init__
-    dx: float = field(init=False)
-    dy: float = field(init=False)
-    dz: float = field(init=False)
+    spacing: float | None = None
+    grid: GridSpec | None = None
+
+    # derived geometry (filled in __post_init__)
+    Nx: int = field(init=False)
+    Ny: int = field(init=False)
+    Nz: int = field(init=False)
     N_total: int = field(init=False)
-    
-    # Coordinate dei centri cella
+    snapped: dict[str, float] = field(init=False, repr=False)
+    uniform: bool = field(init=False)
+
+    #: cell sizes per axis, ``(Nx,)``-shaped
+    dx: np.ndarray = field(init=False, repr=False)
+    dy: np.ndarray = field(init=False, repr=False)
+    dz: np.ndarray = field(init=False, repr=False)
+    #: cell edges per axis, ``(Nx+1,)``-shaped
+    edges_x: np.ndarray = field(init=False, repr=False)
+    edges_y: np.ndarray = field(init=False, repr=False)
+    edges_z: np.ndarray = field(init=False, repr=False)
+
+    # coordinates and grids
     x: np.ndarray = field(init=False, repr=False)
     y: np.ndarray = field(init=False, repr=False)
     z: np.ndarray = field(init=False, repr=False)
-    
-    # Griglie 3D di coordinate
     X: np.ndarray = field(init=False, repr=False)
     Y: np.ndarray = field(init=False, repr=False)
     Z: np.ndarray = field(init=False, repr=False)
-    
-    # Campi scalari
+
+    # material / boundary description
     material_id: np.ndarray = field(init=False, repr=False)
     boundary_type: np.ndarray = field(init=False, repr=False)
-    
-    # Proprietà termiche (campi 3D)
+    face_bc: dict[str, FaceBC] = field(init=False, repr=False)
+
+    # fields
     k: np.ndarray = field(init=False, repr=False)
     rho: np.ndarray = field(init=False, repr=False)
     cp: np.ndarray = field(init=False, repr=False)
-    Q: np.ndarray = field(init=False, repr=False)
-    
-    # Temperatura (soluzione)
-    T: np.ndarray = field(init=False, repr=False)
-    
-    # Condizioni al contorno
-    bc_h: np.ndarray = field(init=False, repr=False)      # Coefficiente convettivo
-    bc_T_inf: np.ndarray = field(init=False, repr=False)  # Temperatura esterna
-    bc_q: np.ndarray = field(init=False, repr=False)      # Flusso imposto
-    
-    # Spaziatura uniforme (calcolata in __post_init__)
-    d: float = field(init=False)
-    
-    def __post_init__(self):
-        """Inizializza la mesh e alloca la memoria"""
-        
+    Q_source: np.ndarray = field(init=False, repr=False)   # volumetric sources [W/m^3] (>= 0)
+    Q_sink: np.ndarray = field(init=False, repr=False)     # volumetric sinks [W/m^3] (<= 0)
+    source_mask: np.ndarray = field(init=False, repr=False)  # cells whose Q_source is driven by the power profile
+    T: np.ndarray = field(init=False, repr=False)          # [K]
+    bc_h: np.ndarray = field(init=False, repr=False)       # internal (tube) convection [W/m^2/K]
+    bc_T_inf: np.ndarray = field(init=False, repr=False)   # internal fluid temperature [K]
+
+    def __post_init__(self) -> None:
+        if self.grid is not None and self.spacing is not None:
+            raise ValueError("give either spacing (uniform) or grid (graded), not both")
+        if self.grid is not None:
+            self._build_graded()
+        else:
+            self._build_uniform(float(self.spacing if self.spacing is not None
+                                      else DEFAULT_SPACING))
+
+        self.x = edges_to_centers(self.edges_x)
+        self.y = edges_to_centers(self.edges_y)
+        self.z = edges_to_centers(self.edges_z)
         if self.uniform:
-            # Se Nx è stato fornito esplicitamente (diverso dal default 50), 
-            # usalo per determinare la spaziatura. Altrimenti usa target_spacing.
-            if self.Nx != 50:
-                self.d = self.Lx / self.Nx
-            else:
-                self.d = self.target_spacing
-            
-            # Calcola numero di celle per avere spaziatura uniforme
-            self.Nx = max(3, int(np.round(self.Lx / self.d)))
-            self.Ny = max(3, int(np.round(self.Ly / self.d)))
-            self.Nz = max(3, int(np.round(self.Lz / self.d)))
-            
-            # Spaziatura finale uniforme basata su Lx
-            self.d = self.Lx / self.Nx
-            self.dx = self.d
-            self.dy = self.d
-            self.dz = self.d
-            
-            # Aggiusta le dimensioni del dominio per garantire uniformità esatta
-            self.Ly = self.Ny * self.d
-            self.Lz = self.Nz * self.d
+            # a uniform grid has *identical* cells by construction: taking the sizes
+            # from the edges would leave them differing by an ulp, which breaks the
+            # exact symmetry of the operator
+            self.dx = np.full(self.Nx, self._step)
+            self.dy = np.full(self.Ny, self._step)
+            self.dz = np.full(self.Nz, self._step)
         else:
-            # Mesh non uniforme (come prima)
-            self.dx = self.Lx / self.Nx
-            self.dy = self.Ly / self.Ny
-            self.dz = self.Lz / self.Nz
-            self.d = self.dx  # Per compatibilità
-        
-        self.N_total = self.Nx * self.Ny * self.Nz
-        
-        # Coordinate dei centri cella (1D)
-        self.x = np.linspace(self.dx/2, self.Lx - self.dx/2, self.Nx)
-        self.y = np.linspace(self.dy/2, self.Ly - self.dy/2, self.Ny)
-        self.z = np.linspace(self.dz/2, self.Lz - self.dz/2, self.Nz)
-        
-        # Griglie 3D (meshgrid)
-        self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing='ij')
-        
-        # Inizializza campi a valori di default
+            self.dx = edges_to_sizes(self.edges_x)
+            self.dy = edges_to_sizes(self.edges_y)
+            self.dz = edges_to_sizes(self.edges_z)
+        self.X, self.Y, self.Z = np.meshgrid(self.x, self.y, self.z, indexing="ij")
+
+        # per-cell volumes and face areas, both (Nx, Ny, Nz).  A face area does not
+        # depend on the index along its own axis (the two cells sharing the face have
+        # the same extent in the other two axes), so the areas are broadcast views
+        # and cost no memory.
+        self.V = (self.dx[:, None, None] * self.dy[None, :, None]
+                  * self.dz[None, None, :])
+        self.Ax = np.broadcast_to(self.dy[None, :, None] * self.dz[None, None, :],
+                                  self.V.shape)
+        self.Ay = np.broadcast_to(self.dx[:, None, None] * self.dz[None, None, :],
+                                  self.V.shape)
+        self.Az = np.broadcast_to(self.dx[:, None, None] * self.dy[None, :, None],
+                                  self.V.shape)
+
         shape = (self.Nx, self.Ny, self.Nz)
-        
-        # ID materiale (default: aria)
         self.material_id = np.zeros(shape, dtype=np.int8)
-        
-        # Tipo boundary (default: interno)
         self.boundary_type = np.zeros(shape, dtype=np.int8)
-        self._set_boundary_nodes()
-        
-        # Proprietà termiche (default: aria)
-        self.k = np.ones(shape, dtype=np.float64) * 0.026      # Aria
-        self.rho = np.ones(shape, dtype=np.float64) * 1.2      # Aria
-        self.cp = np.ones(shape, dtype=np.float64) * 1005.0    # Aria
-        self.Q = np.zeros(shape, dtype=np.float64)              # Nessuna sorgente
-        
-        # Temperatura iniziale
-        self.T = np.ones(shape, dtype=np.float64) * 20.0       # Ambiente
-        
-        # Condizioni al contorno
-        self.bc_h = np.zeros(shape, dtype=np.float64)
-        self.bc_T_inf = np.ones(shape, dtype=np.float64) * 20.0
-        self.bc_q = np.zeros(shape, dtype=np.float64)
-    
-    def _set_boundary_nodes(self):
-        """Identifica automaticamente i nodi di bordo"""
-        # Facce del dominio
-        self.boundary_type[0, :, :] = BoundaryType.CONVECTION    # X = 0
-        self.boundary_type[-1, :, :] = BoundaryType.CONVECTION   # X = Lx
-        self.boundary_type[:, 0, :] = BoundaryType.CONVECTION    # Y = 0
-        self.boundary_type[:, -1, :] = BoundaryType.CONVECTION   # Y = Ly
-        self.boundary_type[:, :, 0] = BoundaryType.DIRICHLET     # Z = 0 (terreno)
-        self.boundary_type[:, :, -1] = BoundaryType.CONVECTION   # Z = Lz (aria)
-    
-    # =========================================================================
-    # METODI DI INDICIZZAZIONE
-    # =========================================================================
-    
-    def ijk_to_linear(self, i: int, j: int, k: int) -> int:
-        """Converte indici 3D in indice lineare"""
-        return i + j * self.Nx + k * self.Nx * self.Ny
-    
-    def linear_to_ijk(self, p: int) -> Tuple[int, int, int]:
-        """Converte indice lineare in indici 3D"""
-        k = p // (self.Nx * self.Ny)
-        remainder = p % (self.Nx * self.Ny)
-        j = remainder // self.Nx
-        i = remainder % self.Nx
-        return i, j, k
-    
-    def get_position(self, i: int, j: int, k: int) -> Tuple[float, float, float]:
-        """Restituisce le coordinate (x, y, z) del centro cella"""
-        return self.x[i], self.y[j], self.z[k]
-    
-    def find_cell(self, x: float, y: float, z: float) -> Tuple[int, int, int]:
-        """Trova la cella che contiene il punto (x, y, z)"""
-        i = int(x / self.dx)
-        j = int(y / self.dy)
-        k = int(z / self.dz)
-        
-        # Clamp agli indici validi
-        i = max(0, min(i, self.Nx - 1))
-        j = max(0, min(j, self.Ny - 1))
-        k = max(0, min(k, self.Nz - 1))
-        
-        return i, j, k
-    
-    # =========================================================================
-    # METODI DI ASSEGNAZIONE MATERIALI
-    # =========================================================================
-    
-    def set_material_region_box(self, 
-                                 material: MaterialID,
-                                 x_min: float, x_max: float,
-                                 y_min: float, y_max: float,
-                                 z_min: float, z_max: float,
-                                 props: NodeProperties):
-        """Assegna un materiale a una regione rettangolare"""
-        
-        i_min, j_min, k_min = self.find_cell(x_min, y_min, z_min)
-        i_max, j_max, k_max = self.find_cell(x_max, y_max, z_max)
-        
-        # Assicura che max >= min
-        i_max = max(i_min, i_max)
-        j_max = max(j_min, j_max)
-        k_max = max(k_min, k_max)
-        
-        # Slicing per l'assegnazione
-        self.material_id[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = material
-        self.k[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = props.k
-        self.rho[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = props.rho
-        self.cp[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = props.cp
-        self.Q[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = props.Q
-    
-    def set_material_cylinder(self,
-                               material: MaterialID,
-                               center_x: float, center_y: float,
-                               r_inner: float, r_outer: float,
-                               z_min: float, z_max: float,
-                               props: NodeProperties):
-        """Assegna un materiale a una regione cilindrica (anello)"""
-        
-        k_min_idx = int(z_min / self.dz)
-        k_max_idx = int(z_max / self.dz)
-        
-        # Itera su tutti i punti e verifica se sono nel cilindro
-        for i in range(self.Nx):
-            for j in range(self.Ny):
-                x_c, y_c = self.x[i], self.y[j]
-                r = np.sqrt((x_c - center_x)**2 + (y_c - center_y)**2)
-                
-                if r_inner <= r <= r_outer:
-                    for k in range(max(0, k_min_idx), min(self.Nz, k_max_idx + 1)):
-                        self.material_id[i, j, k] = material
-                        self.k[i, j, k] = props.k
-                        self.rho[i, j, k] = props.rho
-                        self.cp[i, j, k] = props.cp
-                        self.Q[i, j, k] = props.Q
-    
-    # =========================================================================
-    # METODI DI CONDIZIONI AL CONTORNO
-    # =========================================================================
-    
-    def set_convection_bc(self, face: str, h: float, T_inf: float):
-        """
-        Imposta condizione al contorno convettiva su una faccia.
-        
-        Args:
-            face: 'x_min', 'x_max', 'y_min', 'y_max', 'z_min', 'z_max'
-            h: Coefficiente convettivo [W/(m²·K)]
-            T_inf: Temperatura del fluido [°C]
-        """
-        if face == 'x_min':
-            self.bc_h[0, :, :] = h
-            self.bc_T_inf[0, :, :] = T_inf
-            self.boundary_type[0, :, :] = BoundaryType.CONVECTION
-        elif face == 'x_max':
-            self.bc_h[-1, :, :] = h
-            self.bc_T_inf[-1, :, :] = T_inf
-            self.boundary_type[-1, :, :] = BoundaryType.CONVECTION
-        elif face == 'y_min':
-            self.bc_h[:, 0, :] = h
-            self.bc_T_inf[:, 0, :] = T_inf
-            self.boundary_type[:, 0, :] = BoundaryType.CONVECTION
-        elif face == 'y_max':
-            self.bc_h[:, -1, :] = h
-            self.bc_T_inf[:, -1, :] = T_inf
-            self.boundary_type[:, -1, :] = BoundaryType.CONVECTION
-        elif face == 'z_min':
-            self.bc_h[:, :, 0] = h
-            self.bc_T_inf[:, :, 0] = T_inf
-            self.boundary_type[:, :, 0] = BoundaryType.CONVECTION
-        elif face == 'z_max':
-            self.bc_h[:, :, -1] = h
-            self.bc_T_inf[:, :, -1] = T_inf
-            self.boundary_type[:, :, -1] = BoundaryType.CONVECTION
-        else:
-            raise ValueError(f"Faccia non valida: {face}")
-    
-    def set_fixed_temperature_bc(self, face: str, T: float):
-        """
-        Imposta temperatura fissa (Dirichlet) su una faccia del dominio.
-        
-        Args:
-            face: 'x_min', 'x_max', 'y_min', 'y_max', 'z_min', 'z_max'
-            T: Temperatura fissa [°C]
-        """
-        if face == 'x_min':
-            self.T[0, :, :] = T
-            self.bc_T_inf[0, :, :] = T
-            self.boundary_type[0, :, :] = BoundaryType.DIRICHLET
-        elif face == 'x_max':
-            self.T[-1, :, :] = T
-            self.bc_T_inf[-1, :, :] = T
-            self.boundary_type[-1, :, :] = BoundaryType.DIRICHLET
-        elif face == 'y_min':
-            self.T[:, 0, :] = T
-            self.bc_T_inf[:, 0, :] = T
-            self.boundary_type[:, 0, :] = BoundaryType.DIRICHLET
-        elif face == 'y_max':
-            self.T[:, -1, :] = T
-            self.bc_T_inf[:, -1, :] = T
-            self.boundary_type[:, -1, :] = BoundaryType.DIRICHLET
-        elif face == 'z_min':
-            self.T[:, :, 0] = T
-            self.bc_T_inf[:, :, 0] = T
-            self.boundary_type[:, :, 0] = BoundaryType.DIRICHLET
-        elif face == 'z_max':
-            self.T[:, :, -1] = T
-            self.bc_T_inf[:, :, -1] = T
-            self.boundary_type[:, :, -1] = BoundaryType.DIRICHLET
-        else:
-            raise ValueError(f"Faccia non valida: {face}. Usare: x_min, x_max, y_min, y_max, z_min, z_max")
-    
-    # =========================================================================
-    # METODI UTILITY
-    # =========================================================================
-    
-    def get_info(self) -> Dict[str, Any]:
-        """Restituisce informazioni sulla mesh"""
+        self.k = np.full(shape, K_AIR)
+        self.rho = np.full(shape, RHO_AIR)
+        self.cp = np.full(shape, CP_AIR)
+        self.Q_source = np.zeros(shape)
+        self.Q_sink = np.zeros(shape)
+        self.source_mask = np.zeros(shape, dtype=bool)
+        self.T = np.full(shape, T_INITIAL_DEFAULT)
+        self.bc_h = np.zeros(shape)
+        self.bc_T_inf = np.full(shape, T_AMBIENT_DEFAULT)
+
+        # default domain BCs: insulated sides, ground at fixed temperature
+        self.face_bc = {f: FaceBC() for f in FACES}
+        self.face_bc["z_min"] = FaceBC(BoundaryType.DIRICHLET, value=T_GROUND_DEFAULT)
+
+    # ------------------------------------------------------------ grid build
+    def _build_uniform(self, d: float) -> None:
+        """Uniform grid: one cell size, box snapped to a whole number of cells."""
+        if d <= 0:
+            raise ValueError(f"spacing must be > 0, got {d}")
+        nx = max(MIN_CELLS_PER_AXIS, int(round(self.Lx / d)))
+        step = self.Lx / nx
+        self.Nx = nx
+        self.Ny = max(MIN_CELLS_PER_AXIS, int(round(self.Ly / step)))
+        self.Nz = max(MIN_CELLS_PER_AXIS, int(round(self.Lz / step)))
+        self.snapped = {"Ly": self.Ly - self.Ny * step, "Lz": self.Lz - self.Nz * step}
+        # edges from a constant step (not linspace): every cell of a uniform grid is
+        # then bit-identical, so the face coefficients are exactly symmetric
+        self._step = step
+        self.edges_x = np.arange(self.Nx + 1) * step
+        self.edges_y = np.arange(self.Ny + 1) * step
+        self.edges_z = np.arange(self.Nz + 1) * step
+        self.Lx = self.Nx * step
+        self.Ly = self.Ny * step
+        self.Lz = self.Nz * step
+        self.uniform = True
+        self.N_total = self.Nx * self.Ny * self.Nz
+
+    def _build_graded(self) -> None:
+        """Graded path: the spec decides the edges, the box is spanned exactly."""
+        self.edges_x, self.edges_y, self.edges_z = self.grid.edges(self.Lx, self.Ly,
+                                                                  self.Lz)
+        self.Nx, self.Ny, self.Nz = (e.size - 1 for e in
+                                     (self.edges_x, self.edges_y, self.edges_z))
+        # the graded walk always lands exactly on the box: nothing to snap
+        self.snapped = {"Ly": 0.0, "Lz": 0.0}
+        self.uniform = False
+        self.N_total = self.Nx * self.Ny * self.Nz
+
+    # ------------------------------------------------------------------ props
+    def _require_uniform(self, what: str) -> None:
+        if not self.uniform:
+            raise ValueError(
+                f"{what} does not exist on a graded mesh: use the per-axis arrays "
+                f"(dx/dy/dz, V, Ax/Ay/Az) or a local size (size_x/y/z, cell_size_at)")
+
+    @property
+    def d(self) -> float:
+        """Cell size of a *uniform* mesh [m]; raises on a graded one."""
+        self._require_uniform("a single cell size")
+        return float(self.dx[0])
+
+    @property
+    def V_cell(self) -> float:
+        """Cell volume of a *uniform* mesh [m^3]; raises on a graded one."""
+        self._require_uniform("a single cell volume")
+        return float(self.dx[0] * self.dy[0] * self.dz[0])
+
+    @property
+    def A_cell(self) -> float:
+        """Cell face area of a *uniform* mesh [m^2]; raises on a graded one."""
+        self._require_uniform("a single face area")
+        return float(self.dx[0] * self.dy[0])
+
+    @property
+    def h_char(self) -> np.ndarray:
+        """Characteristic cell size ``V^(1/3)`` [m], for lumped exchange models."""
+        return np.cbrt(self.V)
+
+    def axis_size(self, axis: int) -> np.ndarray:
+        """Cell size along ``axis`` (0=x, 1=y, 2=z) broadcast to every cell."""
+        sizes = (self.dx, self.dy, self.dz)[axis]
+        shape = [1, 1, 1]
+        shape[axis] = sizes.size
+        return np.broadcast_to(sizes.reshape(shape), self.T.shape)
+
+    def size_x(self, position: float) -> float:
+        """Cell size in x at the coordinate ``position`` [m]."""
+        return size_at(self.edges_x, position)
+
+    def size_y(self, position: float) -> float:
+        return size_at(self.edges_y, position)
+
+    def size_z(self, position: float) -> float:
+        return size_at(self.edges_z, position)
+
+    def cell_size_at(self, x: float, y: float, z: float) -> float:
+        """Characteristic size of the cell containing ``(x, y, z)`` [m]."""
+        if self.uniform:
+            return float(self.dx[0])
+        i, j, k = self.find_cell(x, y, z)
+        return float(self.V[i, j, k]) ** (1.0 / 3.0)
+
+    def size_label(self) -> str:
+        """Cell size as text: one value when uniform, a range when graded."""
+        summary = self.grid_summary()
+        if self.uniform:
+            return f"{summary['min_size']:.3f} m"
+        return (f"{summary['min_size']:.3f}-{summary['max_size']:.3f} m "
+                f"(ratio {summary['worst_ratio']:.2f})")
+
+    def grid_summary(self) -> dict:
+        """Sizes of the realised grid (GUI summary and log)."""
+        if self.uniform:
+            d = float(self.dx[0])
+            return {"cells_axis": (self.Nx, self.Ny, self.Nz), "cells": self.N_total,
+                    "min_size": d, "max_size": d, "worst_ratio": 1.0}
         return {
-            'dimensions': (self.Lx, self.Ly, self.Lz),
-            'cells': (self.Nx, self.Ny, self.Nz),
-            'spacing': (self.dx, self.dy, self.dz),
-            'total_nodes': self.N_total,
-            'memory_MB': self._estimate_memory() / 1e6
+            "cells_axis": (self.Nx, self.Ny, self.Nz), "cells": self.N_total,
+            "min_size": float(min(e.min() for e in (self.dx, self.dy, self.dz))),
+            "max_size": float(max(e.max() for e in (self.dx, self.dy, self.dz))),
+            "worst_ratio": max(worst_ratio(e) for e in
+                               (self.edges_x, self.edges_y, self.edges_z)),
         }
-    
-    def _estimate_memory(self) -> float:
-        """Stima la memoria utilizzata in bytes"""
-        n_fields = 10  # Numero di array 3D
-        bytes_per_float = 8
-        bytes_per_int = 1
-        
-        float_memory = n_fields * self.N_total * bytes_per_float
-        int_memory = 2 * self.N_total * bytes_per_int
-        
-        return float_memory + int_memory
-    
-    def get_temperature_slice(self, axis: str, position: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Estrae una sezione 2D del campo di temperatura.
-        
-        Args:
-            axis: 'x', 'y', o 'z'
-            position: Posizione della sezione [m]
-            
-        Returns:
-            coord1, coord2, T_slice: Coordinate e temperatura sulla sezione
-        """
-        if axis == 'x':
-            idx = int(position / self.dx)
-            idx = max(0, min(idx, self.Nx - 1))
-            return self.Y[idx, :, :], self.Z[idx, :, :], self.T[idx, :, :]
-        elif axis == 'y':
-            idx = int(position / self.dy)
-            idx = max(0, min(idx, self.Ny - 1))
-            return self.X[:, idx, :], self.Z[:, idx, :], self.T[:, idx, :]
-        elif axis == 'z':
-            idx = int(position / self.dz)
-            idx = max(0, min(idx, self.Nz - 1))
-            return self.X[:, :, idx], self.Y[:, :, idx], self.T[:, :, idx]
+
+    # ------------------------------------------------------- index arithmetic
+    def ijk_to_linear(self, i: int, j: int, k: int) -> int:
+        return i + j * self.Nx + k * self.Nx * self.Ny
+
+    def linear_to_ijk(self, p: int) -> tuple[int, int, int]:
+        k, rem = divmod(int(p), self.Nx * self.Ny)
+        j, i = divmod(rem, self.Nx)
+        return i, j, k
+
+    def find_cell(self, x: float, y: float, z: float) -> tuple[int, int, int]:
+        """Index of the cell containing (x, y, z); clamped to the domain."""
+        return (_find(self.edges_x, x), _find(self.edges_y, y), _find(self.edges_z, z))
+
+    # ------------------------------------------------- boundary conditions
+    def set_convection_bc(self, face: str, h: float, T_inf: float) -> None:
+        """Convection on a domain face; ``T_inf`` in KELVIN."""
+        self._check_face(face)
+        check_kelvin(T_inf, f"set_convection_bc({face}) T_inf")
+        self.face_bc[face] = FaceBC(BoundaryType.CONVECTION, h=float(h), value=float(T_inf))
+
+    def set_fixed_temperature_bc(self, face: str, T: float) -> None:
+        """Dirichlet temperature on a domain face; ``T`` in KELVIN."""
+        self._check_face(face)
+        check_kelvin(T, f"set_fixed_temperature_bc({face}) T")
+        self.face_bc[face] = FaceBC(BoundaryType.DIRICHLET, value=float(T))
+
+    def set_heat_flux_bc(self, face: str, q: float, T_inf: float | None = None) -> None:
+        """Imposed heat flux [W/m^2] entering the domain through ``face``."""
+        self._check_face(face)
+        self.face_bc[face] = FaceBC(BoundaryType.NEUMANN, h=1.0, value=float(q))
+        if T_inf is not None:
+            check_kelvin(T_inf, f"set_heat_flux_bc({face}) T_inf")
+
+    def set_adiabatic(self, face: str) -> None:
+        """Zero-flux (insulated) domain face."""
+        self._check_face(face)
+        self.face_bc[face] = FaceBC(BoundaryType.INTERNAL)
+
+    def set_internal_convection(self, mask: np.ndarray, h: float, T_fluid: float) -> None:
+        """Convection on interior cells (heat-exchanger tubes); ``T_fluid`` in KELVIN."""
+        check_kelvin(T_fluid, "set_internal_convection T_fluid")
+        m = np.asarray(mask, dtype=bool)
+        self.bc_h[m] = float(h)
+        self.bc_T_inf[m] = float(T_fluid)
+        if h > 0:
+            self.boundary_type[m] = BoundaryType.CONVECTION
         else:
-            raise ValueError(f"Asse non valido: {axis}")
-    
-    def flatten_field(self, field: np.ndarray) -> np.ndarray:
-        """Converte un campo 3D in vettore 1D (ordine column-major / Fortran)"""
-        return field.ravel(order='F')
-    
+            self.boundary_type[m] = BoundaryType.INTERNAL
+
+    @staticmethod
+    def _check_face(face: str) -> None:
+        if face not in FACES:
+            raise ValueError(f"invalid face {face!r}; expected one of {FACES}")
+
+    # ---------------------------------------------------------- conversions
     def unflatten_field(self, vector: np.ndarray) -> np.ndarray:
-        """Converte un vettore 1D in campo 3D"""
-        return vector.reshape((self.Nx, self.Ny, self.Nz), order='F')
+        return np.asarray(vector).reshape((self.Nx, self.Ny, self.Nz), order="F")
 
+    # ---------------------------------------------------------- validation
+    def validate(self, check_temperature: bool = True) -> None:
+        """Reject non-physical fields before an expensive solve."""
+        for name, arr in (("k", self.k), ("rho", self.rho), ("cp", self.cp)):
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{name}: non-finite values")
+            if arr.min() <= 0:
+                raise ValueError(f"{name}: values must be > 0, min = {arr.min():.3g}")
+        if not np.all(np.isfinite(self.Q_source)) or not np.all(np.isfinite(self.Q_sink)):
+            raise ValueError("Q fields: non-finite values")
+        if np.any(self.Q_source < 0):
+            raise ValueError("Q_source must be >= 0 (use Q_sink for extractions)")
+        if np.any(self.Q_sink > 0):
+            raise ValueError("Q_sink must be <= 0")
+        if check_temperature:
+            check_kelvin(self.T, "mesh.T")
+            for face, bc in self.face_bc.items():
+                if bc.kind in (BoundaryType.DIRICHLET, BoundaryType.CONVECTION):
+                    check_kelvin(bc.value, f"face_bc[{face}].value")
+        for face, bc in self.face_bc.items():
+            if bc.kind == BoundaryType.CONVECTION and bc.h < 0:
+                raise ValueError(f"face_bc[{face}].h must be >= 0")
 
-# =============================================================================
-# TEST
-# =============================================================================
-if __name__ == "__main__":
-    # Test creazione mesh
-    mesh = Mesh3D(Lx=10, Ly=10, Lz=8, Nx=50, Ny=50, Nz=40)
-    
-    print("=== Mesh3D Info ===")
-    info = mesh.get_info()
-    for key, value in info.items():
-        print(f"  {key}: {value}")
-    
-    # Test indicizzazione
-    print("\n=== Test Indicizzazione ===")
-    i, j, k = 10, 20, 15
-    p = mesh.ijk_to_linear(i, j, k)
-    i2, j2, k2 = mesh.linear_to_ijk(p)
-    print(f"  (i,j,k) = ({i},{j},{k}) -> p = {p} -> ({i2},{j2},{k2})")
-    assert (i, j, k) == (i2, j2, k2), "Errore indicizzazione!"
-    
-    # Test posizione
-    x, y, z = mesh.get_position(25, 25, 20)
-    print(f"  Centro cella (25,25,20): ({x:.2f}, {y:.2f}, {z:.2f}) m")
-    
-    print("\n=== Test Completato ===")
+    # ------------------------------------------------------------------ info
+    def get_info(self) -> dict[str, object]:
+        summary = self.grid_summary()
+        return {
+            "dimensions": (self.Lx, self.Ly, self.Lz),
+            "cells": (self.Nx, self.Ny, self.Nz),
+            "uniform": self.uniform,
+            "cell_size_min": summary["min_size"],
+            "cell_size_max": summary["max_size"],
+            "worst_ratio": summary["worst_ratio"],
+            "total_nodes": self.N_total,
+            "memory_MB": self._estimate_memory() / 1e6,
+            "snap_correction_m": dict(self.snapped),
+            "face_bc": {f: bc.kind.name for f, bc in self.face_bc.items()},
+        }
+
+    def _estimate_memory(self) -> float:
+        n_float64 = 12  # k, rho, cp, Q_source, Q_sink, T, bc_h, bc_T_inf, X, Y, Z, V
+        n_small = 2     # material_id, boundary_type
+        return self.N_total * (n_float64 * 8 + n_small * 1)

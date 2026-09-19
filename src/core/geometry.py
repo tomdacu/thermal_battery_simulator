@@ -1,1204 +1,778 @@
-"""
-geometry.py - Definizione della geometria della Thermal Battery
+"""Geometry model: configuration dataclasses + voxel painting of a :class:`Mesh3D`.
 
-Gestisce:
-- Geometria cilindrica con zone radiali
-- Posizionamento resistenze e tubi
-- Assegnazione materiali alla mesh
+Layout painted by :meth:`BatteryGeometry.apply_to_mesh` (later steps win, but the
+overlaps that used to corrupt the model are now resolved explicitly):
+
+    1  air everywhere
+    2  concrete foundation under the battery footprint
+    3  steel lateral shell            (base_z .. cone base, outside the insulation)
+    4  radial insulation              (r_storage .. r_insulation, same band)
+    5  bottom insulation slab
+    6  storage sand (packed bed)      + volumetric source when the pattern is uniform
+    7  top insulation slab
+    8  optional steel plate under the cone
+    9  optional conical roof (steel shell, optionally sand-filled)
+   10  discrete heater elements       -> material HEATERS, marked in ``source_mask``
+   11  heat-exchanger tubes           -> material TUBES inside the storage band only
+   12  domain boundary conditions
+
+Units: metres, seconds, watts, KELVIN.  ``apply_to_mesh`` validates the geometry
+against the mesh and raises ``ValueError`` instead of silently clipping the roof
+or the shell.
 """
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Tuple, List, Optional
-from .mesh import Mesh3D, MaterialID, NodeProperties, BoundaryType
+
+from ..constants import PACKING_FRACTION_DEFAULT, T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
+from .heaters import (DEFAULT_SHEATH_DIAMETER, DEFAULT_SHEATH_MATERIAL,
+                       HeaterBank, rasterize, validate_bank)
 from .materials import MaterialManager, ThermalProperties
+from .mesh import MaterialID, Mesh3D
+
+
+class HeaterPattern:
+    UNIFORM_ZONE = "uniform_zone"
+    GRID_VERTICAL = "grid_vertical"
+    CHESS_PATTERN = "chess_pattern"
+    RADIAL_ARRAY = "radial_array"
+    SPIRAL = "spiral"
+    CONCENTRIC_RINGS = "concentric_rings"
+
+    ALL = (UNIFORM_ZONE, GRID_VERTICAL, CHESS_PATTERN, RADIAL_ARRAY,
+           SPIRAL, CONCENTRIC_RINGS)
+
+
+class TubePattern:
+    CENTRAL_CLUSTER = "central_cluster"
+    RADIAL_ARRAY = "radial_array"
+    GRID = "grid"
+    HEXAGONAL = "hexagonal"
+    SINGLE_CENTRAL = "single_central"
+    CUSTOM = "custom"
+
+    ALL = (CENTRAL_CLUSTER, RADIAL_ARRAY, GRID, HEXAGONAL, SINGLE_CENTRAL, CUSTOM)
+
+
+@dataclass
+@dataclass
+class TubeElement:
+    """One heat-exchanger tube."""
+
+    x: float
+    y: float
+    z_bottom: float
+    z_top: float
+    radius: float = 0.025
+    h_fluid: float = 500.0
+    t_fluid: float = 333.15     # [K]
 
 
 @dataclass
 class CylinderGeometry:
-    """
-    Geometria del cilindro della batteria termica.
-    
-    STRUTTURA COMPLETA CON ISOLAMENTO E TETTO:
-    
-    Dal basso verso l'alto:
-    - FONDAZIONE (calcestruzzo, sotto base_z)
-    - SLAB ISOLANTE INFERIORE (sotto lo storage)
-    - STORAGE (materiale di accumulo + tubi + resistenze)
-    - SLAB ISOLANTE SUPERIORE (sopra lo storage)
-    - SLAB ACCIAIO (opzionale, sotto il tetto)
-    - RIEMPIMENTO SABBIA CONO (opzionale)
-    - TETTO CONICO (acciaio, inclinato)
-    
-    Radialmente (dal centro verso l'esterno):
-    1. STORAGE + SLAB ISOLANTI (r < r_storage)
-    2. INSULATION radiale (r_storage < r < r_insulation)
-    3. STEEL shell (r_insulation < r < r_shell)
-    4. AIR (r > r_shell)
-    
-    L'acciaio laterale (shell) copre tutta l'altezza:
-    da slab_inf a tetto (inclusi gli slab di isolamento).
-    """
-    
-    # Centro del cilindro
+    """Dimensions of the battery, all elevations measured from the domain floor."""
+
     center_x: float = 5.0
     center_y: float = 5.0
-    
-    # Dimensioni verticali dello STORAGE
-    base_z: float = 0.5      # Quota base della struttura (sopra fondazione)
-    height: float = 7.0      # Altezza della zona STORAGE (sabbia)
-    
-    # Raggi delle zone (dall'interno verso l'esterno)
-    r_storage: float = 2.0        # Raggio zona storage
-    insulation_thickness: float = 0.3   # Spessore isolamento radiale [m]
-    shell_thickness: float = 0.02       # Spessore guscio acciaio [m]
-    
-    # === NUOVI PARAMETRI: SLAB ISOLANTI ===
-    insulation_slab_bottom: float = 0.2   # Altezza slab isolante inferiore [m]
-    insulation_slab_top: float = 0.2      # Altezza slab isolante superiore [m]
-    
-    # === NUOVI PARAMETRI: TETTO ===
-    roof_angle_deg: float = 15.0          # Inclinazione tetto [gradi] (0 = piatto)
-    steel_slab_top: float = 0.0           # Spessore slab acciaio sotto tetto [m] (0 = disabilitato)
-    fill_cone_with_sand: bool = False     # Riempie il volume sotto il cono con sabbia
-    enable_cone_roof: bool = True         # Abilita tetto conico (False = tetto piatto con steel_slab)
-    
-    # Sfasamento angolare tra tubi e resistenze [gradi]
+    base_z: float = 0.5
+    height: float = 7.0
+    r_storage: float = 2.0
+    insulation_thickness: float = 0.3
+    shell_thickness: float = 0.02
+    insulation_slab_bottom: float = 0.2
+    insulation_slab_top: float = 0.2
+    roof_angle_deg: float = 15.0
+    steel_slab_top: float = 0.0
+    fill_cone_with_sand: bool = False
+    enable_cone_roof: bool = True
     phase_offset_deg: float = 15.0
-    
-    # === PROPRIETÀ CALCOLATE ===
-    
+    foundation_margin: float = 0.5
+
     @property
     def r_insulation(self) -> float:
-        """Raggio esterno dell'isolamento"""
         return self.r_storage + self.insulation_thickness
-    
+
     @property
     def r_shell(self) -> float:
-        """Raggio esterno del guscio (raggio totale batteria)"""
         return self.r_insulation + self.shell_thickness
-    
+
     @property
     def roof_angle_rad(self) -> float:
-        """Inclinazione tetto in radianti"""
-        return np.radians(self.roof_angle_deg)
-    
+        return float(np.radians(self.roof_angle_deg))
+
     @property
     def roof_height(self) -> float:
-        """Altezza del cono del tetto al centro"""
         if not self.enable_cone_roof or self.roof_angle_deg <= 0:
             return 0.0
-        return self.r_shell * np.tan(self.roof_angle_rad)
-    
-    @property
-    def z_tubes_top(self) -> float:
-        """Quota superiore dei tubi (sopra steel_slab o slab_top)"""
-        return self.z_steel_slab_end
-    
-    # === QUOTE Z (dal basso verso l'alto) ===
-    
-    @property
-    def z_slab_bottom_start(self) -> float:
-        """Inizio slab isolante inferiore"""
-        return self.base_z
-    
-    @property
-    def z_slab_bottom_end(self) -> float:
-        """Fine slab isolante inferiore = inizio storage"""
-        return self.base_z + self.insulation_slab_bottom
-    
-    @property
-    def z_storage_start(self) -> float:
-        """Inizio zona storage"""
-        return self.z_slab_bottom_end
-    
-    @property
-    def z_storage_end(self) -> float:
-        """Fine zona storage"""
-        return self.z_storage_start + self.height
-    
-    @property
-    def z_slab_top_start(self) -> float:
-        """Inizio slab isolante superiore"""
-        return self.z_storage_end
-    
-    @property
-    def z_slab_top_end(self) -> float:
-        """Fine slab isolante superiore"""
-        return self.z_slab_top_start + self.insulation_slab_top
-    
-    @property
-    def z_steel_slab_end(self) -> float:
-        """Fine slab acciaio (se presente)"""
-        return self.z_slab_top_end + self.steel_slab_top
-    
-    @property
-    def z_cone_base(self) -> float:
-        """Base del cono (tetto)"""
-        return self.z_steel_slab_end
-    
-    @property
-    def z_cone_apex(self) -> float:
-        """Apice del cono (punto più alto)"""
-        return self.z_cone_base + self.roof_height
-    
-    @property
-    def z_shell_top(self) -> float:
-        """Quota superiore del guscio laterale (base del cono)"""
-        return self.z_cone_base
-    
-    @property
-    def total_height(self) -> float:
-        """Altezza totale della struttura (escluso terreno)"""
-        return self.z_cone_apex - self.base_z
-    
-    # Proprietà legacy per compatibilità
-    @property
-    def top_z(self) -> float:
-        """Quota superiore della zona storage (compatibilità)"""
-        return self.z_storage_end
-    
+        return self.r_shell * float(np.tan(self.roof_angle_rad))
+
     @property
     def phase_offset_rad(self) -> float:
-        """Sfasamento angolare in radianti"""
-        return np.radians(self.phase_offset_deg)
-    
-    def get_zone_at_radius(self, r: float) -> str:
-        """Restituisce il nome della zona per un dato raggio"""
-        if r < self.r_storage:
-            return "storage"
-        elif r < self.r_insulation:
-            return "insulation"
-        elif r < self.r_shell:
-            return "shell"
-        else:
-            return "exterior"
-    
-    def is_inside_cone(self, r: float, z: float) -> bool:
-        """Verifica se un punto (r, z) è dentro il cono del tetto"""
-        if z < self.z_cone_base or z > self.z_cone_apex:
-            return False
+        return float(np.radians(self.phase_offset_deg))
+
+    @property
+    def z_slab_bottom_start(self) -> float:
+        return self.base_z
+
+    @property
+    def z_storage_start(self) -> float:
+        return self.base_z + self.insulation_slab_bottom
+
+    @property
+    def z_storage_end(self) -> float:
+        return self.z_storage_start + self.height
+
+    @property
+    def z_slab_top_start(self) -> float:
+        return self.z_storage_end
+
+    @property
+    def z_slab_top_end(self) -> float:
+        return self.z_slab_top_start + self.insulation_slab_top
+
+    @property
+    def z_steel_slab_end(self) -> float:
+        return self.z_slab_top_end + max(self.steel_slab_top, 0.0)
+
+    @property
+    def z_cone_base(self) -> float:
+        return self.z_steel_slab_end
+
+    @property
+    def z_shell_top(self) -> float:
+        return self.z_cone_base
+
+    @property
+    def z_cone_apex(self) -> float:
+        return self.z_cone_base + self.roof_height
+
+    @property
+    def total_height(self) -> float:
+        return self.z_cone_apex - self.base_z
+
+    def cone_radius(self, z: float) -> float:
+        """Radius of the conical roof at elevation ``z``."""
         if self.roof_height <= 0:
-            return False
-        # Raggio del cono a quota z
-        z_rel = z - self.z_cone_base
-        r_cone_at_z = self.r_shell * (1 - z_rel / self.roof_height)
-        return r < r_cone_at_z
+            return 0.0
+        rel = float(np.clip(z - self.z_cone_base, 0.0, self.roof_height))
+        return self.r_shell * (1.0 - rel / self.roof_height)
 
-
-class HeaterPattern:
-    """Pattern di distribuzione delle resistenze"""
-    UNIFORM_ZONE = "uniform_zone"           # Zona anulare uniforme (attuale)
-    GRID_VERTICAL = "grid_vertical"         # Griglia regolare verticale
-    CHESS_PATTERN = "chess_pattern"         # Pattern a scacchiera
-    RADIAL_ARRAY = "radial_array"           # Array radiale (come in foto)
-    SPIRAL = "spiral"                       # Pattern a spirale
-    CONCENTRIC_RINGS = "concentric_rings"   # Anelli concentrici
-    CUSTOM = "custom"                       # Posizioni personalizzate
-
-
-class TubePattern:
-    """Pattern di distribuzione dei tubi"""
-    CENTRAL_CLUSTER = "central_cluster"     # Cluster centrale
-    RADIAL_ARRAY = "radial_array"           # Array radiale
-    GRID = "grid"                           # Griglia
-    HEXAGONAL = "hexagonal"                 # Pattern esagonale
-    SINGLE_CENTRAL = "single_central"       # Singolo tubo centrale
-    CUSTOM = "custom"                       # Posizioni personalizzate
-
-
-@dataclass
-class HeaterElement:
-    """Singolo elemento riscaldante"""
-    x: float                    # Posizione X del centro [m]
-    y: float                    # Posizione Y del centro [m]
-    z_bottom: float             # Quota inferiore [m]
-    z_top: float                # Quota superiore [m]
-    radius: float = 0.02       # Raggio resistenza [m]
-    power: float = 0.0          # Potenza [kW]
-
-
-@dataclass
-class TubeElement:
-    """Singolo tubo scambiatore"""
-    x: float                    # Posizione X del centro [m]
-    y: float                    # Posizione Y del centro [m]
-    z_bottom: float             # Quota inferiore [m]
-    z_top: float                # Quota superiore [m]
-    radius: float = 0.025       # Raggio tubo [m]
-    h_fluid: float = 500.0      # Coefficiente convettivo [W/(m²·K)]
-    T_fluid: float = 60.0       # Temperatura fluido [°C]
+    def validate(self) -> list[str]:
+        problems = []
+        if self.r_storage <= 0:
+            problems.append("r_storage must be > 0")
+        if self.height <= 0:
+            problems.append("height must be > 0")
+        if self.insulation_thickness <= 0:
+            problems.append("insulation_thickness must be > 0")
+        if self.shell_thickness < 0:
+            problems.append("shell_thickness must be >= 0")
+        if min(self.insulation_slab_bottom, self.insulation_slab_top) < 0:
+            problems.append("insulation slab thicknesses must be >= 0")
+        if self.base_z < 0:
+            problems.append("base_z must be >= 0")
+        return problems
 
 
 @dataclass
 class HeaterConfig:
+    """Heater layout: a uniform volumetric zone or discrete hairpin elements.
+
+    The discrete elements are *flanged immersion heaters*: U-shaped (hairpin)
+    sheathed tubes of ``sheath_diameter`` with two legs ``leg_spacing`` apart,
+    rated by ``power_element`` (from the total power and the element count) and
+    checked against the 3-8 W/cm^2 surface power of sheathed elements.
     """
-    Configurazione delle resistenze elettriche.
-    
-    Supporta diversi pattern di distribuzione:
-    - uniform_zone: Zona anulare con sorgente uniforme
-    - grid_vertical: Resistenze verticali in griglia regolare
-    - chess_pattern: Pattern a scacchiera
-    - radial_array: Array radiale (come elementi tubolari in foto)
-    - spiral: Pattern a spirale
-    - concentric_rings: Anelli concentrici
-    - custom: Posizioni definite manualmente
-    
-    Le resistenze stanno SOLO nella zona STORAGE.
-    Gli offset permettono di farle partire/finire prima dei bordi dello storage.
-    """
-    power_total: float = 100.0              # kW - Potenza totale
-    n_heaters: int = 12                     # Numero di resistenze
-    pattern: str = HeaterPattern.UNIFORM_ZONE  # Pattern di distribuzione
-    
-    # Parametri geometrici
-    heater_radius: float = 0.02             # Raggio singola resistenza [m]
-    heater_length: float = None             # Lunghezza (None = altezza batteria)
-    
-    # === OFFSET VERTICALI (rispetto ai bordi dello storage) ===
-    offset_bottom: float = 0.0              # Distanza dalla fine dello slab inferiore [m]
-    offset_top: float = 0.0                 # Distanza prima dell'inizio dello slab superiore [m]
-    
-    # Per pattern radiale/grid
-    n_rings: int = 2                        # Numero di anelli (per radial)
-    n_per_ring: List[int] = None            # Resistenze per anello [ring1, ring2, ...]
-    ring_radii: List[float] = None          # Raggi degli anelli [m]
-    
-    # Per grid pattern
-    grid_rows: int = 4                      # Righe della griglia
-    grid_cols: int = 4                      # Colonne della griglia
-    grid_spacing: float = 0.3               # Spaziatura griglia [m]
-    
-    # Per custom pattern
-    custom_positions: List[Tuple[float, float]] = None  # Lista (x, y)
-    
-    # Elementi calcolati
-    elements: List[HeaterElement] = field(default_factory=list)
-    
-    def __post_init__(self):
-        if self.n_per_ring is None:
-            self.n_per_ring = []
-        if self.ring_radii is None:
-            self.ring_radii = []
-        if self.custom_positions is None:
-            self.custom_positions = []
-    
+
+    power_total: float = 100.0                 # [kW]
+    n_heaters: int = 12
+    pattern: str = HeaterPattern.UNIFORM_ZONE
+    offset_bottom: float = 0.0
+    offset_top: float = 0.0
+    n_rings: int = 2
+    n_per_ring: list[int] | None = None
+    ring_radii: list[float] | None = None
+    grid_rows: int = 4
+    grid_cols: int = 4
+    # hairpin design (see src/core/heaters.py)
+    sheath_diameter: float = DEFAULT_SHEATH_DIAMETER
+    sheath_material: str = DEFAULT_SHEATH_MATERIAL
+    leg_spacing: float = 0.08
+    active_length: float | None = None         # None = fill the storage band
+    cold_shank: float = 0.15
+    flange_offset: float = 0.03
+    support_plate_offset: float = 0.05
+    bend_chords: int = 4
+
     @property
-    def power_per_heater(self) -> float:
-        """Potenza per resistenza [kW]"""
-        return self.power_total / max(self.n_heaters, 1)
-    
-    def generate_positions(self, center_x: float, center_y: float,
-                           r_inner: float, r_outer: float,
-                           z_bottom: float, z_top: float,
-                           phase_offset: float = 0.0) -> List[HeaterElement]:
-        """
-        Genera le posizioni delle resistenze secondo il pattern selezionato.
-        
-        Args:
-            center_x, center_y: Centro della batteria
-            r_inner, r_outer: Raggi interno ed esterno della zona dove posizionare
-            z_bottom, z_top: Altezza della zona resistenze
-            phase_offset: Sfasamento angolare in radianti (per evitare sovrapposizioni con tubi)
-            
-        Returns:
-            Lista di HeaterElement con posizioni calcolate
-        """
-        self.elements = []
-        power_each = self.power_per_heater
-        length = self.heater_length if self.heater_length else (z_top - z_bottom)
-        
-        if self.pattern == HeaterPattern.UNIFORM_ZONE:
-            # Nessun elemento discreto, zona uniforme
-            return []
-        
-        elif self.pattern == HeaterPattern.GRID_VERTICAL:
-            # Griglia regolare centrata
-            positions = self._generate_grid_positions(
-                center_x, center_y, r_inner, r_outer
-            )
-            
-        elif self.pattern == HeaterPattern.CHESS_PATTERN:
-            # Pattern a scacchiera
-            positions = self._generate_chess_positions(
-                center_x, center_y, r_inner, r_outer
-            )
-            
-        elif self.pattern == HeaterPattern.RADIAL_ARRAY:
-            # Array radiale come in foto
-            positions = self._generate_radial_positions(
-                center_x, center_y, r_inner, r_outer, phase_offset
-            )
-            
-        elif self.pattern == HeaterPattern.SPIRAL:
-            # Spirale
-            positions = self._generate_spiral_positions(
-                center_x, center_y, r_inner, r_outer
-            )
-            
-        elif self.pattern == HeaterPattern.CONCENTRIC_RINGS:
-            # Anelli concentrici
-            positions = self._generate_ring_positions(
-                center_x, center_y, r_inner, r_outer
-            )
-            
-        elif self.pattern == HeaterPattern.CUSTOM:
-            # Posizioni personalizzate
-            positions = [(x, y) for x, y in self.custom_positions]
-            
-        else:
-            positions = []
-        
-        # Crea elementi
-        for x, y in positions:
-            self.elements.append(HeaterElement(
-                x=x, y=y,
-                z_bottom=z_bottom, z_top=z_bottom + length,
-                radius=self.heater_radius,
-                power=power_each
-            ))
-        
-        # Aggiorna il numero effettivo di resistenze
-        self.n_heaters = len(self.elements) if self.elements else self.n_heaters
-        
-        return self.elements
-    
-    def _generate_grid_positions(self, cx: float, cy: float, 
-                                  r_in: float, r_out: float) -> List[Tuple[float, float]]:
-        """Genera posizioni a griglia regolare"""
-        positions = []
-        half_width = (self.grid_cols - 1) * self.grid_spacing / 2
-        half_height = (self.grid_rows - 1) * self.grid_spacing / 2
-        
-        for row in range(self.grid_rows):
-            for col in range(self.grid_cols):
-                x = cx - half_width + col * self.grid_spacing
-                y = cy - half_height + row * self.grid_spacing
-                
-                # Verifica che sia nella zona resistenze
-                r = np.sqrt((x - cx)**2 + (y - cy)**2)
-                if r_in <= r <= r_out:
-                    positions.append((x, y))
-        
-        return positions
-    
-    def _generate_chess_positions(self, cx: float, cy: float,
-                                   r_in: float, r_out: float) -> List[Tuple[float, float]]:
-        """Genera posizioni a scacchiera"""
-        positions = []
-        half_width = (self.grid_cols - 1) * self.grid_spacing / 2
-        half_height = (self.grid_rows - 1) * self.grid_spacing / 2
-        
-        for row in range(self.grid_rows):
-            for col in range(self.grid_cols):
-                # Solo celle "bianche" della scacchiera
-                if (row + col) % 2 == 0:
-                    x = cx - half_width + col * self.grid_spacing
-                    y = cy - half_height + row * self.grid_spacing
-                    
-                    r = np.sqrt((x - cx)**2 + (y - cy)**2)
-                    if r_in <= r <= r_out:
-                        positions.append((x, y))
-        
-        return positions
-    
-    def _generate_radial_positions(self, cx: float, cy: float,
-                                    r_in: float, r_out: float,
-                                    phase_offset: float = 0.0) -> List[Tuple[float, float]]:
-        """
-        Genera posizioni in array radiale (come elementi tubolari in foto).
-        Le resistenze sono disposte su anelli concentrici.
-        
-        Args:
-            cx, cy: Centro
-            r_in, r_out: Raggi interno ed esterno
-            phase_offset: Sfasamento angolare in radianti
-        """
-        positions = []
-        
-        if self.ring_radii and self.n_per_ring:
-            # Usa configurazione esplicita
-            radii = self.ring_radii
-            counts = self.n_per_ring
-        else:
-            # Calcola automaticamente
-            n_rings = max(1, self.n_rings)
-            radii = np.linspace(r_in + 0.1, r_out - 0.1, n_rings).tolist()
-            
-            # Distribuisci le resistenze proporzionalmente al raggio
-            total_circumference = sum(2 * np.pi * r for r in radii)
-            counts = []
-            remaining = self.n_heaters
-            for i, r in enumerate(radii):
-                if i == len(radii) - 1:
-                    counts.append(remaining)
-                else:
-                    n = int(self.n_heaters * (2 * np.pi * r) / total_circumference)
-                    counts.append(max(1, n))
-                    remaining -= counts[-1]
-        
-        # Genera posizioni per ogni anello con sfasamento
-        for radius, n_elements in zip(radii, counts):
-            if n_elements > 0:
-                for i in range(n_elements):
-                    angle = 2 * np.pi * i / n_elements + phase_offset
-                    x = cx + radius * np.cos(angle)
-                    y = cy + radius * np.sin(angle)
-                    positions.append((x, y))
-        
-        return positions
-    
-    def _generate_spiral_positions(self, cx: float, cy: float,
-                                    r_in: float, r_out: float) -> List[Tuple[float, float]]:
-        """Genera posizioni a spirale"""
-        positions = []
-        n = self.n_heaters
-        
-        for i in range(n):
-            t = i / max(n - 1, 1)  # 0 to 1
-            r = r_in + t * (r_out - r_in)
-            angle = t * 4 * np.pi  # 2 giri completi
-            
-            x = cx + r * np.cos(angle)
-            y = cy + r * np.sin(angle)
-            positions.append((x, y))
-        
-        return positions
-    
-    def _generate_ring_positions(self, cx: float, cy: float,
-                                  r_in: float, r_out: float) -> List[Tuple[float, float]]:
-        """Genera posizioni su anelli concentrici uniformi"""
-        positions = []
-        n_rings = max(1, self.n_rings)
-        radii = np.linspace(r_in + 0.05, r_out - 0.05, n_rings)
-        
-        heaters_per_ring = max(1, self.n_heaters // n_rings)
-        
-        for ring_idx, r in enumerate(radii):
-            n_on_ring = heaters_per_ring
-            # Offset angolare alternato per anelli
-            offset = (np.pi / n_on_ring) if ring_idx % 2 == 1 else 0
-            
-            for i in range(n_on_ring):
-                angle = offset + 2 * np.pi * i / n_on_ring
-                x = cx + r * np.cos(angle)
-                y = cy + r * np.sin(angle)
-                positions.append((x, y))
-        
-        return positions
+    def power_w(self) -> float:
+        return self.power_total * 1000.0
+
+    def bank(self, z_storage_start: float, z_storage_end: float) -> HeaterBank:
+        """The hairpin bank equivalent of this configuration."""
+        length = (self.active_length if self.active_length else
+                  max(z_storage_end - z_storage_start - self.offset_bottom
+                      - self.offset_top, 0.0))
+        rows, cols = self._layout_counts()
+        return HeaterBank(
+            active=True,
+            sheath_diameter=self.sheath_diameter,
+            sheath_material=self.sheath_material,
+            active_length=length,
+            cold_shank=self.cold_shank,
+            leg_spacing=self.leg_spacing,
+            rows=rows,
+            columns=cols,
+            power_per_element=self.power_w / max(rows * cols, 1),
+            offset_bottom=self.offset_bottom,
+            offset_top=self.offset_top,
+            support_plate_offset=self.support_plate_offset,
+            flange_offset=self.flange_offset,
+            layout="ring" if self.pattern in (HeaterPattern.RADIAL_ARRAY,
+                                              HeaterPattern.CONCENTRIC_RINGS)
+            else "grid",
+            n_rings=max(self.n_rings, 1),
+            bend_chords=self.bend_chords,
+        )
+
+    def _layout_counts(self) -> tuple[int, int]:
+        """(rows, columns) of the bank for the configured pattern."""
+        if self.pattern == HeaterPattern.CHESS_PATTERN:
+            return max(self.grid_rows, 1), max(self.grid_cols, 1)
+        if self.pattern in (HeaterPattern.GRID_VERTICAL,):
+            return max(self.grid_rows, 1), max(self.grid_cols, 1)
+        # rings and spiral: keep the element count, arranged on rings
+        n = max(self.n_heaters, 1)
+        per_ring = max(int(np.ceil(np.sqrt(n))), 1)
+        return max(int(np.ceil(n / per_ring)), 1), per_ring
+
+    @staticmethod
+    def _ring_points(cx, cy, radius, count, offset) -> list[tuple[float, float]]:
+        return [(cx + radius * np.cos(offset + 2 * np.pi * i / count),
+                 cy + radius * np.sin(offset + 2 * np.pi * i / count))
+                for i in range(max(count, 1))]
 
 
 @dataclass
 class TubeConfig:
-    """
-    Configurazione dei tubi scambiatori.
-    
-    Supporta diversi pattern di distribuzione:
-    - central_cluster: Cluster di tubi al centro
-    - radial_array: Array radiale
-    - grid: Griglia regolare
-    - hexagonal: Pattern esagonale (alta densità)
-    - single_central: Singolo tubo centrale
-    - custom: Posizioni definite manualmente
-    """
-    n_tubes: int = 8                        # Numero di tubi
-    diameter: float = 0.05                  # Diametro tubo [m]
-    h_fluid: float = 500.0                  # Coefficiente convettivo [W/(m²·K)]
-    T_fluid: float = 60.0                   # Temperatura fluido [°C]
-    active: bool = False                    # True durante scarica
-    pattern: str = TubePattern.RADIAL_ARRAY # Pattern di distribuzione
-    
-    # Parametri geometrici
-    tube_length: float = None               # Lunghezza (None = altezza batteria)
-    
-    # Per pattern radiale
-    n_rings: int = 2                        # Numero di anelli
-    n_per_ring: List[int] = None            # Tubi per anello
-    ring_radii: List[float] = None          # Raggi degli anelli [m]
-    
-    # Per grid pattern
+    """Heat-exchanger tube layout."""
+
+    n_tubes: int = 8
+    diameter: float = 0.05
+    h_fluid: float = 500.0
+    t_fluid: float = 333.15     # [K]
+    active: bool = False
+    pattern: str = TubePattern.RADIAL_ARRAY
+    tube_length: float | None = None
+    n_rings: int = 2
+    n_per_ring: list[int] | None = None
+    ring_radii: list[float] | None = None
     grid_rows: int = 3
     grid_cols: int = 3
-    grid_spacing: float = 0.2               # Spaziatura griglia [m]
-    
-    # Per custom pattern
-    custom_positions: List[Tuple[float, float]] = None
-    
-    # Elementi calcolati
-    elements: List[TubeElement] = field(default_factory=list)
-    
-    def __post_init__(self):
-        if self.n_per_ring is None:
-            self.n_per_ring = []
-        if self.ring_radii is None:
-            self.ring_radii = []
-        if self.custom_positions is None:
-            self.custom_positions = []
-    
+    grid_spacing: float = 0.2
+    custom_positions: list[tuple[float, float]] | None = None
+
     @property
     def radius(self) -> float:
-        """Raggio del tubo [m]"""
-        return self.diameter / 2
-    
-    def generate_positions(self, center_x: float, center_y: float,
-                           r_max: float,
-                           z_bottom: float, z_top: float) -> List[TubeElement]:
-        """
-        Genera le posizioni dei tubi secondo il pattern selezionato.
-        
-        Args:
-            center_x, center_y: Centro della batteria
-            r_max: Raggio massimo della zona tubi
-            z_bottom, z_top: Altezza della zona tubi
-            
-        Returns:
-            Lista di TubeElement con posizioni calcolate
-        """
-        self.elements = []
-        length = self.tube_length if self.tube_length else (z_top - z_bottom)
-        
-        if self.pattern == TubePattern.SINGLE_CENTRAL:
-            positions = [(center_x, center_y)]
-            
-        elif self.pattern == TubePattern.CENTRAL_CLUSTER:
-            positions = self._generate_cluster_positions(center_x, center_y, r_max)
-            
-        elif self.pattern == TubePattern.RADIAL_ARRAY:
-            positions = self._generate_radial_positions(center_x, center_y, r_max)
-            
-        elif self.pattern == TubePattern.GRID:
-            positions = self._generate_grid_positions(center_x, center_y, r_max)
-            
-        elif self.pattern == TubePattern.HEXAGONAL:
-            positions = self._generate_hexagonal_positions(center_x, center_y, r_max)
-            
-        elif self.pattern == TubePattern.CUSTOM:
-            positions = [(x, y) for x, y in self.custom_positions]
-            
-        else:
-            positions = [(center_x, center_y)]
-        
-        # Crea elementi
-        for x, y in positions:
-            self.elements.append(TubeElement(
-                x=x, y=y,
-                z_bottom=z_bottom, z_top=z_bottom + length,
-                radius=self.radius,
-                h_fluid=self.h_fluid,
-                T_fluid=self.T_fluid
-            ))
-        
-        self.n_tubes = len(self.elements)
-        return self.elements
-    
-    def _generate_cluster_positions(self, cx: float, cy: float,
-                                     r_max: float) -> List[Tuple[float, float]]:
-        """Genera cluster di tubi al centro"""
-        positions = [(cx, cy)]  # Tubo centrale
-        
-        if self.n_tubes > 1:
-            # Aggiungi tubi attorno al centro
-            n_around = min(6, self.n_tubes - 1)
-            r_ring = min(r_max * 0.6, self.grid_spacing * 2)
-            
-            for i in range(n_around):
-                angle = 2 * np.pi * i / n_around
-                x = cx + r_ring * np.cos(angle)
-                y = cy + r_ring * np.sin(angle)
-                positions.append((x, y))
-        
-        return positions[:self.n_tubes]
-    
-    def _generate_radial_positions(self, cx: float, cy: float,
-                                    r_max: float) -> List[Tuple[float, float]]:
-        """Genera tubi in array radiale"""
-        positions = []
-        
-        if self.n_tubes == 1:
+        return self.diameter / 2.0
+
+    def generate_positions(self, center_x: float, center_y: float, r_max: float,
+                           z_bottom: float, z_top: float) -> list[TubeElement]:
+        """Pure: return the element list, never touch the config or its counts."""
+        xy = self._positions(center_x, center_y, r_max)
+        length = self.tube_length if self.tube_length else max(z_top - z_bottom, 0.0)
+        return [TubeElement(x, y, z_bottom, z_bottom + length, self.radius,
+                            self.h_fluid, self.t_fluid) for x, y in xy]
+
+    def _positions(self, cx: float, cy: float, r_max: float) -> list[tuple[float, float]]:
+        p = self.pattern
+        if p == TubePattern.SINGLE_CENTRAL:
             return [(cx, cy)]
-        
-        if self.ring_radii and self.n_per_ring:
-            radii = self.ring_radii
-            counts = self.n_per_ring
-        else:
-            # Calcola automaticamente
-            n_rings = max(1, self.n_rings)
-            radii = np.linspace(r_max * 0.3, r_max * 0.8, n_rings).tolist()
-            
-            # Distribuisci uniformemente
-            base_per_ring = self.n_tubes // n_rings
-            counts = [base_per_ring] * n_rings
-            # Aggiungi i rimanenti al primo anello
-            for i in range(self.n_tubes % n_rings):
-                counts[i] += 1
-        
-        for radius, n_elements in zip(radii, counts):
-            for i in range(n_elements):
-                angle = 2 * np.pi * i / n_elements
-                x = cx + radius * np.cos(angle)
-                y = cy + radius * np.sin(angle)
-                positions.append((x, y))
-        
-        return positions
-    
-    def _generate_grid_positions(self, cx: float, cy: float,
-                                  r_max: float) -> List[Tuple[float, float]]:
-        """Genera tubi in griglia"""
-        positions = []
-        half_width = (self.grid_cols - 1) * self.grid_spacing / 2
-        half_height = (self.grid_rows - 1) * self.grid_spacing / 2
-        
-        for row in range(self.grid_rows):
-            for col in range(self.grid_cols):
-                x = cx - half_width + col * self.grid_spacing
-                y = cy - half_height + row * self.grid_spacing
-                
-                # Verifica che sia dentro il raggio massimo
-                r = np.sqrt((x - cx)**2 + (y - cy)**2)
-                if r <= r_max:
-                    positions.append((x, y))
-        
-        return positions[:self.n_tubes]
-    
-    def _generate_hexagonal_positions(self, cx: float, cy: float,
-                                       r_max: float) -> List[Tuple[float, float]]:
-        """Genera tubi in pattern esagonale (massima densità)"""
-        positions = [(cx, cy)]  # Centro
-        
-        spacing = self.grid_spacing
-        rings = 1
-        
-        while len(positions) < self.n_tubes:
-            # Aggiungi anello esagonale
-            r = rings * spacing
-            if r > r_max:
-                break
-                
-            n_on_ring = 6 * rings
-            for i in range(n_on_ring):
-                angle = 2 * np.pi * i / n_on_ring + np.pi / 6
-                x = cx + r * np.cos(angle)
-                y = cy + r * np.sin(angle)
-                
-                if np.sqrt((x - cx)**2 + (y - cy)**2) <= r_max:
-                    positions.append((x, y))
-                    
-            rings += 1
-        
-        return positions[:self.n_tubes]
+        if p == TubePattern.CUSTOM:
+            return [(float(x), float(y)) for x, y in (self.custom_positions or [])]
+        if p == TubePattern.CENTRAL_CLUSTER:
+            around = min(6, max(self.n_tubes - 1, 0))
+            r_ring = min(r_max * 0.6, self.grid_spacing * 2)
+            out = [(cx, cy)]
+            out += [(cx + r_ring * np.cos(2 * np.pi * i / max(around, 1)),
+                     cy + r_ring * np.sin(2 * np.pi * i / max(around, 1)))
+                    for i in range(around)]
+            return out[:max(self.n_tubes, 1)]
+        if p == TubePattern.RADIAL_ARRAY:
+            if self.ring_radii and self.n_per_ring:
+                rings = list(zip(self.ring_radii, self.n_per_ring, strict=True))
+            else:
+                rings = np.linspace(r_max * 0.3, r_max * 0.8, max(self.n_rings, 1))
+                base = max(self.n_tubes // max(self.n_rings, 1), 1)
+                extra = self.n_tubes % max(self.n_rings, 1)
+                counts = [base + (1 if i < extra else 0) for i in range(len(rings))]
+                rings = list(zip(rings, counts, strict=True))
+            out = []
+            for radius, count in rings:
+                out += [(cx + radius * np.cos(2 * np.pi * i / max(count, 1)),
+                         cy + radius * np.sin(2 * np.pi * i / max(count, 1)))
+                        for i in range(max(count, 1))]
+            return out[:max(self.n_tubes, 1)]
+        if p == TubePattern.GRID:
+            half_w = (self.grid_cols - 1) * self.grid_spacing / 2
+            half_h = (self.grid_rows - 1) * self.grid_spacing / 2
+            out = []
+            for row in range(self.grid_rows):
+                for col in range(self.grid_cols):
+                    x, y = cx - half_w + col * self.grid_spacing, cy - half_h + row * self.grid_spacing
+                    if float(np.hypot(x - cx, y - cy)) <= r_max:
+                        out.append((x, y))
+            return out[:max(self.n_tubes, 1)]
+        if p == TubePattern.HEXAGONAL:
+            out, ring = [(cx, cy)], 1
+            while len(out) < self.n_tubes:
+                radius = ring * self.grid_spacing
+                if radius > r_max:
+                    break
+                n_on_ring = 6 * ring
+                out += [(cx + radius * np.cos(2 * np.pi * i / n_on_ring + np.pi / 6),
+                         cy + radius * np.sin(2 * np.pi * i / n_on_ring + np.pi / 6))
+                        for i in range(n_on_ring)]
+                ring += 1
+            return out[:max(self.n_tubes, 1)]
+        raise ValueError(f"unknown tube pattern {p!r}; expected one of {TubePattern.ALL}")
+
+
+@dataclass
+class BuildReport:
+    """What ``apply_to_mesh`` actually painted."""
+
+    zone_volumes: dict = field(default_factory=dict)
+    zone_masses: dict = field(default_factory=dict)
+    n_source_cells: int = 0
+    n_tube_cells: int = 0
+    n_heater_elements: int = 0
+    n_tube_elements: int = 0
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BatteryGeometry:
-    """
-    Geometria completa della Thermal Battery.
-    
-    Combina cilindro, resistenze e tubi in una configurazione completa.
-    """
-    
-    # Geometria cilindro
+    """Complete geometry description of the storage unit."""
+
     cylinder: CylinderGeometry = field(default_factory=CylinderGeometry)
-    
-    # Configurazioni
     heaters: HeaterConfig = field(default_factory=HeaterConfig)
     tubes: TubeConfig = field(default_factory=TubeConfig)
-    
-    # Materiali (nomi)
     storage_material: str = "steatite"
     insulation_material: str = "rock_wool"
     shell_material: str = "carbon_steel"
-    
-    # Packing
-    packing_fraction: float = 0.63
-    
-    def apply_to_mesh(self, mesh: Mesh3D, mat_manager: MaterialManager):
-        """
-        Applica la geometria alla mesh, assegnando materiali e proprietà.
-        
-        VERSIONE VETTORIZZATA - 10-100x più veloce del loop Python.
-        
-        STRUTTURA COMPLETA:
-        - FONDAZIONE (sotto base_z)
-        - SLAB ISOLANTE INFERIORE
-        - STORAGE (sabbia + tubi + resistenze)
-        - SLAB ISOLANTE SUPERIORE
-        - SLAB ACCIAIO (opzionale)
-        - RIEMPIMENTO SABBIA SOTTO CONO (opzionale)
-        - TETTO CONICO (acciaio) - opzionale, controllato da enable_cone_roof
-        - ACCIAIO LATERALE (shell) che copre tutta l'altezza
-        - ISOLAMENTO RADIALE attorno a storage + slab
-        
-        TUBI: vanno da z_slab_bottom_start a z_steel_slab_end (attraversano tutto)
-        RESISTENZE: vanno da z_storage_start + offset_bottom a z_storage_end - offset_top
-        
-        Args:
-            mesh: Mesh3D da configurare
-            mat_manager: MaterialManager per le proprietà
-        """
+    packing_fraction: float = PACKING_FRACTION_DEFAULT
+    h_top: float = 10.0                     # [W/(m^2*K)]
+    h_lateral: float = 5.0                  # [W/(m^2*K)]
+    t_ambient: float = T_AMBIENT_DEFAULT    # [K]
+    t_ground: float = T_GROUND_DEFAULT      # [K]
+
+    # ------------------------------------------------------------- validation
+    def validate(self, mesh: Mesh3D) -> list[str]:
         cyl = self.cylinder
-        
-        # Ottieni proprietà materiali
-        storage_props = mat_manager.compute_packed_bed_properties(
-            self.storage_material, self.packing_fraction
-        )
-        insul_props = mat_manager.get(self.insulation_material)
-        steel_props = mat_manager.get(self.shell_material)
-        air_props = mat_manager.get("air")
-        concrete_props = mat_manager.get("concrete")
-        
-        # =================================================================
-        # POSIZIONI ELEMENTI DISCRETI
-        # =================================================================
-        heater_elements = []
-        tube_elements = []
-        
-        # RESISTENZE: nella zona storage con offset
-        # Partono da: z_storage_start + offset_bottom
-        # Arrivano a: z_storage_end - offset_top
-        heater_z_start = cyl.z_storage_start + self.heaters.offset_bottom
-        heater_z_end = cyl.z_storage_end - self.heaters.offset_top
-        
-        if self.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
-            heater_elements = self.heaters.generate_positions(
-                cyl.center_x, cyl.center_y,
-                0, cyl.r_storage * 0.9,
-                heater_z_start, heater_z_end,
-                phase_offset=cyl.phase_offset_rad
-            )
-        
-        # TUBI: attraversano tutto, da slab bottom start a steel slab end
-        # Vanno: slab_bottom -> storage -> slab_top -> steel_slab
-        tube_z_start = cyl.z_slab_bottom_start
-        tube_z_end = cyl.z_steel_slab_end  # = z_tubes_top
-        
-        tube_elements = self.tubes.generate_positions(
-            cyl.center_x, cyl.center_y,
-            cyl.r_storage * 0.9,
-            tube_z_start, tube_z_end
-        )
-        
-        # Calcola sorgente di calore per le resistenze
-        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            V_storage = np.pi * cyl.r_storage**2 * cyl.height
-            Q_heaters = self.heaters.power_total * 1000 / V_storage
-        else:
-            if heater_elements:
-                heater_length = heater_z_end - heater_z_start
-                V_single = np.pi * self.heaters.heater_radius**2 * heater_length
-                Q_heaters = (self.heaters.power_per_heater * 1000) / V_single
-            else:
-                Q_heaters = 0.0
-        
-        # =================================================================
-        # VERSIONE VETTORIZZATA - usa NumPy broadcasting
-        # =================================================================
-        
-        # Crea griglie 3D di coordinate
-        X, Y, Z = np.meshgrid(mesh.x, mesh.y, mesh.z, indexing='ij')
-        
-        # Distanza radiale dal centro del cilindro
-        R = np.sqrt((X - cyl.center_x)**2 + (Y - cyl.center_y)**2)
-        
-        # =====================================================================
-        # 1. Inizializza tutto come AIR (default)
-        # =====================================================================
-        mesh.material_id[:] = MaterialID.AIR
-        mesh.k[:] = air_props.k
-        mesh.rho[:] = air_props.rho
-        mesh.cp[:] = air_props.cp
-        mesh.Q[:] = 0.0
-        
-        # =====================================================================
-        # 2. Fondazione (sotto la struttura)
-        # =====================================================================
-        below_structure = Z < cyl.base_z
-        mesh.material_id[below_structure] = MaterialID.CONCRETE
-        mesh.k[below_structure] = concrete_props.k
-        mesh.rho[below_structure] = concrete_props.rho
-        mesh.cp[below_structure] = concrete_props.cp
-        
-        # =====================================================================
-        # 3. ACCIAIO LATERALE (shell) - copre tutta l'altezza della struttura
-        # =====================================================================
-        in_shell_height = (Z >= cyl.base_z) & (Z <= cyl.z_shell_top)
-        mask_shell = in_shell_height & (R >= cyl.r_insulation) & (R < cyl.r_shell)
-        mesh.material_id[mask_shell] = MaterialID.STEEL
-        mesh.k[mask_shell] = steel_props.k
-        mesh.rho[mask_shell] = steel_props.rho
-        mesh.cp[mask_shell] = steel_props.cp
-        
-        # =====================================================================
-        # 4. ISOLAMENTO RADIALE - attorno a storage e slab isolanti
-        # =====================================================================
-        in_insul_height = (Z >= cyl.base_z) & (Z <= cyl.z_slab_top_end)
-        mask_insul_radial = in_insul_height & (R >= cyl.r_storage) & (R < cyl.r_insulation)
-        mesh.material_id[mask_insul_radial] = MaterialID.INSULATION
-        mesh.k[mask_insul_radial] = insul_props.k
-        mesh.rho[mask_insul_radial] = insul_props.rho
-        mesh.cp[mask_insul_radial] = insul_props.cp
-        
-        # =====================================================================
-        # 5. SLAB ISOLANTE INFERIORE
-        # =====================================================================
-        in_slab_bottom = (Z >= cyl.z_slab_bottom_start) & (Z < cyl.z_slab_bottom_end)
-        mask_slab_bottom = in_slab_bottom & (R < cyl.r_storage)
-        mesh.material_id[mask_slab_bottom] = MaterialID.INSULATION
-        mesh.k[mask_slab_bottom] = insul_props.k
-        mesh.rho[mask_slab_bottom] = insul_props.rho
-        mesh.cp[mask_slab_bottom] = insul_props.cp
-        
-        # =====================================================================
-        # 6. STORAGE (zona principale con sabbia)
-        # =====================================================================
-        in_storage = (Z >= cyl.z_storage_start) & (Z < cyl.z_storage_end)
-        mask_storage = in_storage & (R < cyl.r_storage)
-        mesh.material_id[mask_storage] = MaterialID.SAND
-        mesh.k[mask_storage] = storage_props.k
-        mesh.rho[mask_storage] = storage_props.rho
-        mesh.cp[mask_storage] = storage_props.cp
-        
-        # Se pattern uniforme, applica Q a tutto lo storage
-        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            mesh.Q[mask_storage] = Q_heaters
-        
-        # =====================================================================
-        # 7. SLAB ISOLANTE SUPERIORE
-        # =====================================================================
-        in_slab_top = (Z >= cyl.z_slab_top_start) & (Z < cyl.z_slab_top_end)
-        mask_slab_top = in_slab_top & (R < cyl.r_storage)
-        mesh.material_id[mask_slab_top] = MaterialID.INSULATION
-        mesh.k[mask_slab_top] = insul_props.k
-        mesh.rho[mask_slab_top] = insul_props.rho
-        mesh.cp[mask_slab_top] = insul_props.cp
-        
-        # =====================================================================
-        # 8. SLAB ACCIAIO (opzionale, sotto il tetto)
-        # =====================================================================
-        if cyl.steel_slab_top > 0:
-            in_steel_slab = (Z >= cyl.z_slab_top_end) & (Z < cyl.z_steel_slab_end)
-            mask_steel_slab = in_steel_slab & (R < cyl.r_insulation)
-            mesh.material_id[mask_steel_slab] = MaterialID.STEEL
-            mesh.k[mask_steel_slab] = steel_props.k
-            mesh.rho[mask_steel_slab] = steel_props.rho
-            mesh.cp[mask_steel_slab] = steel_props.cp
-        
-        # =====================================================================
-        # 9. TETTO CONICO (acciaio) e riempimento sabbia opzionale
-        # Solo se enable_cone_roof è True e roof_height > 0
-        # =====================================================================
-        if cyl.enable_cone_roof and cyl.roof_height > 0:
-            # Calcola raggio del cono per ogni punto Z
-            in_cone_region = (Z >= cyl.z_cone_base) & (Z <= cyl.z_cone_apex)
-            
-            # Raggio del cono a ogni quota: r_cone(z) = r_shell * (1 - (z - z_base) / h_cone)
-            Z_rel = np.clip(Z - cyl.z_cone_base, 0, cyl.roof_height)
-            R_cone = cyl.r_shell * (1 - Z_rel / cyl.roof_height)
-            
-            # Interno del cono
-            inside_cone = in_cone_region & (R < R_cone)
-            
-            # Riempimento sabbia sotto il cono (opzionale)
-            if cyl.fill_cone_with_sand:
-                # La sabbia riempie tutto l'interno del cono
-                mesh.material_id[inside_cone] = MaterialID.SAND
-                mesh.k[inside_cone] = storage_props.k
-                mesh.rho[inside_cone] = storage_props.rho
-                mesh.cp[inside_cone] = storage_props.cp
-            
-            # Tetto conico in acciaio (guscio sottile sulla superficie del cono)
-            # Approssimiamo come le celle sul bordo del cono
-            cone_shell_thickness = cyl.shell_thickness
-            R_cone_inner = cyl.r_shell * (1 - Z_rel / cyl.roof_height) - cone_shell_thickness
-            R_cone_inner = np.maximum(R_cone_inner, 0)
-            
-            mask_cone_shell = in_cone_region & (R >= R_cone_inner) & (R < R_cone)
-            mesh.material_id[mask_cone_shell] = MaterialID.STEEL
-            mesh.k[mask_cone_shell] = steel_props.k
-            mesh.rho[mask_cone_shell] = steel_props.rho
-            mesh.cp[mask_cone_shell] = steel_props.cp
-        
-        # =====================================================================
-        # 10. Elementi discreti (tubi e resistenze) - VERSIONE VETTORIZZATA
-        # =====================================================================
-        # OTTIMIZZAZIONE FASE 2: Broadcasting NumPy invece di loop Python
-        # --------------------------------------------------------------------------
-        # PROBLEMA ORIGINALE:
-        # Il loop Python su N elementi richiede N*M operazioni dove M = mesh size
-        # Per 100 elementi e mesh 100³ = 100M operazioni in Python (lento)
-        #
-        # SOLUZIONE:
-        # 1. Estrai coordinate (x, y, z_bottom, z_top, radius) in array 1D
-        # 2. Usa broadcasting 4D: (Nx, Ny, Nz, N_elements) per calcolare
-        #    tutte le distanze in un'unica operazione vettorizzata
-        # 3. any(axis=-1) per ridurre a maschera 3D
-        #
-        # SPEEDUP ATTESO: 5-20x rispetto al loop Python
-        # TRADE-OFF: Usa più memoria temporanea (O(mesh_size * n_elements))
-        # Per mesh molto grandi con molti elementi, potrebbe essere necessario
-        # partizionare in batch per evitare memory overflow.
-        # =====================================================================
-        
-        # -------------------------------------------------------------------------
-        # RESISTENZE DISCRETE (vettorizzato)
-        # -------------------------------------------------------------------------
-        if heater_elements:
-            n_heaters = len(heater_elements)
-            
-            # Estrai coordinate in array NumPy per broadcasting
-            heater_x = np.array([h.x for h in heater_elements])        # (n_heaters,)
-            heater_y = np.array([h.y for h in heater_elements])
-            heater_r = np.array([h.radius for h in heater_elements])
-            heater_zb = np.array([h.z_bottom for h in heater_elements])
-            heater_zt = np.array([h.z_top for h in heater_elements])
-            
-            # Broadcasting 4D: X(Nx,Ny,Nz,1) - heater_x(1,1,1,n_heaters)
-            # Risultato: (Nx, Ny, Nz, n_heaters)
-            dx_h = X[:, :, :, np.newaxis] - heater_x[np.newaxis, np.newaxis, np.newaxis, :]
-            dy_h = Y[:, :, :, np.newaxis] - heater_y[np.newaxis, np.newaxis, np.newaxis, :]
-            dist_xy_h = np.sqrt(dx_h**2 + dy_h**2)  # (Nx, Ny, Nz, n_heaters)
-            
-            # Maschera per ogni elemento: distanza <= raggio AND z in range
-            Z_4d = Z[:, :, :, np.newaxis]  # (Nx, Ny, Nz, 1)
-            in_radius_h = dist_xy_h <= heater_r[np.newaxis, np.newaxis, np.newaxis, :]
-            in_z_range_h = (Z_4d >= heater_zb[np.newaxis, np.newaxis, np.newaxis, :]) & \
-                           (Z_4d <= heater_zt[np.newaxis, np.newaxis, np.newaxis, :])
-            
-            # Riduzione: any(axis=-1) -> True se il nodo appartiene ad almeno 1 heater
-            mask_any_heater = np.any(in_radius_h & in_z_range_h, axis=-1)  # (Nx, Ny, Nz)
-            
-            # Applica proprietà a tutte le celle delle resistenze in una volta
-            mesh.material_id[mask_any_heater] = MaterialID.HEATERS
-            mesh.k[mask_any_heater] = storage_props.k
-            mesh.rho[mask_any_heater] = storage_props.rho
-            mesh.cp[mask_any_heater] = storage_props.cp
-            mesh.Q[mask_any_heater] = Q_heaters
-        
-        # -------------------------------------------------------------------------
-        # TUBI DISCRETI (vettorizzato)
-        # -------------------------------------------------------------------------
-        if tube_elements:
-            n_tubes = len(tube_elements)
-            
-            # Estrai coordinate in array NumPy per broadcasting
-            tube_x = np.array([t.x for t in tube_elements])        # (n_tubes,)
-            tube_y = np.array([t.y for t in tube_elements])
-            tube_r = np.array([t.radius for t in tube_elements])
-            tube_zb = np.array([t.z_bottom for t in tube_elements])
-            tube_zt = np.array([t.z_top for t in tube_elements])
-            tube_h = np.array([t.h_fluid for t in tube_elements])
-            tube_T = np.array([t.T_fluid for t in tube_elements])
-            
-            # Broadcasting 4D: X(Nx,Ny,Nz,1) - tube_x(1,1,1,n_tubes)
-            dx_t = X[:, :, :, np.newaxis] - tube_x[np.newaxis, np.newaxis, np.newaxis, :]
-            dy_t = Y[:, :, :, np.newaxis] - tube_y[np.newaxis, np.newaxis, np.newaxis, :]
-            dist_xy_t = np.sqrt(dx_t**2 + dy_t**2)  # (Nx, Ny, Nz, n_tubes)
-            
-            # Maschera per ogni elemento
-            Z_4d = Z[:, :, :, np.newaxis]  # (Nx, Ny, Nz, 1)
-            in_radius_t = dist_xy_t <= tube_r[np.newaxis, np.newaxis, np.newaxis, :]
-            in_z_range_t = (Z_4d >= tube_zb[np.newaxis, np.newaxis, np.newaxis, :]) & \
-                           (Z_4d <= tube_zt[np.newaxis, np.newaxis, np.newaxis, :])
-            
-            # Maschera combinata per ogni tubo: (Nx, Ny, Nz, n_tubes)
-            mask_per_tube = in_radius_t & in_z_range_t
-            
-            # Riduzione: any(axis=-1) -> True se il nodo appartiene ad almeno 1 tubo
-            mask_any_tube = np.any(mask_per_tube, axis=-1)  # (Nx, Ny, Nz)
-            
-            # Applica proprietà comuni a tutti i tubi
-            mesh.material_id[mask_any_tube] = MaterialID.TUBES
-            mesh.k[mask_any_tube] = storage_props.k
-            mesh.rho[mask_any_tube] = storage_props.rho
-            mesh.cp[mask_any_tube] = storage_props.cp
-            
-            # Per le condizioni al contorno, serve sapere a QUALE tubo appartiene
-            # ogni cella. Usiamo argmax per trovare il primo tubo che contiene il nodo.
-            if self.tubes.active:
-                # argmax restituisce l'indice del primo True lungo l'asse
-                # Ma funziona solo dove mask_any_tube è True
-                tube_indices = np.argmax(mask_per_tube, axis=-1)  # (Nx, Ny, Nz)
-                
-                # Costruisci array h_fluid e T_fluid per tutte le celle
-                # h_fluid[i,j,k] = tube_h[tube_indices[i,j,k]] dove mask_any_tube[i,j,k]
-                mesh.bc_h[mask_any_tube] = tube_h[tube_indices[mask_any_tube]]
-                mesh.bc_T_inf[mask_any_tube] = tube_T[tube_indices[mask_any_tube]]
-                mesh.boundary_type[mask_any_tube] = BoundaryType.CONVECTION
-            else:
-                mesh.bc_h[mask_any_tube] = 0.0
-                mesh.boundary_type[mask_any_tube] = BoundaryType.INTERNAL
-        
-        # Imposta condizioni al contorno
-        self._apply_boundary_conditions(mesh)
-    
-    def _set_node_properties(self, mesh: Mesh3D, i: int, j: int, k: int,
-                             material_id: MaterialID, props: ThermalProperties):
-        """Helper per impostare le proprietà di un nodo"""
-        mesh.material_id[i, j, k] = material_id
-        mesh.k[i, j, k] = props.k
-        mesh.rho[i, j, k] = props.rho
-        mesh.cp[i, j, k] = props.cp
-    
-    def _apply_boundary_conditions(self, mesh: Mesh3D, 
-                                   h_top: float = 10.0,
-                                   h_lateral: float = 5.0,
-                                   T_ambient: float = 20.0,
-                                   T_ground: float = 10.0):
-        """Applica condizioni al contorno al dominio"""
-        
-        # Faccia superiore - convezione con aria
-        mesh.set_convection_bc('z_max', h_top, T_ambient)
-        
-        # Facce laterali - convezione
-        mesh.set_convection_bc('x_min', h_lateral, T_ambient)
-        mesh.set_convection_bc('x_max', h_lateral, T_ambient)
-        mesh.set_convection_bc('y_min', h_lateral, T_ambient)
-        mesh.set_convection_bc('y_max', h_lateral, T_ambient)
-        
-        # Faccia inferiore - temperatura fissa (terreno)
-        mesh.set_fixed_temperature_bc('z_min', T_ground)
-    
-    def get_zone_volumes(self) -> dict:
-        """Calcola i volumi di ogni zona [m³]"""
+        problems = list(cyl.validate())
+        if not 0.0 < self.packing_fraction < 1.0:
+            problems.append(f"packing_fraction must be in (0,1), got {self.packing_fraction}")
+        for h, name in ((self.h_top, "h_top"), (self.h_lateral, "h_lateral")):
+            if h < 0:
+                problems.append(f"{name} must be >= 0")
+        if mesh is not None:
+            if cyl.center_x - cyl.r_shell < 0 or cyl.center_x + cyl.r_shell > mesh.Lx:
+                problems.append(
+                    f"battery radius {cyl.r_shell:.3f} m does not fit in X "
+                    f"[0, {mesh.Lx:.3f}]: increase Lx or reduce the radius/insulation")
+            if cyl.center_y - cyl.r_shell < 0 or cyl.center_y + cyl.r_shell > mesh.Ly:
+                problems.append(
+                    f"battery radius {cyl.r_shell:.3f} m does not fit in Y "
+                    f"[0, {mesh.Ly:.3f}]: increase Ly or reduce the radius/insulation")
+            if cyl.z_cone_apex > mesh.Lz + 1e-9:
+                problems.append(
+                    f"battery height {cyl.z_cone_apex:.3f} m (roof apex) exceeds Lz = "
+                    f"{mesh.Lz:.3f} m: increase Lz or lower the roof/height")
+            if self.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
+                # a warning never blocks a build: it is reported with the build
+                problems.extend(p for p in self.heater_problems(mesh)
+                                if not p.startswith("warning: "))
+            problems.extend(self.tube_problems(mesh))
+        return problems
+
+    def tube_problems(self, mesh: Mesh3D) -> list[str]:
+        """Tubes whose effective radius leaves the storage would heat the air."""
+        if not self.tubes.active:
+            return []
         cyl = self.cylinder
-        
-        # Volumi principali
-        h_storage = cyl.z_storage_end - cyl.z_storage_start
-        h_slab_bottom = cyl.insulation_slab_bottom
-        h_slab_top = cyl.insulation_slab_top
-        h_shell = cyl.z_shell_top - cyl.base_z
-        
-        volumes = {
-            'storage': np.pi * cyl.r_storage**2 * h_storage,
-            'slab_bottom': np.pi * cyl.r_storage**2 * h_slab_bottom,
-            'slab_top': np.pi * cyl.r_storage**2 * h_slab_top,
-            'insulation_radial': np.pi * (cyl.r_insulation**2 - cyl.r_storage**2) * h_shell,
-            'shell': np.pi * (cyl.r_shell**2 - cyl.r_insulation**2) * h_shell,
-        }
-        
-        # Volume del tetto conico (V = 1/3 * π * r² * h)
-        if cyl.roof_height > 0:
-            volumes['cone'] = (1/3) * np.pi * cyl.r_shell**2 * cyl.roof_height
-        else:
-            volumes['cone'] = 0.0
-            
-        # Slab acciaio opzionale
+        elements = self.tubes.generate_positions(cyl.center_x, cyl.center_y,
+                                                 cyl.r_storage * 0.9,
+                                                 cyl.z_storage_start, cyl.z_storage_end)
+        cell = max(mesh.size_x(cyl.center_x), mesh.size_y(cyl.center_y))
+        for element in elements:
+            reach = (float(np.hypot(element.x - cyl.center_x, element.y - cyl.center_y))
+                     + element.radius + 0.5 * cell)
+            if reach > cyl.r_storage + 1e-9:
+                return [f"a heat-exchanger tube at ({element.x:.2f}, {element.y:.2f}) m "
+                        f"reaches r = {reach:.2f} m, outside the storage radius "
+                        f"{cyl.r_storage:.2f} m: it would exchange heat with the air - "
+                        f"reduce the tube diameter, the pattern radius or use a "
+                        f"pattern that stays inside"]
+        return []
+
+    def heater_warnings(self, mesh: Mesh3D) -> list[str]:
+        """Non-blocking remarks of the heater bank (surface power, resolution)."""
+        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
+            return []
+        return [p for p in self.heater_problems(mesh) if p.startswith("warning: ")]
+
+    def heater_problems(self, mesh: Mesh3D, tubes_problems: bool = True) -> list[str]:
+        """Errors and warnings of the discrete heater bank (warnings prefixed)."""
+        cyl, cfg = self.cylinder, self.heaters
+        bank = cfg.bank(cyl.z_storage_start, cyl.z_storage_end)
+        tubes = None
+        if tubes_problems and self.tubes.active:
+            tubes = self.tubes.generate_positions(cyl.center_x, cyl.center_y,
+                                                  cyl.r_storage * 0.9,
+                                                  cyl.z_storage_start, cyl.z_storage_end)
+        return validate_bank(bank, mesh, cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
+                             cyl.z_storage_start, cyl.z_storage_end, tubes)
+
+    # --------------------------------------------------------------- painting
+    def apply_to_mesh(self, mesh: Mesh3D, materials: MaterialManager = None) -> BuildReport:
+        """Paint the geometry onto ``mesh``; raises ``ValueError`` on a bad fit."""
+        materials = materials or MaterialManager()
+        problems = self.validate(mesh)
+        if problems:
+            raise ValueError("invalid geometry: " + "; ".join(problems))
+
+        cyl = self.cylinder
+        storage_props = materials.compute_packed_bed_properties(self.storage_material,
+                                                                self.packing_fraction)
+        insul_props = materials.get(self.insulation_material)
+        steel_props = materials.get(self.shell_material)
+        air_props = materials.get("air")
+        concrete_props = materials.get("concrete")
+
+        X, Y, Z = mesh.X, mesh.Y, mesh.Z
+        R = np.sqrt((X - cyl.center_x) ** 2 + (Y - cyl.center_y) ** 2)
+        report = BuildReport()
+        if max(mesh.snapped.values(), default=0.0) > 1e-9:
+            report.notes.append(
+                f"domain snapped to the grid: L_y={mesh.Ly:.3f}, L_z={mesh.Lz:.3f} m "
+                f"(cell size {mesh.dx.min():.3f} m)")
+
+        self._fill(mesh, np.ones(mesh.T.shape, dtype=bool), MaterialID.AIR, air_props)
+        self._paint_shell_and_insulation(mesh, R, Z, insul_props, steel_props, concrete_props)
+        self._paint_storage(mesh, R, Z, storage_props)
+        self._paint_roof(mesh, R, Z, storage_props, steel_props)
+        report.n_source_cells = self._paint_heaters(mesh, Z, R, materials)
+        report.notes.extend(self.heater_warnings(mesh))
+        report.n_tube_cells = self._paint_tubes(mesh, Z, R, materials)
+
+        self.apply_boundary_conditions(mesh, steel_props)
+        report.zone_volumes = self.zone_volumes(mesh)
+        report.zone_masses = self.zone_masses(mesh, materials)
+        report.n_heater_elements = self._n_heaters()
+        report.n_tube_elements = self._n_tubes()
+        mesh.validate()
+        return report
+
+    def apply_boundary_conditions(self, mesh: Mesh3D, steel_props: ThermalProperties = None
+                                  ) -> None:
+        """Air-exposed faces convect (with the shell emissivity), ground is fixed."""
+        steel_props = steel_props or MaterialManager().get(self.shell_material)
+        for face in ("x_min", "x_max", "y_min", "y_max"):
+            mesh.set_convection_bc(face, self.h_lateral, self.t_ambient)
+            mesh.face_bc[face].emissivity = steel_props.emissivity
+        mesh.set_convection_bc("z_max", self.h_top, self.t_ambient)
+        mesh.face_bc["z_max"].emissivity = steel_props.emissivity
+        mesh.set_fixed_temperature_bc("z_min", self.t_ground)
+
+    # ---------------------------------------------------------------- helpers
+    @staticmethod
+    def _fill(mesh: Mesh3D, mask: np.ndarray, material: MaterialID,
+              props: ThermalProperties) -> None:
+        mesh.material_id[mask] = int(material)
+        mesh.k[mask] = props.k
+        mesh.rho[mask] = props.rho
+        mesh.cp[mask] = props.cp
+
+    @staticmethod
+    def _widen(low: float, high: float, minimum: float, grow_up: bool = True
+               ) -> tuple[float, float]:
+        """Guarantee a band at least ``minimum`` wide, growing away from the core.
+
+        A voxel mesh cannot represent a zone thinner than a cell: without this a
+        20 mm shell or a 5 mm plate contains no cell centre and simply disappears
+        from the model (the roof used to vanish at any realistic cell size).
+        """
+        if high - low >= minimum:
+            return low, high
+        return (low, low + minimum) if grow_up else (high - minimum, high)
+
+    def _paint_shell_and_insulation(self, mesh, R, Z, insul, steel, concrete) -> None:
+        cyl = self.cylinder
+        z = Z
+        # radial thickness of the shell and the vertical thickness of the slabs are
+        # compared with the *local* cell size, so a graded mesh measures them with
+        # the cells that are actually there
+        cell = max(mesh.size_x(cyl.center_x + cyl.r_shell) * 1.0,
+                   mesh.size_y(cyl.center_y + cyl.r_shell) * 1.0)
+        foundation = (z < cyl.base_z) & (cyl.r_shell + cyl.foundation_margin >= R)
+        self._fill(mesh, foundation, MaterialID.CONCRETE, concrete)
+
+        lateral = (z >= cyl.base_z) & (z < cyl.z_shell_top)
+        # insulation first, shell last: the shell keeps at least one cell of thickness
+        self._fill(mesh, lateral & (cyl.r_storage <= R) & (cyl.r_insulation > R),
+                   MaterialID.INSULATION, insul)
+        shell_inner = max(cyl.r_shell - max(cyl.shell_thickness, cell), 0.0)
+        self._fill(mesh, lateral & (shell_inner <= R) & (cyl.r_shell > R),
+                   MaterialID.STEEL, steel)
+        if cyl.insulation_slab_bottom > 0:
+            slab_cell = mesh.size_z(0.5 * (cyl.z_slab_bottom_start + cyl.z_storage_start))
+            bottom_low, bottom_high = self._widen(cyl.z_slab_bottom_start,
+                                                  cyl.z_storage_start, slab_cell,
+                                                  grow_up=False)
+            self._fill(mesh, (z >= bottom_low) & (z < bottom_high) & (cyl.r_storage > R),
+                       MaterialID.INSULATION, insul)
+        if cyl.insulation_slab_top > 0:
+            top_cell = mesh.size_z(0.5 * (cyl.z_slab_top_start + cyl.z_slab_top_end))
+            top_low, top_high = self._widen(cyl.z_slab_top_start, cyl.z_slab_top_end,
+                                            top_cell)
+            self._fill(mesh, (z >= top_low) & (z < top_high) & (cyl.r_storage > R),
+                       MaterialID.INSULATION, insul)
         if cyl.steel_slab_top > 0:
-            volumes['steel_slab'] = np.pi * cyl.r_insulation**2 * cyl.steel_slab_top
-        else:
-            volumes['steel_slab'] = 0.0
-        
-        volumes['insulation_total'] = (
-            volumes['slab_bottom'] + 
-            volumes['slab_top'] + 
-            volumes['insulation_radial']
-        )
-        
-        volumes['total'] = (
-            volumes['storage'] + 
-            volumes['insulation_total'] + 
-            volumes['shell'] + 
-            volumes['cone'] + 
-            volumes['steel_slab']
-        )
-        
-        return volumes
-    
-    def get_zone_masses(self, mat_manager: MaterialManager) -> dict:
-        """Calcola le masse di ogni zona [kg]"""
-        volumes = self.get_zone_volumes()
-        
-        storage_props = mat_manager.compute_packed_bed_properties(
-            self.storage_material, self.packing_fraction
-        )
-        insul_props = mat_manager.get(self.insulation_material)
-        steel_props = mat_manager.get(self.shell_material)
-        
-        masses = {
-            'storage': volumes['storage'] * storage_props.rho,
-            'slab_bottom': volumes['slab_bottom'] * insul_props.rho,
-            'slab_top': volumes['slab_top'] * insul_props.rho,
-            'insulation_radial': volumes['insulation_radial'] * insul_props.rho,
-            'shell': volumes['shell'] * steel_props.rho,
-            'cone': volumes['cone'] * steel_props.rho,
-            'steel_slab': volumes['steel_slab'] * steel_props.rho,
+            plate_cell = mesh.size_z(cyl.z_slab_top_end)
+            plate_low, plate_high = self._widen(cyl.z_slab_top_end, cyl.z_steel_slab_end,
+                                                plate_cell)
+            self._fill(mesh, (z >= plate_low) & (z < plate_high) & (cyl.r_insulation > R),
+                       MaterialID.STEEL, steel)
+
+    def _paint_storage(self, mesh, R, Z, storage) -> None:
+        cyl = self.cylinder
+        band = (cyl.z_storage_start <= Z) & (cyl.z_storage_end > Z) & (cyl.r_storage > R)
+        self._fill(mesh, band, MaterialID.SAND, storage)
+
+    def _paint_roof(self, mesh, R, Z, storage, steel) -> None:
+        cyl = self.cylinder
+        if cyl.roof_height <= 0:
+            return
+        in_region = (cyl.z_cone_base <= Z) & (cyl.z_cone_apex >= Z)
+        r_cone = cyl.r_shell * (1.0 - np.clip(Z - cyl.z_cone_base, 0.0, cyl.roof_height)
+                                / cyl.roof_height)
+        if cyl.fill_cone_with_sand:
+            self._fill(mesh, in_region & (r_cone > R), MaterialID.SAND, storage)
+        # a shell thinner than a cell would vanish: keep at least one cell of steel
+        z_roof = cyl.z_cone_base + 0.5 * cyl.roof_height
+        thickness = max(cyl.shell_thickness,
+                        mesh.cell_size_at(cyl.center_x + 0.7 * cyl.r_shell, cyl.center_y,
+                                          z_roof))
+        r_inner = np.maximum(r_cone - thickness, 0.0)
+        self._fill(mesh, in_region & (r_inner <= R) & (r_cone > R), MaterialID.STEEL, steel)
+
+    def _paint_heaters(self, mesh, Z, R, materials: MaterialManager) -> int:
+        cyl, cfg = self.cylinder, self.heaters
+        mesh.Q_source.fill(0.0)
+        mesh.source_mask.fill(False)
+        z_bottom = cyl.z_storage_start + cfg.offset_bottom
+        z_top = cyl.z_storage_end - cfg.offset_top
+        if z_top <= z_bottom:
+            raise ValueError("heater offsets leave no room inside the storage band")
+        if cfg.pattern == HeaterPattern.UNIFORM_ZONE:
+            mask = (z_bottom <= Z) & (z_top > Z) & (cyl.r_storage > R)
+            n = int(np.count_nonzero(mask))
+            if n == 0:
+                raise ValueError("uniform heater zone covers no cell: refine the mesh")
+            mesh.source_mask[mask] = True
+            mesh.Q_source[mask] = cfg.power_w / float(mesh.V[mask].sum())
+            return n
+
+        # discrete elements: hairpin sheathed tubes, power on the active length only
+        bank = cfg.bank(cyl.z_storage_start, cyl.z_storage_end)
+        raster = rasterize(bank, mesh, cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
+                           cyl.z_storage_start, cyl.z_storage_end)
+        if raster.problem:
+            raise ValueError(f"the heater bank cannot be represented: {raster.problem}")
+        mask = raster.mask
+        n = int(np.count_nonzero(mask))
+        if n == 0:
+            raise ValueError(
+                "no mesh cell falls inside the discrete heaters: the sheath "
+                f"({bank.sheath_diameter * 1000:.1f} mm) is smaller than the local cell "
+                f"size.  Refine the heater region or use the uniform zone")
+        self._fill(mesh, mask, MaterialID.HEATERS, materials.get(bank.sheath_material))
+        active = raster.active_mask
+        if int(np.count_nonzero(active)) == 0:
+            raise ValueError("the heater elements have no cell inside the storage band: "
+                             "check the offsets and the active length")
+        mesh.source_mask[active] = True
+        mesh.Q_source[active] = bank.total_power_w / float(mesh.V[active].sum())
+        return n
+
+    def _paint_tubes(self, mesh, Z, R, materials: MaterialManager) -> int:
+        cyl, cfg = self.cylinder, self.tubes
+        mask_tubes = np.zeros(mesh.T.shape, dtype=bool)
+        if not cfg.active:
+            mesh.bc_h[mesh.material_id == int(MaterialID.TUBES)] = 0.0
+            return 0
+        elements = cfg.generate_positions(cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
+                                          cyl.z_storage_start, cyl.z_storage_end)
+        if not elements:
+            return 0
+        band = (cyl.z_storage_start <= Z) & (cyl.z_storage_end > Z)
+        mask_tubes = self._elements_mask(mesh, elements, [e.radius for e in elements]) & band
+        n = int(np.count_nonzero(mask_tubes))
+        if n == 0:
+            raise ValueError(
+                "no mesh cell falls inside the heat-exchanger tubes: the tube radius "
+                f"({cfg.radius} m) is smaller than half the local cell size "
+                f"({mesh.dx.min() / 2:.3f} m). "
+                "Refine the mesh or increase the tube diameter")
+        steel = materials.get(self.shell_material)
+        self._fill(mesh, mask_tubes, MaterialID.TUBES, steel)
+        self._clear_sources(mesh, mask_tubes)
+        mesh.set_internal_convection(mask_tubes, cfg.h_fluid, cfg.t_fluid)
+        return n
+
+    @staticmethod
+    def _clear_sources(mesh: Mesh3D, mask: np.ndarray) -> None:
+        """A tube cell is not a heater: never keep a volumetric source there."""
+        mesh.Q_source[mask] = 0.0
+        mesh.source_mask[mask] = False
+
+    @staticmethod
+    def _elements_mask(mesh: Mesh3D, elements, radii) -> np.ndarray:
+        """Cells covered by the elements; a sub-grid element keeps its own cell.
+
+        The radius is widened to half a cell, and if even that misses every cell
+        centre (an element thinner than the grid) the cell containing the axis is
+        used, so a heater or a tube can never silently vanish.
+        """
+        mask = np.zeros(mesh.T.shape, dtype=bool)
+        for element, radius in zip(elements, radii, strict=True):
+            r_eff = max(float(radius),
+                        0.5 * mesh.cell_size_at(element.x, element.y, element.z_bottom))
+            i0, j0, _ = mesh.find_cell(element.x - r_eff, element.y - r_eff, element.z_bottom)
+            i1, j1, _ = mesh.find_cell(element.x + r_eff, element.y + r_eff, element.z_top)
+            ii = slice(min(i0, i1), max(i0, i1) + 1)
+            jj = slice(min(j0, j1), max(j0, j1) + 1)
+            z_top = max(element.z_top, element.z_bottom
+                        + mesh.size_z(element.z_bottom))
+            kk = (mesh.z >= element.z_bottom) & (mesh.z < z_top)
+            if not kk.any():
+                kk = np.zeros(mesh.Nz, dtype=bool)
+                kk[mesh.find_cell(element.x, element.y, element.z_bottom)[2]] = True
+            window = np.zeros(mesh.T.shape, dtype=bool)
+            window[ii, jj, :] = True
+            window &= kk[None, None, :]
+            circle = (mesh.X - element.x) ** 2 + (mesh.Y - element.y) ** 2 <= r_eff ** 2
+            hit = window & circle
+            if not hit.any():
+                i, j, _ = mesh.find_cell(element.x, element.y, element.z_bottom)
+                hit = np.zeros(mesh.T.shape, dtype=bool)
+                hit[i, j, :] = kk
+            mask |= hit
+        return mask
+
+    def _n_heaters(self) -> int:
+        """Elements of the painted bank (the count the rasteriser deposits)."""
+        cyl = self.cylinder
+        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
+            return 0
+        return self.heaters.bank(cyl.z_storage_start, cyl.z_storage_end).n_elements
+
+    def _n_tubes(self) -> int:
+        if not self.tubes.active:
+            return 0
+        cyl = self.cylinder
+        return len(self.tubes.generate_positions(cyl.center_x, cyl.center_y,
+                                                 cyl.r_storage * 0.9,
+                                                 cyl.z_storage_start, cyl.z_storage_end))
+
+    # ------------------------------------------------------------- reporting
+    def zone_volumes(self, mesh: Mesh3D = None) -> dict:
+        """Analytic zone volumes [m^3] (validated against the mesh when given)."""
+        cyl = self.cylinder
+        v = {
+            "storage": float(np.pi * cyl.r_storage ** 2 * cyl.height),
+            "slab_bottom": float(np.pi * cyl.r_storage ** 2 * cyl.insulation_slab_bottom),
+            "slab_top": float(np.pi * cyl.r_storage ** 2 * cyl.insulation_slab_top),
+            "insulation_radial": float(np.pi * (cyl.r_insulation ** 2 - cyl.r_storage ** 2)
+                                       * (cyl.z_shell_top - cyl.base_z)),
+            "shell": float(np.pi * (cyl.r_shell ** 2 - cyl.r_insulation ** 2)
+                           * (cyl.z_shell_top - cyl.base_z)),
+            "cone_shell": self._cone_shell_volume(),
+            "steel_slab": float(np.pi * cyl.r_insulation ** 2 * max(cyl.steel_slab_top, 0.0)),
+            "foundation": float(np.pi * (cyl.r_shell + cyl.foundation_margin) ** 2
+                                * max(cyl.base_z, 0.0)),
         }
-        
-        masses['insulation_total'] = (
-            masses['slab_bottom'] + 
-            masses['slab_top'] + 
-            masses['insulation_radial']
-        )
-        
-        masses['total'] = sum(v for k, v in masses.items() 
-                              if k not in ['insulation_total'])
-        
-        return masses
-    
-    def estimate_energy_capacity(self, mat_manager: MaterialManager,
-                                  T_high: float = 380.0,
-                                  T_low: float = 90.0,
-                                  efficiency: float = 0.87) -> dict:
-        """
-        Stima la capacità energetica della batteria.
-        
-        Returns:
-            dict con energia termica e utilizzabile [kWh e MWh]
-        """
-        masses = self.get_zone_masses(mat_manager)
-        storage_props = mat_manager.compute_packed_bed_properties(
-            self.storage_material, self.packing_fraction
-        )
-        
-        delta_T = T_high - T_low
-        
-        # Energia termica totale
-        E_thermal_J = masses['storage'] * storage_props.cp * delta_T
-        E_thermal_kWh = E_thermal_J / 3.6e6
-        E_thermal_MWh = E_thermal_kWh / 1000
-        
-        # Energia utilizzabile (con efficienza)
-        E_usable_kWh = E_thermal_kWh * efficiency
-        E_usable_MWh = E_usable_kWh / 1000
-        
+        v["insulation"] = v["slab_bottom"] + v["slab_top"] + v["insulation_radial"]
+        v["total"] = sum(v[k] for k in ("storage", "insulation", "shell", "cone_shell",
+                                        "steel_slab", "foundation"))
+        return v
+
+    def _cone_shell_volume(self) -> float:
+        cyl = self.cylinder
+        if cyl.roof_height <= 0:
+            return 0.0
+        outer = np.pi * cyl.r_shell ** 2 * cyl.roof_height / 3.0
+        inner_radius = max(cyl.r_shell - cyl.shell_thickness, 0.0)
+        inner = np.pi * inner_radius ** 2 * cyl.roof_height / 3.0
+        return float(max(outer - inner, 0.0))
+
+    def zone_masses(self, mesh: Mesh3D = None, materials: MaterialManager = None) -> dict:
+        """Zone masses [kg] from the analytic volumes and the selected materials."""
+        materials = materials or MaterialManager()
+        v = self.zone_volumes(mesh)
+        storage = materials.compute_packed_bed_properties(self.storage_material,
+                                                          self.packing_fraction)
+        insul = materials.get(self.insulation_material)
+        steel = materials.get(self.shell_material)
+        concrete = materials.get("concrete")
+        m = {
+            "storage": v["storage"] * storage.rho,
+            "slab_bottom": v["slab_bottom"] * insul.rho,
+            "slab_top": v["slab_top"] * insul.rho,
+            "insulation_radial": v["insulation_radial"] * insul.rho,
+            "shell": v["shell"] * steel.rho,
+            "cone_shell": v["cone_shell"] * steel.rho,
+            "steel_slab": v["steel_slab"] * steel.rho,
+            "foundation": v["foundation"] * concrete.rho,
+        }
+        m["insulation"] = m["slab_bottom"] + m["slab_top"] + m["insulation_radial"]
+        m["total"] = sum(m[k] for k in ("storage", "insulation", "shell", "cone_shell",
+                                        "steel_slab", "foundation"))
+        return m
+
+    def estimate_energy_capacity(self, t_high: float, t_low: float,
+                                 efficiency: float = 0.87,
+                                 materials: MaterialManager = None) -> dict:
+        """Stored / usable energy of the storage zone [J] and the sand mass [kg]."""
+        materials = materials or MaterialManager()
+        store = materials.compute_packed_bed_properties(self.storage_material,
+                                                        self.packing_fraction)
+        mass = self.zone_masses(materials=materials)["storage"]
+        energy = mass * store.cp * max(t_high - t_low, 0.0)
         return {
-            'E_thermal_kWh': E_thermal_kWh,
-            'E_thermal_MWh': E_thermal_MWh,
-            'E_usable_kWh': E_usable_kWh,
-            'E_usable_MWh': E_usable_MWh,
-            'mass_sand_kg': masses['sand_total'],
-            'mass_sand_tonnes': masses['sand_total'] / 1000,
+            "mass_storage_kg": mass,
+            "mass_storage_t": mass / 1000.0,
+            "E_thermal_J": energy,
+            "E_thermal_kWh": energy / 3.6e6,
+            "E_usable_J": energy * efficiency,
+            "E_usable_kWh": energy * efficiency / 3.6e6,
+            "t_high": t_high,
+            "t_low": t_low,
         }
 
-
-# =============================================================================
-# FACTORY FUNCTIONS
-# =============================================================================
 
 def create_small_test_geometry() -> BatteryGeometry:
-    """
-    Crea geometria piccola per test (8 MWh circa).
-    
-    Usa la nuova struttura a 4 zone:
-    - STORAGE: r=2.0m (materiale di accumulo con tubi e resistenze)
-    - INSULATION: spessore 0.3m
-    - STEEL: spessore 0.02m
-    """
-    
-    cylinder = CylinderGeometry(
-        center_x=3.0,
-        center_y=3.0,
-        base_z=0.3,
-        height=4.0,
-        r_storage=2.0,
-        insulation_thickness=0.3,
-        shell_thickness=0.02,
-        phase_offset_deg=15.0,
+    """Compact geometry used by the test-suite (roughly a 1:4 scale model)."""
+    geom = BatteryGeometry(
+        cylinder=CylinderGeometry(center_x=3.0, center_y=3.0, base_z=0.3, height=4.0,
+                                  r_storage=2.0, insulation_thickness=0.2,
+                                  insulation_slab_bottom=0.2, insulation_slab_top=0.2,
+                                  roof_angle_deg=15.0, enable_cone_roof=True),
+        heaters=HeaterConfig(power_total=50.0, n_heaters=6,
+                             pattern=HeaterPattern.UNIFORM_ZONE),
+        tubes=TubeConfig(n_tubes=6, active=False),
     )
-    
-    return BatteryGeometry(
-        cylinder=cylinder,
-        heaters=HeaterConfig(power_total=50),
-        tubes=TubeConfig(n_tubes=6),
-        storage_material="steatite",
-        packing_fraction=0.63,
-    )
+    return geom

@@ -1,36 +1,24 @@
-"""
-Package core - Moduli fondamentali per la simulazione
-"""
-
-from .mesh import Mesh3D, MaterialID, BoundaryType, NodeProperties
-from .materials import MaterialManager, ThermalProperties, MaterialType
+"""Core domain model: mesh, materials, geometry, time profiles."""
+from .materials import MATERIALS, MaterialManager, ThermalProperties
+from .mesh import BoundaryType, FaceBC, MaterialID, Mesh3D, NodeProperties
 from .geometry import (
-    BatteryGeometry, CylinderGeometry, 
-    HeaterConfig, TubeConfig,
-    HeaterPattern, TubePattern,
-    HeaterElement, TubeElement,
-    create_small_test_geometry
+    BatteryGeometry,
+    BuildReport,
+    CylinderGeometry,
+    HeaterConfig,
+    HeaterPattern,
+    TubeConfig,
+    TubeElement,
+    TubePattern,
+    create_small_test_geometry,
 )
-from .profiles import (
-    PowerProfile, ExtractionProfile, 
-    InitialCondition, TransientConfig
-)
+from .profiles import ExtractionProfile, InitialCondition, PowerProfile
 
 __all__ = [
-    'Mesh3D',
-    'MaterialID',
-    'BoundaryType',
-    'NodeProperties',
-    'MaterialManager',
-    'ThermalProperties',
-    'MaterialType',
-    'BatteryGeometry',
-    'CylinderGeometry',
-    'HeaterConfig',
-    'TubeConfig',
-    'HeaterPattern',
-    'TubePattern',
-    'HeaterElement',
-    'TubeElement',
-    'create_small_test_geometry',
+    "MATERIALS", "MaterialManager", "ThermalProperties",
+    "BoundaryType", "FaceBC", "MaterialID", "Mesh3D", "NodeProperties",
+    "BatteryGeometry", "BuildReport", "CylinderGeometry", "HeaterConfig",
+    "HeaterPattern", "TubeConfig", "TubeElement", "TubePattern",
+    "create_small_test_geometry",
+    "ExtractionProfile", "InitialCondition", "PowerProfile",
 ]

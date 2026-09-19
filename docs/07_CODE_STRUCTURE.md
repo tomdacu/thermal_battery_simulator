@@ -1,501 +1,62 @@
-# Code Structure - Detailed Module Documentation
-
-## 1. Introduction
-
-This document provides a deep dive into the code structure of the Thermal Battery simulation project. It explains what each module does, its key functions, and how they interact.
-
-**IMPORTANT**: This project follows a **GUI-driven design**. All simulation parameters originate from GUI widgets - there are no hardcoded values in the core modules.
-
----
-
-## 2. Entry Points
-
-### 2.1 `run_gui.py` - Production Entry Point
-
-**Purpose**: Launches the PyQt6 GUI application.
-
-```python
-# Usage
-python run_gui.py
-```
-
-This is the **recommended** way to run the application. All parameters are configured through the graphical interface.
-
----
-
-## 3. Core Modules (`src/core/`)
-
-### 3.1 `mesh.py` - 3D Mesh Data Structure
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `Mesh3D` | Main mesh data class holding all 3D arrays |
-| `MaterialID` | Enum for material identification |
-| `BoundaryType` | Enum for boundary condition types |
-| `NodeProperties` | Properties for a single node |
-
-**Mesh3D Arrays** (all in Fortran order):
-
-| Array | Shape | Type | Description |
-|-------|-------|------|-------------|
-| `T` | (Nx, Ny, Nz) | float64 | Temperature field [K] (Kelvin internally) |
-| `k` | (Nx, Ny, Nz) | float64 | Thermal conductivity [W/(m·K)] |
-| `rho` | (Nx, Ny, Nz) | float64 | Density [kg/m³] |
-| `cp` | (Nx, Ny, Nz) | float64 | Specific heat [J/(kg·K)] |
-| `Q` | (Nx, Ny, Nz) | float64 | Volumetric heat source [W/m³] |
-| `material_id` | (Nx, Ny, Nz) | int32 | Material identifier (MaterialID enum) |
-| `boundary_type` | (Nx, Ny, Nz) | int32 | Boundary condition type (BoundaryType enum) |
-| `bc_h` | (Nx, Ny, Nz) | float64 | Convection coefficient [W/(m²·K)] |
-| `bc_T_inf` | (Nx, Ny, Nz) | float64 | Reference temperature [K] (Kelvin internally) |
-
-**Temperature Convention**: The mesh uses **Kelvin** internally. The GUI displays temperatures in **Celsius** (converted on display).
-
-**Key Methods**:
-
-```python
-# Index conversion (Fortran order)
-p = mesh.ijk_to_linear(i, j, k)  # p = i + j*Nx + k*Nx*Ny
-i, j, k = mesh.linear_to_ijk(p)
-
-# Boundary condition setters
-mesh.set_fixed_temperature_bc('z_min', T=20.0)
-mesh.set_convection_bc('z_max', h=10.0, T_inf=20.0)
-mesh.set_symmetry_bc('x_min')
-```
-
-### 3.2 `geometry.py` - Battery Geometry Definition
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `CylinderGeometry` | 4-zone radial structure (r_storage, insulation_thickness, shell_thickness) |
-| `HeaterConfig` | Heater power, count, pattern configuration |
-| `TubeConfig` | Tube fluid properties and pattern configuration |
-| `HeaterElement` | Single heater element properties |
-| `TubeElement` | Single tube element properties |
-| `BatteryGeometry` | Combines all above + materials |
-| `HeaterPattern` | Enum-like class for heater patterns |
-| `TubePattern` | Enum-like class for tube patterns |
-
-**Central Method - `BatteryGeometry.apply_to_mesh()`**:
-
-This is the key function that maps the analytic geometry to mesh fields:
-
-```python
-def apply_to_mesh(self, mesh: Mesh3D, mat_manager: MaterialManager):
-    """
-    Applies the battery geometry to a mesh.
-    
-    Steps:
-    1. Assign material_id based on radial position
-    2. Set thermal properties (k, rho, cp) for each material
-    3. Generate heater/tube element positions
-    4. Apply heat sources Q for heaters
-    5. Apply internal convection for tubes (if active)
-    6. Set boundary conditions on all faces
-    """
-```
-
-### 3.3 `materials.py` - Material Database
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `MaterialManager` | Loads and provides material properties |
-| `MaterialType` | Enum for material categories |
-| `ThermalProperties` | Dataclass for k, rho, cp values |
-
-**Material Database Location**: `materials_database.py` (project root)
-
-**Usage**:
-
-```python
-mat_manager = MaterialManager()
-
-# Get material by name
-steatite = mat_manager.get_material("steatite")
-print(steatite.k)  # 3.5 W/(m·K)
-
-# List available materials
-mat_manager.list_materials()
-```
-
----
-
-## 4. Solver Modules (`src/solver/`)
-
-### 4.1 `matrix_builder.py` - FDM Matrix Assembly
-
-**Main Function**: `build_steady_state_matrix(mesh)`
-
-Constructs the sparse linear system A·T = b for the steady-state heat equation.
-
-**Algorithm**:
-
-```
-For each node (i, j, k):
-    If DIRICHLET:
-        a_P = 1, b_P = T_fixed
-    
-    If INTERNAL:
-        Use 7-point stencil with harmonic mean for k at faces
-        a_P = Σ(k_face/d²) for all 6 neighbors
-        a_neighbor = -k_face/d²
-        b_P = Q_P * d³  (volumetric source)
-    
-    If CONVECTION (boundary):
-        Add Robin term: a_P += h/d, b_P += h*T_inf/d
-```
-
-**Helper Functions**:
-
-| Function | Purpose |
-|----------|---------|
-| `_get_internal_coefficients_v2()` | Coefficients for internal nodes |
-| `_get_boundary_coefficients()` | Coefficients for boundary nodes |
-| `_harmonic_mean_k()` | Computes k_face from k_P and k_neighbor |
-
-### 4.2 `steady_state.py` - Linear System Solver
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `SolverConfig` | Solver method, tolerance, preconditioner |
-| `SolverResult` | Solution T, convergence info, timing |
-| `SteadyStateSolver` | Main solver class |
-
-**Solver Methods**:
-
-| Method | Description | Best For |
-|--------|-------------|----------|
-| `direct` | LU factorization (spsolve) | Small/medium systems |
-| `cg` | Conjugate Gradient | SPD matrices |
-| `gmres` | GMRES | General systems |
-| `bicgstab` | BiCGSTAB | General systems |
-
-**Usage**:
-
-```python
-config = SolverConfig(method="direct", verbose=True)
-solver = SteadyStateSolver(mesh, config)
-result = solver.solve()
-
-if result.converged:
-    T = result.T  # 1D array in Fortran order
-    T_3d = T.reshape((mesh.Nx, mesh.Ny, mesh.Nz), order='F')
-```
-
----
-
-## 5. Analysis Module (`src/analysis/`)
-
-### 5.1 `power_balance.py` - Energy Balance Calculations
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `PowerBalance` | Dataclass for power balance results |
-| `PowerBalanceAnalyzer` | Computes power flows and energy storage |
-
-**Key Methods**:
-
-```python
-analyzer = PowerBalanceAnalyzer(mesh)
-
-# Power balance
-balance = analyzer.compute_power_balance()
-print(f"P_input: {balance.P_input} W")
-print(f"P_loss: {balance.P_loss_total} W")
-
-# Stored energy
-energy = analyzer.compute_stored_energy(T_ref=20.0)
-print(f"E = {energy['E_kWh']} kWh")
-
-# Radial profile
-r, T = analyzer.compute_radial_temperature_profile(x_c, y_c, z)
-```
-
----
-
-## 6. Visualization Module (`src/visualization/`)
-
-### 6.1 `renderer.py` - 3D Visualization
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `VisualizationConfig` | Colormap, range, styling |
-| `BatteryRenderer` | Standalone PyVista rendering |
-
-**Note**: The GUI uses its own embedded PyVistaQt plotter (`QtInteractor`), not this standalone renderer. This module is primarily for CLI/scripting use.
-
----
-
-## 7. GUI Module (`gui/`)
-
-### 7.1 `main_window.py` - Main Application Window
-
-**This is the CENTRAL module** - all simulation parameters originate here.
-
-**Key Classes**:
-
-| Class | Purpose |
-|-------|---------|
-| `ThermalBatteryGUI` | Main window with all widgets |
-| `SimulationThread` | Background thread for solver |
-
-**Critical Method - `_build_battery_geometry_from_inputs()`**:
-
-This function reads ALL GUI widgets and creates configuration objects:
-
-```python
-def _build_battery_geometry_from_inputs(self):
-    """
-    Reads every GUI widget and creates:
-    - CylinderGeometry
-    - HeaterConfig
-    - TubeConfig
-    - BatteryGeometry
-    
-    Returns: (spacing, Lx, Ly, Lz, BatteryGeometry)
-    """
-    # Step 1: Read domain parameters
-    d = self.spacing_spin.value()
-    Lx = self.lx_spin.value()
-    ...
-    
-    # Step 2: Create geometry configs
-    cylinder = CylinderGeometry(...)
-    heater_config = HeaterConfig(...)
-    tube_config = TubeConfig(...)
-    
-    # Step 3: Combine into BatteryGeometry
-    geom = BatteryGeometry(
-        cylinder=cylinder,
-        heaters=heater_config,
-        tubes=tube_config,
-        ...
-    )
-    
-    return d, Lx, Ly, Lz, geom
-```
-
-**Widget Organization**:
-
-| Tab | Sub-tabs | Contains |
-|-----|----------|----------|
-| Geometry | Cylinder, Insulation, Heaters, Tubes, Mesh | Domain, dimensions, element patterns |
-| Materials | Storage, Insulation, Conditions | Material selection, operating conditions |
-| Analysis | Type, Conditions, Power, Extraction, Save/Load | Analysis config, profiles |
-| Tools | Solver, Statistics, Energy Balance, Materials, Export, Help | Solver settings, results, export |
-
-**Action Flow**:
-
-```
-[Build Mesh] → build_mesh()
-    → _build_battery_geometry_from_inputs()
-    → Mesh3D()
-    → BatteryGeometry.apply_to_mesh()
-    → update_visualization()
-
-[Preview Geometry] → preview_geometry()
-    → _build_battery_geometry_from_inputs()
-    → Render cylinders/elements (no mesh)
-
-[Run Simulation] → run_simulation()
-    → SteadyStateSolver.solve() OR _run_losses_analysis()
-    → update_visualization()
-    → update_energy_balance() OR _update_energy_balance_losses()
-```
-
----
-
-## 8. Data Flow Summary
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              GUI WIDGETS                                 │
-│  lx_spin, power_spin, h_fluid_spin, solver_combo, etc.                  │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                _build_battery_geometry_from_inputs()                     │
-│  Reads ALL widgets, creates CylinderGeometry, HeaterConfig, TubeConfig  │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        BatteryGeometry                                   │
-│  Combines geometry + materials + heater/tube configs                    │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    BatteryGeometry.apply_to_mesh()                       │
-│  Maps analytic geometry → mesh arrays (k, rho, cp, Q, boundaries)       │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                             Mesh3D                                       │
-│  3D arrays: T, k, rho, cp, Q, material_id, boundary_type                │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    build_steady_state_matrix()                           │
-│  Assembles sparse A matrix and b vector from mesh fields                │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      SteadyStateSolver.solve()                           │
-│  Solves A·T = b using direct or iterative method                        │
-└──────────────────────────────────┬──────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Temperature Field (mesh.T)                            │
-│  3D solution used for visualization and analysis                        │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 9. Indexing Convention
-
-The entire codebase uses **Fortran-order** (column-major) indexing:
-
-```python
-# 3D index (i, j, k) → Linear index p
-p = i + j * Nx + k * Nx * Ny
-
-# Linear index p → 3D index (i, j, k)
-i = p % Nx
-j = (p // Nx) % Ny
-k = p // (Nx * Ny)
-```
-
-**Why Fortran order?**
-- Matches NumPy's default for `order='F'`
-- Efficient for z-first iteration (common in FDM)
-- Consistent across all modules
-
----
-
-## 10. New Modules (v2.0)
-
-### 10.1 Transient Solver (`src/solver/transient.py`)
-
-**Key Classes:**
-
-| Class | Purpose |
-|-------|---------|
-| `TransientSolverConfig` | Time stepping and solver configuration |
-| `TransientSolver` | Backward Euler time-stepping solver |
-
-**Key Methods:**
-```python
-class TransientSolver:
-    def step(self, Q_current, extraction_power) -> SolverResult:
-        """Advances one time step"""
-    
-    def run(self, power_profile, extraction_profile) -> TransientResults:
-        """Runs full transient simulation"""
-```
-
-### 10.2 Profiles (`src/core/profiles.py`)
-
-**Key Classes:**
-
-| Class | Purpose |
-|-------|---------|
-| `PowerProfile` | Time-dependent heater power (constant, step, ramp, sinusoidal) |
-| `ExtractionProfile` | Time-dependent extraction (constant, modulated, T-controlled) |
-| `InitialCondition` | Starting temperature distribution |
-| `TransientConfig` | Time discretization parameters (t_end, dt) |
-
-### 10.3 State Manager (`src/io/state_manager.py`)
-
-**Key Classes:**
-
-| Class | Purpose |
-|-------|---------|
-| `SimulationState` | Complete simulation state (T, mesh, config) |
-| `StateManager` | HDF5 save/load with geometry hash verification |
-| `TransientResults` | Time series of transient simulation results |
-
-### 10.4 Energy Balance (`src/analysis/energy_balance.py`)
-
-**Key Classes:**
-
-| Class | Purpose |
-|-------|---------|
-| `EnergyBalanceResult` | Dataclass with energy/exergy terms |
-| `EnergyBalanceAnalyzer` | Computes stored energy, losses, exergy |
-
-### 10.5 Analysis Tab Widgets (`gui/analysis_tab.py`)
-
-**Key Classes:**
-
-| Class | Purpose |
-|-------|---------|
-| `AnalysisTypeWidget` | Radio buttons for Steady/Losses/Transient |
-| `InitialConditionWidget` | Initial temperature configuration |
-| `PowerProfileWidget` | Heater power profile editor with preview |
-| `ExtractionProfileWidget` | Extraction profile editor |
-| `SaveLoadWidget` | HDF5 save/load interface |
-
----
-
-## 11. Extension Points
-
-To add new features:
-
-| Feature | Files to Modify |
-|---------|----------------|
-| New material | `materials_database.py` |
-| New heater pattern | `geometry.py` (HeaterConfig) |
-| New tube pattern | `geometry.py` (TubeConfig) |
-| New solver method | `steady_state.py` |
-| New boundary type | `mesh.py`, `matrix_builder.py` |
-| New analysis metric | `power_balance.py`, `energy_balance.py` |
-| New GUI widget | `main_window.py` |
-| New power profile | `profiles.py` (PowerProfile) |
-| New state format | `state_manager.py` |
-
----
-
-## 12. Testing
-
-Tests are in the `tests/` directory:
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with coverage
-pytest tests/ --cov=src
-```
-
-Key test files:
-- `test_core.py` - Tests for mesh, geometry, materials
-- `test_solver.py` - Tests for matrix builder and solver
-
----
-
-## 13. Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `config/default_config.yaml` | Default GUI values (not yet used) |
-| `requirements.txt` | Python dependencies |
-
+# 7. Code structure
+
+Public names are the ones re-exported by the packages
+(`src/__init__.py`, `src/core/__init__.py`, `src/solver/__init__.py`,
+`src/analysis/__init__.py`, `src/io/__init__.py`, `src/viz/__init__.py`).
+
+## `src/`
+
+| module | responsibility | public API |
+|---|---|---|
+| `constants.py` | physical constants, default temperatures, Kelvin contract | `T0`, `SIGMA`, `T_AMBIENT_DEFAULT`, `T_GROUND_DEFAULT`, `T_INITIAL_DEFAULT`, `K_AIR`, `RHO_AIR`, `CP_AIR`, `PACKING_FRACTION_DEFAULT`, `DEFAULT_SPACING` |
+| `units.py` | degC ↔ K conversion and the Kelvin guard | `c_to_k`, `k_to_c`, `check_kelvin` |
+| `core/mesh.py` | the grid, its fields and the face conditions | `Mesh3D`, `MaterialID`, `BoundaryType`, `FaceBC`, `NodeProperties` |
+| `core/grid.py` | linear-index tables shared by assembler and analysis | `GridIndex`, `FACE_SLICES`, `INNER_SLICES` |
+| `core/physics.py` | interface coefficients (harmonic mean, half cell, radiation) | `harmonic_mean`, `half_cell_h`, `radiation_h` |
+| `core/materials.py` | material database + packed-bed model | `MATERIALS`, `ThermalProperties`, `MaterialManager` |
+| `core/geometry.py` | geometry configuration and voxel painting | `BatteryGeometry`, `CylinderGeometry`, `HeaterConfig`, `HeaterPattern`, `HeaterElement`, `TubeConfig`, `TubePattern`, `TubeElement`, `BuildReport`, `create_small_test_geometry` |
+| `core/profiles.py` | time profiles and initial conditions | `PowerProfile`, `ExtractionProfile`, `InitialCondition` |
+| `solver/matrix.py` | steady/transient assembly, Dirichlet elimination | `build_steady_matrix`, `build_transient_operators`, `steady_rhs`, `transient_rhs`, `apply_dirichlet`, `dirichlet_rows`, `face_coefficients` |
+| `solver/linear.py` | method/preconditioner selection, diagnostics | `LinearConfig`, `LinearResult`, `solve_linear`, `PreconditionerCache`, `is_symmetric`, `fingerprint`, `set_num_threads` |
+| `solver/steady.py` | steady driver (radiation Picard sweeps) | `SteadyStateSolver`, `SolverConfig`, `SolverResult`, `solve_steady_state` |
+| `solver/transient.py` | backward-Euler driver, source/extraction handling, cancellation | `TransientSolver`, `TransientConfig`, `run_transient_simulation` |
+| `solver/results.py` | transient time-series container | `TransientResults` |
+| `analysis/fluxes.py` | the single flux evaluator (envelope, box faces, tubes) | `domain_fluxes`, `domain_face_flux`, `envelope_fluxes`, `tube_flux`, `stored_energy`, `stored_exergy`, `destroyed_exergy` |
+| `analysis/balance.py` | energy/exergy snapshot of a mesh state | `Balance`, `compute_balance`, `storage_capacity`, `thermal_autonomy` |
+| `analysis/losses.py` | losses analysis (power needed to hold a set point) | `LossesConfig`, `LossesResult`, `solve_losses` |
+| `io/state.py` | HDF5 state, geometry hash, unit upgrade | `StateManager`, `SimulationState`, `StateError`, `geometry_hash`, `face_bc_from_state` |
+| `viz/scene.py` | rendering helpers shared by GUI and scripts | `to_image_data`, `field_values`, `color_limits`, `cell_centers`, `MATERIAL_NAMES`, `MATERIAL_COLORS`, `export_vtk`, `export_csv` |
+
+## `gui/`
+
+| module | responsibility |
+|---|---|
+| `main_window.py` | window layout and wiring only (~330 lines) |
+| `controller.py` | `RunConfig`, `SimulationJob`, `SimulationController` (threads, cancel, state) |
+| `widgets.py` | widget factories; combos carry their value in `itemData` |
+| `assets.py` | repository assets (window icon) resolved by path, not by cwd |
+| `units.py` | display conversions (degC) |
+| `safe.py` | `safe_slot` guard against PyQt aborting on slot exceptions |
+| `views/geometry_panel.py` | cylinder, insulation, heaters, tubes, mesh sub-tabs |
+| `views/materials_panel.py` | storage medium, insulation, ambient conditions (single authority) |
+| `views/analysis_panel.py` | analysis type, initial condition, power profile, extraction, save/load |
+| `views/solver_panel.py` | linear solver settings + losses iteration controls |
+| `views/results_panel.py` | statistics, energy balance, materials, transient, log |
+| `views/viz_view.py` | PyVista scene, clip/opacity/colormap, geometry preview, graceful degradation |
+
+## `tests/` and `scripts/`
+
+| file | content |
+|---|---|
+| `conftest.py` | shared fixtures: 1D slab, adiabatic box, complete storage model |
+| `test_core.py` | units contract, mesh, materials, geometry, profiles |
+| `test_solver.py` | assembly exactness, reference matrix, analytic regressions, backends |
+| `test_analysis.py` | flux closure, losses iteration, HDF5 round trip |
+| `test_gui.py` | head-less GUI smoke test (skipped without PyQt6) |
+| `scripts/benchmark.py` | assembly/solve timings per mesh size |
+
+## Entry point
+
+`run_gui.py` adds the repository root to `sys.path` and calls
+`gui.main_window.main()`.  Scripts import `src` directly; no GUI import is
+needed for any simulation.

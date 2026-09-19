@@ -1,271 +1,189 @@
-# FDM Discretization - Finite Difference Method
+# 2. FDM discretization
 
-## 1. Introduction to Finite Difference Method
+Implemented in `src/solver/matrix.py` (assembly), `src/core/physics.py` (face
+coefficients) and `src/solver/steady.py` / `transient.py` (the drivers).  The
+scheme is pinned by `tests/test_solver.py`, including a comparison against an
+independently written reference assembly.
 
-The finite difference method (FDM) approximates derivatives with difference quotients,
-transforming PDEs into systems of algebraic equations.
+## 1. Derivatives
 
----
+Centred differences, second order:
 
-## 2. Derivative Approximation
+$$T'_i \approx \frac{T_{i+1}-T_{i-1}}{2\Delta} + O(\Delta^2), \qquad
+T''_i \approx \frac{T_{i+1}-2T_i+T_{i-1}}{\Delta^2} + O(\Delta^2)$$
 
-### 2.1 First Derivative
+On the uniform Cartesian grid ($\Delta = \Delta x = \Delta y = \Delta z$, see
+`Mesh3D.spacing`):
 
-**Forward difference:**
-$$\frac{\partial T}{\partial x}\bigg|_i \approx \frac{T_{i+1} - T_i}{\Delta x} + O(\Delta x)$$
+$$\nabla^2 T_P \approx \frac{1}{\Delta^2}
+\left[T_E+T_W+T_N+T_S+T_U+T_D-6T_P\right]$$
 
-**Backward difference:**
-$$\frac{\partial T}{\partial x}\bigg|_i \approx \frac{T_i - T_{i-1}}{\Delta x} + O(\Delta x)$$
+## 2. Cell balance and coefficient units
 
-**Centered difference:**
-$$\frac{\partial T}{\partial x}\bigg|_i \approx \frac{T_{i+1} - T_{i-1}}{2\Delta x} + O(\Delta x^2)$$
+For cell $P$ with volume $V = \Delta^3$ and face area $A = \Delta^2$, the steady
+balance $\sum_{faces} k_{face}(T_{nb}-T_P)A/\Delta + QV = 0$ divided by $V$ is
+what the code assembles:
 
-### 2.2 Second Derivative
+$$a_P T_P - \sum_{nb} a_{nb} T_{nb} = Q, \qquad
+a_{nb} = \frac{k_{face}}{\Delta^2}\ \left[\frac{\mathrm{W}}{\mathrm{m^3 K}}\right]$$
 
-**Centered difference:**
-$$\frac{\partial^2 T}{\partial x^2}\bigg|_i \approx \frac{T_{i+1} - 2T_i + T_{i-1}}{\Delta x^2} + O(\Delta x^2)$$
+**All coefficients are per unit volume, the source is volumetric [W/m³].**  This
+single convention is what makes the steady and the transient operators
+compatible; §6 shows what breaks without it.
 
----
+## 3. Variable conductivity
 
-## 3. 3D Laplacian (Uniform Cartesian Mesh)
+At an interface the two half cells are in series, so the face conductivity is
+their harmonic mean (`src/core/physics.py::harmonic_mean`):
 
-For a mesh with uniform spacing $\Delta = \Delta x = \Delta y = \Delta z$:
+$$k_{face} = \frac{2 k_1 k_2}{k_1 + k_2 + \epsilon}$$
 
-$$\nabla^2 T_{i,j,k} \approx \frac{1}{\Delta^2}[T_{i+1,j,k} + T_{i-1,j,k} + T_{i,j+1,k} + T_{i,j-1,k} + T_{i,j,k+1} + T_{i,j,k-1} - 6T_{i,j,k}]$$
+Because the medium is voxelised, the interface always lies on a face between two
+cells and the two half cells have the same thickness, which is exactly the
+assumption the harmonic mean encodes.
 
-### 3.1 Matrix Form
+## 4. Assembled row
 
-For each internal node, the steady-state equation $\nabla^2 T = -Q/k$ becomes:
-
-$$\frac{1}{\Delta^2}[T_{E} + T_{W} + T_{N} + T_{S} + T_{U} + T_{D} - 6T_{P}] = -\frac{Q_P}{k}$$
-
-Where:
-- P = Principal node (i,j,k)
-- E = East (i+1,j,k), W = West (i-1,j,k)
-- N = North (i,j+1,k), S = South (i,j-1,k)  
-- U = Up (i,j,k+1), D = Down (i,j,k-1)
-
-Rearranging:
-
-$$-6T_P + T_E + T_W + T_N + T_S + T_U + T_D = -\frac{Q_P \Delta^2}{k}$$
-
----
-
-## 4. Materials with Variable Conductivity
-
-When $k$ is not constant (interfaces between different materials), the **harmonic mean**
-is used for the interface conductivity:
-
-$$k_{i+1/2} = \frac{2 k_i k_{i+1}}{k_i + k_{i+1}}$$
-
-### 4.1 Conservative Scheme
-
-To ensure energy conservation:
-
-$$\nabla \cdot (k \nabla T) \approx \frac{1}{\Delta^2}\left[k_{E}(T_E - T_P) + k_W(T_W - T_P) + ...\right]$$
-
-Where $k_E = k_{i+1/2,j,k}$, etc.
-
-The equation for node P becomes:
-
-$$(k_E + k_W + k_N + k_S + k_U + k_D) T_P - k_E T_E - k_W T_W - k_N T_N - k_S T_S - k_U T_U - k_D T_D = Q_P \Delta^2$$
-
----
-
-## 5. Boundary Conditions
-
-### 5.1 Dirichlet (Fixed Temperature)
-
-If the boundary node has $T_{boundary} = T_{prescribed}$:
-
-**Option 1:** Insert directly into the system
-- Corresponding row: $1 \cdot T_{boundary} = T_{prescribed}$
-- Contribution moved to RHS vector of neighboring equations
-
-**Option 2:** Ghost node
-- A virtual node is created beyond the boundary
-- The condition is imposed and the ghost node is eliminated
-
-### 5.2 Neumann (Zero Flux - Adiabatic)
-
-For an adiabatic boundary on $x = x_{max}$:
-
-$$\frac{\partial T}{\partial x}\bigg|_{boundary} = 0$$
-
-Approximation: $T_{i+1} = T_i$ (reflected ghost node)
-
-The boundary node equation uses the reflected value.
-
-### 5.3 Robin (Convection)
-
-For convection at the boundary, the energy balance on the halved control volume at the boundary leads to an effective exchange coefficient that accounts for both conductive resistance (half cell) and convective resistance:
-
-$$R_{tot} = R_{cond} + R_{conv} = \frac{\Delta/2}{k} + \frac{1}{h}$$
-
-The heat flux is therefore:
-$$q = \frac{T_{internal} - T_\infty}{R_{tot}} = \frac{T_{internal} - T_\infty}{\frac{\Delta}{2k} + \frac{1}{h}}$$
-
-In coefficient form for the matrix:
-$$a_{bc} = \frac{1}{R_{tot} \cdot \Delta} = \frac{2kh}{2k + h\Delta} \cdot \frac{1}{\Delta}$$
-
-This approach provides greater accuracy than simply approximating the first derivative at the boundary.
-
----
-
-## 6. Implicit Scheme for Transient (Future Implementation)
-
-### 6.1 Backward Euler Method (Implicit)
-
-$$\rho c_p \frac{T^{n+1} - T^n}{\Delta t} = \nabla \cdot (k \nabla T^{n+1}) + Q$$
-
-Rearranging in matrix form:
-
-$$(\mathbf{M} + \Delta t \mathbf{L}) \mathbf{T}^{n+1} = \mathbf{M} \mathbf{T}^n + \Delta t \mathbf{Q}$$
-
-Where $\mathbf{M}$ is the mass matrix (thermal capacity) and $\mathbf{L}$ is the negative Laplacian.
-
-> **Note**: Transient simulation is planned for future implementation. The current version supports steady-state only.
-
----
-
-## 7. Matrix Structure
-
-### 7.1 Linear System
-
-The FDM system can be written as:
-
-$$\mathbf{A} \cdot \mathbf{T} = \mathbf{b}$$
-
-Where:
-- $\mathbf{A}$ = coefficient matrix (sparse)
-- $\mathbf{T}$ = unknown temperature vector
-- $\mathbf{b}$ = known terms vector
-
-### 7.2 Structure of Matrix A
-
-For a 3D grid with $N_x \times N_y \times N_z$ nodes, the matrix is constructed in **Fortran order (column-major)**, where the $i$ index (X) is the fastest, followed by $j$ (Y) and finally $k$ (Z).
-
-- Dimension: $N \times N$ where $N = N_x \cdot N_y \cdot N_z$
-- Banded structure with 7 diagonals (3D)
-- Sparse matrix (many zeros)
-
-**Diagonal pattern:**
-- Main diagonal: coefficient of node P
-- Diagonals ±1: coefficients E/W (X direction)
-- Diagonals ±$N_x$: coefficients N/S (Y direction)
-- Diagonals ±$N_x N_y$: coefficients U/D (Z direction)
-
-### 7.3 Example Matrix Row
-
-For an internal node with linear index $p$:
+For an interior node $P$ with linear index $p$ (`GridIndex.flat`, Fortran order):
 
 ```
-A[p, p-Nx*Ny] = -k_d / Δ²     (Down contribution)
-A[p, p-Nx]    = -k_s / Δ²     (South contribution)
-A[p, p-1]     = -k_w / Δ²     (West contribution)
-A[p, p]       = (k_e+k_w+k_n+k_s+k_u+k_d) / Δ²  (diagonal)
-A[p, p+1]     = -k_e / Δ²     (East contribution)
-A[p, p+Nx]    = -k_n / Δ²     (North contribution)
-A[p, p+Nx*Ny] = -k_u / Δ²     (Up contribution)
-
-b[p] = Q_p
+A[p, p-Nx*Ny] = -k_D/Δ²      A[p, p]       = (k_E+k_W+k_N+k_S+k_U+k_D)/Δ²
+A[p, p-Nx]    = -k_S/Δ²      A[p, p+1]     = -k_E/Δ²
+A[p, p-1]     = -k_W/Δ²      A[p, p+Nx]    = -k_N/Δ²
+                             A[p, p+Nx*Ny] = -k_U/Δ²
+b[p] = Q_source[p] + Q_sink[p]
 ```
 
-Where $k_e, k_w, ...$ are the harmonic mean conductivities at the interfaces.
+Faces on the box boundary get no off-diagonal entry (their coefficient is zeroed
+in `face_coefficients`), so a node on an edge sees only the neighbours it really
+has.
 
----
+## 5. Boundary conditions
 
-## 8. Index Linearization
+### 5.1 Dirichlet - symmetric elimination
 
-### 8.1 From 3D to 1D (Fortran Order)
+A fixed-temperature face pins its nodes: `dirichlet_rows()` returns the mask and
+the values, and `apply_dirichlet()` (a) moves the known contribution of each
+pinned node into the right-hand side of the neighbouring equations, (b) zeroes
+that **column**, and (c) replaces the pinned row with the identity.
 
-To convert from indices $(i, j, k)$ to linear index $p$:
+Zeroing the column is what keeps the matrix **symmetric**.  Replacing only the
+row (the previous behaviour) left it asymmetric, which made BiCGSTAB break down
+(`info=-10`) and made CG inapplicable in principle.  `tests/test_solver.py`
+asserts `is_symmetric(matrix)` and that CG converges on it.
 
-$$p = i + j \cdot N_x + k \cdot N_x \cdot N_y$$
+The pinned node holds the *face* temperature: the surface is treated as if it
+passed through the first cell centre, a first-order boundary artefact of
+$O(q''\Delta/2k)$ that is visible in the first cell next to the face.
 
-### 8.2 From 1D to 3D
+### 5.2 Neumann - imposed flux
 
-For the inverse conversion:
+A flux $q''$ [W/m²] entering the domain adds $q''/\Delta$ to the right-hand side
+of the face nodes (per unit volume: $q''A/V = q''/\Delta$).  $\varepsilon = 0$ is
+the adiabatic case, which is also the default of the `FaceBC` dataclass
+(`BoundaryType.INTERNAL`).
 
-$$k = p // (N_x \cdot N_y)$$
-$$j = (p \% (N_x \cdot N_y)) // N_x$$
-$$i = p \% N_x$$
+### 5.3 Robin - convection and radiation
 
----
+The surface sits $\Delta/2$ away from the node centre, so the film resistance is
+in series with the half cell:
 
-## 9. Efficient Implementation
+$$R_{tot} = \frac{\Delta}{2k} + \frac{1}{h} \quad\Longrightarrow\quad
+h_{eff} = \frac{2kh}{2k + h\Delta}, \qquad a_{bc} = \frac{h_{eff}}{\Delta}$$
 
-### 9.1 Sparse Matrices
+(previous documentation labelled the coefficient "h/d": the half-cell series
+form above is the one the code uses, `half_cell_h`).  With radiation enabled the
+same expression is used with $h \to h + h_r$.
 
-Use `scipy.sparse` for sparse matrices:
-- `csr_matrix`: Compressed Sparse Row - efficient for multiplication
-- `csc_matrix`: Compressed Sparse Column - efficient for slicing
-- `lil_matrix`: List of Lists - efficient for construction
+Each of the six faces contributes with **its own** $h$ and $T_\infty$
+(`Mesh3D.face_bc`), and a node on an edge or corner accumulates one term per
+exposed face - the correct treatment, and the reason a corner of the top face no
+longer borrows the top face's coefficient for its lateral faces.
 
-### 9.2 Solvers
+### 5.4 Internal convection (heat-exchanger tubes)
 
-**Direct:**
-- `scipy.sparse.linalg.spsolve`: Sparse LU factorization
-- Robust but memory O(N^1.5) for 3D
+Tube cells are interior cells with `boundary_type == CONVECTION`.  They are the
+tube wall, so the fluid exchange is applied to the cell volume directly:
 
-**Iterative:**
-- `scipy.sparse.linalg.cg`: Conjugate Gradient (symmetric positive definite matrix)
-- `scipy.sparse.linalg.gmres`: General Minimal Residual
-- `scipy.sparse.linalg.bicgstab`: BiCGStab
+$$a_{tube} = \frac{h}{\Delta}, \qquad b_{tube} = a_{tube} T_{fluid}$$
 
-**Preconditioners:**
-- ILU (Incomplete LU)
-- Jacobi
-- SSOR
-- AMG (Algebraic Multigrid via PyAMG)
+i.e. a cell-sized surface area $A=\Delta^2$ with $V=\Delta^3$.  The wall
+conduction resistance is not modelled separately: the cell holds the tube-wall
+material (steel) and the film coefficient is the tube-side one.
 
-### 9.3 Vectorized Implementation
+## 6. Transient formulation
 
-The matrix builder uses vectorized NumPy operations for 10-50x speedup over loop-based approaches:
+Backward Euler (unconditionally stable, first order in time):
 
-```python
-# Vectorized coefficient calculation
-k_e = 2 * k[1:, :, :] * k[:-1, :, :] / (k[1:, :, :] + k[:-1, :, :])
-# Apply to all nodes simultaneously
-```
+$$\rho c_p \frac{T^{n+1}-T^n}{\Delta t} = \nabla\cdot(k\nabla T^{n+1}) + Q$$
 
----
+assembled per unit volume as
 
-## 10. Validation
+$$\left(\underbrace{\mathrm{diag}(\rho c_p)/\Delta t + L}_{A}\right) T^{n+1}
+= \mathrm{diag}(\rho c_p)/\Delta t \cdot T^n + b$$
 
-### 10.1 Analytical Solutions
+* `M = diag(rho*cp)` [J/(m³·K)] - **no cell volume**.  `L` is per unit volume, so
+  a $V$-factor would scale every time constant by $1/\Delta^3$ and make the answer
+  depend on the mesh size (that defect is the subject of the first regression
+  test: the adiabatic heating rate must be $\Delta T = Qt/\rho c_p$ for any grid).
+* The Dirichlet columns are eliminated *after* the mass diagonal is added, so the
+  fixed temperatures hold exactly (`test_transient_enforces_dirichlet_faces_exactly`).
+* The operators are built once per `dt`; the right-hand side is refreshed every
+  step with the current sources (`transient_rhs`).  Warm starts (`x0 = T^n`) and
+  the cached preconditioner make a step cheap.
 
-To validate the code, compare with known solutions:
+## 7. Matrix structure and indexing
 
-**1D steady-state case:**
-$$T(x) = T_0 + \frac{q''}{k} x - \frac{Q}{2k} x^2$$
+**Fortran order**, $p = i + jN_x + kN_xN_y$ (`Mesh3D.ijk_to_linear`), matching
+`field.ravel(order="F")` used by every other module.  The matrix is sparse with
+at most seven non-zeros per row, assembled as COO in one shot (pre-computed
+`nnz`) and converted to CSR.
 
-**3D case with uniform source:**
-Sphere in infinite domain, analytical solution for comparison.
+| offset | neighbour |
+|---|---|
+| $\pm 1$ | W/E (x) |
+| $\pm N_x$ | S/N (y) |
+| $\pm N_xN_y$ | D/U (z) |
 
-### 10.2 Energy Balance
+## 8. Solvers
 
-Verify that:
-$$P_{in} = P_{out} + \Delta E_{stored}$$
+`src/solver/linear.py` selects the method and reports every substitution it had
+to make:
 
-With tolerance < 1% for sufficiently fine mesh.
+| method | when |
+|---|---|
+| `direct` (sparse LU) | small meshes, reference answers; memory grows fast (57 s at 56 k cells, see `scripts/benchmark.py`) |
+| `cg` | symmetric systems only - refused with a note on anything else |
+| `bicgstab` | general, the GUI default |
+| `gmres` | alternative for difficult systems |
 
----
+Preconditioners: `none`, `jacobi`, `ilu`, `amg_rs`, `amg_sa` (PyAMG), with the
+expensive AMG hierarchy cached while the matrix content is unchanged
+(`fingerprint`).  Optional GPU acceleration (`accelerators.py`): CuPy/CUDA and
+PyOpenCL, used above 50 000 cells; the OpenCL path falls back to `float32` on
+devices without `cl_khr_fp64` and warns.
 
-## 11. Mesh Convergence
+The relative residual $\|Ax-b\|/\|b\|$ is always recomputed on the host after the
+solve, so the reported number does not depend on the solver's own bookkeeping.
 
-### 11.1 Convergence Study
+## 9. Validation
 
-Run the simulation with progressively finer meshes:
-- Mesh 1: N = 20
-- Mesh 2: N = 40
-- Mesh 3: N = 80
+* **Exactness**: with uniform $k$ and two Dirichlet faces the discrete solution
+  is exactly the analytic parabola, including the source term
+  (`test_steady_solution_is_exact_for_dirichlet_and_source`).
+* **Reference assembly**: every row of the production matrix equals an
+  independently written, unvectorised assembly
+  (`test_matrix_matches_an_independent_assembly`).
+* **Flux consistency**: the surface integrals of §5 satisfy
+  $P_{in} = P_{out}$ to <1 % on convective-only configurations, and the
+  half-cell Robin flux matches the analytic wall resistance within 2 %.
+* **Mesh convergence**: refine $\Delta$, the interior error must fall with the
+  expected order; the transient rate must not move at all (§6).
 
-Verify that $||T_{N} - T_{N/2}||$ decreases with expected order (second order for centered scheme).
+## 10. Performance notes
 
-### 11.2 Stopping Criterion
-
-Convergence achieved when:
-$$\frac{||T_{N} - T_{N/2}||_\infty}{||T_{N}||_\infty} < \epsilon$$
-
-With $\epsilon$ typically 0.01 (1%).
+Assembly is fully vectorised (`face_coefficients` builds the six coefficient
+arrays at once) plus one COO construction; no Python loop over cells.  Warm
+starts and the preconditioner cache keep repeated solves (losses iteration,
+transient stepping) cheap.  `scripts/benchmark.py` prints the numbers for the
+mesh sizes you care about.

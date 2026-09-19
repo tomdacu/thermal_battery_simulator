@@ -1,257 +1,148 @@
-# Heat Transfer Theory - Thermal Battery Simulation
+# 1. Heat transfer theory
 
-## 1. Simulation Objectives
+## 1.1 What the simulation predicts
 
-The simulation aims to predict the spatial temperature distribution inside a thermal energy storage system. This enables:
-- Identification of thermal stagnation zones or excessive heat losses.
-- Calculation of actual energy capacity based on non-uniform temperature distribution.
-- Evaluation of the effectiveness of heat extraction (tubes) and heating (resistors) systems.
+The spatial temperature distribution inside a thermal energy storage unit (a
+"sand battery"): where heat stagnates, how much energy is really stored, how
+much leaks to the environment, and how the unit responds to a heating or
+extraction schedule.
 
----
-
-## 2. Fundamental Equations
-
-### 2.1 General Heat Equation
-
-The equation governing temperature distribution in a solid is:
+## 1.2 Governing equation
 
 $$\rho c_p \frac{\partial T}{\partial t} = \nabla \cdot (k \nabla T) + Q$$
 
-Where:
-- $\rho$ = material density [kg/m³]
-- $c_p$ = specific heat at constant pressure [J/(kg·K)]
-- $T$ = temperature [K or °C]
-- $t$ = time [s]
-- $k$ = thermal conductivity [W/(m·K)]
-- $Q$ = volumetric heat source/sink [W/m³]
-
-### 2.2 Steady-State Case
-
-When $\frac{\partial T}{\partial t} = 0$:
+with $\rho$ [kg/m³], $c_p$ [J/(kg·K)], $k$ [W/(m·K)] and the volumetric source
+$Q$ [W/m³].  Steady state drops the time derivative:
 
 $$\nabla \cdot (k \nabla T) + Q = 0$$
 
-For constant conductivity:
+**Unit contract.**  Inside `src/` every temperature is an absolute temperature in
+**Kelvin**; the GUI works in degC and converts in `gui/units.py`
+(`src/constants.py`, `src/units.py`).  Conduction and convection only involve
+temperature *differences*, but radiation, exergy and the stored energy reference
+do not, which is why the convention is enforced (`check_kelvin`).
 
-$$k \nabla^2 T + Q = 0$$
+## 1.3 Mechanisms
 
----
+**Conduction** (Fourier): $q'' = -k \nabla T$.
 
-## 3. Heat Transfer Mechanisms
+**Convection** (Newton): $q'' = h (T_s - T_\infty)$, $h$ in W/(m²·K).
 
-### 3.1 Conduction (Fourier's Law)
+| Situation | typical $h$ |
+|---|---|
+| natural convection, air | 5–25 |
+| forced convection, air | 25–250 |
+| natural convection, water | 100–900 |
+| forced convection, water | 50–20 000 |
 
-The heat flux by conduction is:
+**Radiation** (Stefan–Boltzmann): $q'' = \varepsilon \sigma (T_s^4 - T_{surr}^4)$
+with $\sigma = 5.670\cdot10^{-8}$ W/(m²·K⁴).
 
-$$\vec{q} = -k \nabla T$$
+The solver treats radiation **optionally and linearised** (off by default):
+$h_r = \varepsilon \sigma (T_s + T_\infty)(T_s^2 + T_\infty^2)$ so that
+$q'' \approx h_r (T_s - T_\infty)$ (`src/core/physics.py::radiation_h`).  In the
+steady solver $h_r$ is refreshed in a Picard sweep
+(`src/solver/steady.py`, `SolverConfig.radiation`, `max_picard`); in the
+transient the operators are rebuilt at every step when radiation is on.  At the
+temperatures this unit reaches (500–600 °C on the shell) radiation is of the same
+order as the convective loss, so leaving it off is a deliberate, visible choice -
+the GUI exposes it in *Materials → Conditions* and *Tools → Solver*.
 
-In one-dimensional scalar form:
+## 1.4 Thermal resistances
 
-$$q = -k \frac{dT}{dx}$$
+Series resistances add: $q = \Delta T / R_{tot}$ with
 
-### 3.2 Convection (Newton's Law)
+$$R_{cond,wall} = \frac{L}{kA}, \qquad
+R_{cond,cyl} = \frac{\ln(r_2/r_1)}{2\pi k L}, \qquad
+R_{conv} = \frac{1}{hA}.$$
 
-The heat flux by convection between a surface and a fluid:
+The discretisation uses exactly this: the conductance of a face between two
+cells is the series of two half cells, $k_{face} = 2 k_1 k_2/(k_1+k_2)$, and a
+convective surface adds the film in series with the half cell it sits on
+(`half_cell_h = 2kh/(2k+hd)`, see [02](02_FDM_DISCRETIZATION.md) §5).
 
-$$q = h (T_s - T_\infty)$$
+## 1.5 Porous storage medium
 
-Where:
-- $h$ = convective heat transfer coefficient [W/(m²·K)]
-- $T_s$ = surface temperature
-- $T_\infty$ = fluid temperature far from the surface
+The storage region is a packed bed: solid particles with air in the voids.
+With packing fraction $\phi_x$ (solid fraction) and porosity $\phi = 1-\phi_x$,
+`src/core/materials.py::MaterialManager.compute_effective_properties` uses
 
-**Typical values of h:**
-| Condition | h [W/(m²·K)] |
-|-----------|--------------|
-| Natural convection in air | 5-25 |
-| Forced convection in air | 25-250 |
-| Natural convection in water | 100-900 |
-| Forced convection in water | 50-20,000 |
+$$k_{eff} = k_{solid}^{1-\phi}\, k_{fluid}^{\phi}, \qquad
+\rho_{eff} = (1-\phi)\rho_s + \phi \rho_f, \qquad
+c_{p,eff} = \frac{(1-\phi)\rho_s c_{p,s} + \phi \rho_f c_{p,f}}{\rho_{eff}}$$
 
-### 3.3 Radiation (Stefan-Boltzmann Law)
+(the geometric mean is the standard interpolation for a random two-phase
+medium; the density is arithmetic and the heat capacity is mass-weighted, so
+$\rho_{eff} c_{p,eff}$ is the arithmetic mean of the volumetric capacities).
+The default packing fraction is 0.63; the GUI allows 0.20–0.90.
 
-$$q = \epsilon \sigma (T_s^4 - T_{surr}^4)$$
+Properties are **constant with temperature**: the previous temperature-dependent
+hooks were never called by any solver and were removed rather than pretending.
+Over a 20–600 °C operating range a real $k(T)$ can vary by tens of percent, so
+this is an assumption to state in a report, not a hidden one.
 
-Where:
-- $\epsilon$ = surface emissivity (0-1)
-- $\sigma$ = 5.67 × 10⁻⁸ W/(m²·K⁴)
+## 1.6 Boundary conditions
 
-**Note:** For typical Thermal Battery temperatures (< 600°C), radiation 
-is significant but often linearized or included in an effective h coefficient.
+* **Dirichlet** (prescribed temperature): $T|_\Gamma = T_{prescribed}$; used for
+  the ground under the foundation.
+* **Neumann** (prescribed flux): $-k\,\partial T/\partial n|_\Gamma = q''$;
+  $q''=0$ is the adiabatic (symmetry) case.
+* **Robin** (convection/radiation): $-k\,\partial T/\partial n|_\Gamma = h(T_s-T_\infty)$;
+  used on every air-exposed face.
 
----
+Each of the six domain faces carries its own condition
+(`Mesh3D.face_bc`, `FaceBC`), so a face can be convective while its neighbour is
+adiabatic and a corner node receives one contribution per exposed face.
 
-## 4. Thermal Resistances
+## 1.7 Dimensionless numbers
 
-### 4.1 Electrical Analogy
+$$Bi = \frac{h L_c}{k}, \qquad Fo = \frac{\alpha t}{L_c^2}, \qquad
+\alpha = \frac{k}{\rho c_p}$$
 
-Like in an electrical circuit:
-- Temperature ↔ Voltage
-- Heat flux ↔ Current
-- Thermal resistance ↔ Electrical resistance
+With $Bi \ll 1$ the solid is nearly isothermal (lumped capacitance); $Fo$
+measures how far the transient is from equilibrium.  Both are useful to sanity
+check a result before trusting it.
 
-$$q = \frac{\Delta T}{R_{th}}$$
+## 1.8 Energy bookkeeping used by the code
 
-### 4.2 Resistances in Series
+Charging: $P_{in} = \dfrac{dE_{stored}}{dt} + P_{extracted} + P_{losses}$;
+discharging: $-\dfrac{dE_{stored}}{dt} = P_{extracted} + P_{losses} - P_{in}$.
 
-$$R_{tot} = R_1 + R_2 + R_3 + ...$$
+The implementations are:
 
-### 4.3 Types of Thermal Resistance
+$$E_{stored} = \sum_{cells} \rho c_p (T - T_0) V, \qquad
+P_{in} = \sum_{cells} Q_{source} V, \qquad
+P_{extracted} = -\sum_{cells} Q_{sink} V + P_{tube\ fluid}$$
 
-**Conduction (flat wall):**
-$$R_{cond} = \frac{L}{k \cdot A}$$
-
-**Conduction (cylinder):**
-$$R_{cond,cyl} = \frac{\ln(r_2/r_1)}{2\pi k L}$$
-
-**Convection:**
-$$R_{conv} = \frac{1}{h \cdot A}$$
-
----
-
-## 5. Heat Transfer in Porous Materials
-
-### 5.1 Effective Thermal Conductivity
-
-For sand with air in the pores, the effective conductivity can be estimated:
-
-**Parallel model (upper bound):**
-$$k_{eff,\parallel} = \phi \cdot k_{fluid} + (1-\phi) \cdot k_{solid}$$
-
-**Series model (lower bound):**
-$$\frac{1}{k_{eff,series}} = \frac{\phi}{k_{fluid}} + \frac{1-\phi}{k_{solid}}$$
-
-**Geometric mean (good approximation):**
-$$k_{eff} = k_{solid}^{(1-\phi)} \cdot k_{fluid}^{\phi}$$
-
-Where $\phi$ = porosity (void fraction)
-
-### 5.2 Effective Thermal Capacity
-
-$$(\rho c_p)_{eff} = \phi \cdot (\rho c_p)_{fluid} + (1-\phi) \cdot (\rho c_p)_{solid}$$
-
----
-
-## 6. Boundary Conditions
-
-### 6.1 Dirichlet (Prescribed Temperature)
-
-$$T|_{\Gamma} = T_{prescribed}$$
-
-Example: Battery base in contact with ground at constant temperature.
-
-### 6.2 Neumann (Prescribed Flux)
-
-$$-k \frac{\partial T}{\partial n}\bigg|_{\Gamma} = q_{prescribed}$$
-
-Example: Adiabatic surface (q = 0) for symmetry.
-
-### 6.3 Robin (Convection)
-
-$$-k \frac{\partial T}{\partial n}\bigg|_{\Gamma} = h(T_s - T_\infty)$$
-
-Example: External surface in contact with ambient air.
-
----
-
-## 7. Dimensionless Numbers
-
-### 7.1 Biot Number
-
-$$Bi = \frac{h \cdot L_c}{k}$$
-
-- $Bi << 1$: Uniform temperature in the solid (lumped capacitance)
-- $Bi >> 1$: Significant gradients in the solid
-
-### 7.2 Fourier Number
-
-$$Fo = \frac{\alpha \cdot t}{L_c^2}$$
-
-Where $\alpha = k/(\rho c_p)$ = thermal diffusivity [m²/s]
-
-- Indicates how "close" the system is to thermal equilibrium
-
----
-
-## 8. Application to the Thermal Battery
-
-### 8.1 Battery Architecture
-
-The battery is modeled as a vertical cylinder composed of different concentric radial zones:
-
-1.  **STORAGE Zone**: Central area containing the thermal storage material with embedded tubes and heaters.
-2.  **INSULATION Zone**: Layer of low-conductivity material (e.g., rock wool) to minimize losses.
-3.  **STEEL Zone**: External steel shell for structural protection.
-4.  **AIR Zone**: External air (outside the shell).
-
-Additionally, the geometry includes:
-- **Insulation slabs** at top and bottom for vertical thermal protection.
-- **Optional conical roof** for realistic geometry modeling.
-- **Phase offset** between tubes and heaters to avoid overlapping.
-
-### 8.2 Global Energy Balance
-
-**Charging state:**
-$$\dot{E}_{in} = \dot{E}_{stored} + \dot{E}_{losses}$$
-
-$$P_{heaters} = \frac{d}{dt}(m \cdot c_p \cdot \bar{T}) + P_{dispersion}$$
-
-**Discharging state:**
-$$\dot{E}_{stored} = \dot{E}_{out} + \dot{E}_{losses}$$
-
-$$\frac{d}{dt}(m \cdot c_p \cdot \bar{T}) = P_{tubes} + P_{dispersion}$$
-
-### 8.3 Heater Power
-
-The thermal power generated per unit volume ($Q$) is distributed in the heater zone:
-
-$$P_{heaters} = \sum_i Q_i \cdot V_i$$
-
-Where $V_i$ is the volume of cell i belonging to the heating zone.
-
-### 8.4 Power Extracted by Tubes
-
-Heat exchange with the fluid in tubes is modeled through an internal convection condition:
-
-$$q_{tubes} = h_{fluid} (T_{wall} - T_{fluid})$$
-
-### 8.5 Heat Losses
-
-Dispersion to the environment occurs by convection on external surfaces:
-
-$$P_{disp} = \oint h(T_s - T_\infty) \, dA$$
-
-And by conduction toward the ground at the base:
-
-$$q_{base} = -k \frac{\partial T}{\partial z}\bigg|_{z=0}$$
-
----
-
-## 9. Exergy Analysis (Overview)
-
-### 9.1 Thermal Exergy
-
-The exergy associated with a heat flow Q at temperature T:
-
-$$\dot{Ex} = \dot{Q} \cdot \left(1 - \frac{T_0}{T}\right)$$
-
-Where $T_0$ = reference temperature (ambient)
-
-### 9.2 Stored Exergy
-
-$$Ex_{stored} = m \cdot c_p \cdot \left[(T - T_0) - T_0 \cdot \ln\left(\frac{T}{T_0}\right)\right]$$
-
-### 9.3 Exergy Destruction
-
-For a system with temperatures $T_1$ and $T_2$ exchanging heat Q:
-
-$$\dot{Ex}_{destr} = T_0 \cdot \dot{Q} \cdot \left(\frac{1}{T_2} - \frac{1}{T_1}\right)$$
-
----
-
-## 10. References
-
-1. Incropera, F.P., DeWitt, D.P. - "Fundamentals of Heat and Mass Transfer"
-2. Çengel, Y.A. - "Heat Transfer: A Practical Approach"
-3. Bejan, A. - "Advanced Engineering Thermodynamics" (for exergy)
-4. Kaviany, M. - "Principles of Heat Transfer in Porous Media"
+with $T_0$ the ambient temperature.  Losses are the surface integrals of §5 of
+[02](02_FDM_DISCRETIZATION.md), evaluated on the battery envelope (insulation,
+shell, foundation against air) *and* on the six box faces for auditing
+(`src/analysis/fluxes.py`).  The identity
+$P_{in} - P_{extracted} - P_{losses} - dE/dt \approx 0$ is the self-check that
+`Balance.imbalance` reports, and `tests/test_analysis.py` asserts it.
+
+**Exergy.**  Heat available at temperature $T$: $\dot{Ex} = \dot Q (1 - T_0/T)$;
+stored exergy
+
+$$Ex_{stored} = \sum_{cells} \rho c_p
+\left[(T-T_0) - T_0 \ln\frac{T}{T_0}\right] V$$
+
+and destroyed exergy is the difference between the exergy entering with the
+heaters (Carnot factor evaluated at the storage temperature) and what is stored
+(`src/analysis/balance.py`, `fluxes.destroyed_exergy`).
+
+## 1.9 Extracting heat
+
+The tube cells exchange $h_{fluid}(T_{wall} - T_{fluid})$ with the fluid.  In
+*flow-rate* mode the fluid temperature is the inlet temperature and the removed
+power is whatever that exchange produces; in *target-power* mode a volumetric
+sink is imposed on the tube cells, **capped** by the available
+$h A (T_{tube} - T_{inlet})$ - so the model can never extract heat from a body
+colder than the inlet (`src/solver/transient.py`).
+
+## 1.10 References
+
+1. Incropera, DeWitt, Bergman, Lavine - *Fundamentals of Heat and Mass Transfer*
+2. Çengel - *Heat Transfer: A Practical Approach*
+3. Bejan - *Advanced Engineering Thermodynamics* (exergy)
+4. Kaviany - *Principles of Heat Transfer in Porous Media*

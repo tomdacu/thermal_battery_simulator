@@ -1,245 +1,239 @@
-"""
-test_core.py - Unit tests per i moduli core
+"""Core model tests: units contract, mesh, materials, geometry, profiles."""
+from __future__ import annotations
 
-Eseguire con: pytest tests/test_core.py -v
-"""
-
-import pytest
 import numpy as np
-import sys
-from pathlib import Path
+import pytest
 
-# Aggiungi src al path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.core.mesh import Mesh3D, MaterialID, BoundaryType
-from src.core.materials import MaterialManager, MaterialType
-from src.core.geometry import BatteryGeometry, CylinderGeometry, create_small_test_geometry
-
-
-class TestMesh3D:
-    """Test per la classe Mesh3D"""
-    
-    def test_creation(self):
-        """Test creazione base"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        assert mesh.Nx == 10
-        assert mesh.Ny == 10
-        assert mesh.Nz == 10
-        assert mesh.N_total == 1000
-        assert mesh.dx == pytest.approx(0.1)
-    
-    def test_indexing(self):
-        """Test conversione indici"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        # Test round-trip
-        for i, j, k in [(0, 0, 0), (5, 5, 5), (9, 9, 9), (3, 7, 2)]:
-            p = mesh.ijk_to_linear(i, j, k)
-            i2, j2, k2 = mesh.linear_to_ijk(p)
-            assert (i, j, k) == (i2, j2, k2)
-    
-    def test_coordinates(self):
-        """Test coordinate centri cella"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        # Prima cella
-        x, y, z = mesh.get_position(0, 0, 0)
-        assert x == pytest.approx(0.05)
-        assert y == pytest.approx(0.05)
-        assert z == pytest.approx(0.05)
-        
-        # Ultima cella
-        x, y, z = mesh.get_position(9, 9, 9)
-        assert x == pytest.approx(0.95)
-        assert y == pytest.approx(0.95)
-        assert z == pytest.approx(0.95)
-    
-    def test_find_cell(self):
-        """Test ricerca cella da coordinate"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        i, j, k = mesh.find_cell(0.5, 0.5, 0.5)
-        assert (i, j, k) == (5, 5, 5)
-    
-    def test_boundary_detection(self):
-        """Test rilevamento bordi"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        # Bordo z=0 dovrebbe essere Dirichlet
-        assert mesh.boundary_type[5, 5, 0] == BoundaryType.DIRICHLET
-        
-        # Bordo z=max dovrebbe essere convezione
-        assert mesh.boundary_type[5, 5, 9] == BoundaryType.CONVECTION
-        
-        # Nodo interno
-        assert mesh.boundary_type[5, 5, 5] == BoundaryType.INTERNAL
-    
-    def test_memory_estimate(self):
-        """Test stima memoria"""
-        mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, Nx=10, Ny=10, Nz=10)
-        
-        mem = mesh._estimate_memory()
-        assert mem > 0
-        assert mem < 1e9  # < 1GB per mesh piccola
+from src.constants import T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
+from src.core.geometry import (
+    BatteryGeometry,
+    CylinderGeometry,
+    HeaterConfig,
+    HeaterPattern,
+    TubeConfig,
+    create_small_test_geometry,
+)
+from src.core.materials import MaterialManager
+from src.core.mesh import BoundaryType, MaterialID, Mesh3D
+from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
+from src.units import c_to_k, check_kelvin, k_to_c
 
 
-class TestMaterialManager:
-    """Test per MaterialManager"""
-    
-    def test_get_material(self):
-        """Test recupero materiale"""
-        manager = MaterialManager()
-        
-        steatite = manager.get("steatite")
-        assert steatite.name == "Steatite (Pietra Ollare)"
-        assert steatite.k > 0
-        assert steatite.rho > 0
-        assert steatite.cp > 0
-    
-    def test_list_materials(self):
-        """Test lista materiali"""
-        manager = MaterialManager()
-        
-        storage = manager.list_materials(MaterialType.STORAGE)
-        assert "steatite" in storage
-        assert "silica_sand" in storage
-        assert len(storage) >= 5
-    
-    def test_effective_properties(self):
-        """Test calcolo proprietà effettive"""
-        manager = MaterialManager()
-        
-        eff = manager.compute_packed_bed_properties("steatite", packing_fraction=0.63)
-        
-        # Conducibilità effettiva < conducibilità solida
-        solid = manager.get("steatite")
-        assert eff.k < solid.k
-        
-        # Densità effettiva < densità solida
-        assert eff.rho < solid.rho
-    
-    def test_unknown_material(self):
-        """Test materiale sconosciuto"""
-        manager = MaterialManager()
-        
-        with pytest.raises(KeyError):
-            manager.get("materiale_inventato")
-    
-    def test_energy_density(self):
-        """Test calcolo densità energetica"""
-        manager = MaterialManager()
-        
-        ed = manager.get_energy_density("steatite", T_high=400, T_low=100, packing_fraction=0.63)
-        
-        # Dovrebbe essere positiva e ragionevole
-        assert ed > 100  # MJ/m³
-        assert ed < 1000  # MJ/m³
+# --------------------------------------------------------------------- units
+def test_celsius_kelvin_round_trip():
+    assert c_to_k(0.0) == pytest.approx(273.15)
+    assert k_to_c(373.15) == pytest.approx(100.0)
 
 
-class TestGeometry:
-    """Test per BatteryGeometry"""
-    
-    def test_create_geometry(self):
-        """Test creazione geometria"""
-        geom = create_small_test_geometry()
-        
-        assert geom.cylinder.height > 0
-        assert geom.cylinder.r_shell > geom.cylinder.r_insulation
-    
-    def test_zone_volumes(self):
-        """Test calcolo volumi"""
-        geom = create_small_test_geometry()
-        
-        volumes = geom.get_zone_volumes()
-        
-        assert volumes['sand_total'] > 0
-        assert volumes['insulation'] > 0
-        assert volumes['total'] > volumes['sand_total']
-    
-    def test_zone_masses(self):
-        """Test calcolo masse"""
-        geom = create_small_test_geometry()
-        manager = MaterialManager()
-        
-        masses = geom.get_zone_masses(manager)
-        
-        assert masses['sand_total'] > 0
-        assert masses['insulation'] > 0
-    
-    def test_energy_capacity(self):
-        """Test stima capacità energetica"""
-        geom = create_small_test_geometry()
-        manager = MaterialManager()
-        
-        energy = geom.estimate_energy_capacity(manager, T_high=380, T_low=90)
-        
-        assert energy['E_usable_MWh'] > 0
-        assert energy['E_usable_kWh'] == energy['E_usable_MWh'] * 1000
-    
-    def test_apply_to_mesh(self):
-        """Test applicazione geometria a mesh"""
-        geom = create_small_test_geometry()
-        manager = MaterialManager()
-        
-        mesh = Mesh3D(Lx=6, Ly=6, Lz=5, Nx=20, Ny=20, Nz=15)
-        geom.apply_to_mesh(mesh, manager)
-        
-        # Verifica che siano stati assegnati diversi materiali
-        unique_materials = np.unique(mesh.material_id)
-        assert len(unique_materials) >= 3  # Almeno aria, sabbia, isolamento
-        
-        # Verifica sorgenti di calore nella zona resistenze
-        assert np.any(mesh.Q > 0)
-
-    def test_tubes_inactive_do_not_set_internal_convection(self):
-        """Se i tubi sono inattivi, le celle-tubo non devono diventare CONVECTION con h>0."""
-        geom = create_small_test_geometry()
-        geom.tubes.active = False
-        manager = MaterialManager()
-
-        mesh = Mesh3D(Lx=6, Ly=6, Lz=5, Nx=20, Ny=20, Nz=15)
-        geom.apply_to_mesh(mesh, manager)
-
-        # Non devono esserci celle interne CONVECTION con h>0
-        internal = np.ones(mesh.boundary_type.shape, dtype=bool)
-        internal[0, :, :] = False
-        internal[-1, :, :] = False
-        internal[:, 0, :] = False
-        internal[:, -1, :] = False
-        internal[:, :, 0] = False
-        internal[:, :, -1] = False
-
-        conv_internal = (mesh.boundary_type == BoundaryType.CONVECTION) & internal
-        assert not np.any(conv_internal & (mesh.bc_h > 0))
+def test_check_kelvin_rejects_a_celsius_field():
+    """A Celsius field is the classic unit bug: it must fail loudly, never silently."""
+    with pytest.raises(ValueError, match="degC"):
+        check_kelvin(np.array([20.0, 300.0]), "T")
+    check_kelvin(np.array([T_AMBIENT_DEFAULT, 900.0]), "T")
 
 
-class TestSliceExtraction:
-    """Test estrazione sezioni"""
-    
-    def test_z_slice(self):
-        """Test sezione orizzontale"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=10, Ny=10, Nz=10)
-        mesh.T[:] = np.arange(mesh.Nz).reshape(1, 1, -1)  # Gradiente in z
-        
-        Y, Z, T = mesh.get_temperature_slice('z', 0.5)
-        
-        assert T.shape == (10, 10)
-        assert np.all(T == T[0, 0])  # Uniforme su questo piano
-    
-    def test_y_slice(self):
-        """Test sezione verticale Y"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=10, Ny=10, Nz=10)
-        mesh.T[:] = 100.0
-        
-        X, Z, T = mesh.get_temperature_slice('y', 0.5)
-        
-        assert T.shape == (10, 10)
+def test_mesh_defaults_are_kelvin():
+    mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.5)
+    assert mesh.T.min() == pytest.approx(T_AMBIENT_DEFAULT)
+    assert mesh.face_bc["z_min"].value == pytest.approx(T_GROUND_DEFAULT)
+    mesh.validate()
 
 
-# =============================================================================
-# ESECUZIONE
-# =============================================================================
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_boundary_conditions_record_the_face_not_the_node():
+    mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.25)
+    mesh.set_convection_bc("z_max", 12.0, 300.0)
+    mesh.set_fixed_temperature_bc("x_min", 350.0)
+    mesh.set_adiabatic("y_min")
+    assert mesh.face_bc["z_max"].h == 12.0
+    assert mesh.face_bc["x_min"].kind == BoundaryType.DIRICHLET
+    assert mesh.face_bc["y_min"].kind == BoundaryType.INTERNAL
+    with pytest.raises(ValueError):
+        mesh.set_convection_bc("top", 1.0, 300.0)
+    with pytest.raises(ValueError):
+        mesh.set_convection_bc("z_max", 1.0, 20.0)      # Celsius passed as Kelvin
+
+
+def test_domain_snaps_to_whole_cells():
+    mesh = Mesh3D(Lx=6.0, Ly=6.0, Lz=5.6, spacing=0.5)
+    assert (mesh.Nx, mesh.Ny, mesh.Nz) == (12, 12, 11)
+    assert mesh.Lz == pytest.approx(5.5)
+    assert mesh.snapped["Lz"] == pytest.approx(0.1)
+
+
+def test_index_round_trip_and_cell_lookup():
+    mesh = Mesh3D(Lx=4.0, Ly=4.0, Lz=4.0, spacing=0.5)
+    for (i, j, k) in [(0, 0, 0), (1, 2, 3), (7, 7, 7)]:
+        assert mesh.linear_to_ijk(mesh.ijk_to_linear(i, j, k)) == (i, j, k)
+    assert mesh.find_cell(-1.0, 2.0, 2.0) == (0, 4, 4)
+    assert mesh.find_cell(99.0, 99.0, 99.0) == (mesh.Nx - 1, mesh.Ny - 1, mesh.Nz - 1)
+
+
+def test_validate_rejects_non_physical_fields():
+    mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.5)
+    mesh.rho[0, 0, 0] = -1.0
+    with pytest.raises(ValueError, match="rho"):
+        mesh.validate()
+
+
+# ----------------------------------------------------------------- materials
+def test_material_database_is_single_and_consistent():
+    manager = MaterialManager()
+    steatite = manager.get("steatite")
+    assert (steatite.k, steatite.rho, steatite.cp) == (3.0, 2700.0, 980.0)
+    assert steatite.t_max > 1200.0
+    with pytest.raises(KeyError):
+        manager.get("does_not_exist")
+    assert "steatite" in manager.list_materials("storage")
+
+
+def test_packed_bed_lowers_conductivity_and_density():
+    manager = MaterialManager()
+    solid = manager.get("silica_sand")
+    bed = manager.compute_packed_bed_properties("silica_sand", 0.63)
+    assert 0.0 < bed.k < solid.k
+    assert bed.rho < solid.rho
+    assert bed.cp > 0
+
+
+@pytest.mark.parametrize("packing", [0.0, 1.0, -0.2, 1.5])
+def test_packing_fraction_is_validated(packing):
+    with pytest.raises(ValueError):
+        MaterialManager().compute_packed_bed_properties("silica_sand", packing)
+
+
+def test_energy_density_scales_with_temperature_span():
+    manager = MaterialManager()
+    single = manager.get_energy_density("steatite", t_high=873.15, t_low=293.15)
+    double = manager.get_energy_density("steatite", t_high=1453.15, t_low=293.15)
+    assert double == pytest.approx(2 * single)
+
+
+# ------------------------------------------------------------------ geometry
+def test_apply_to_mesh_marks_sources_and_keeps_the_power_budget(storage_model):
+    """The volumetric sources must integrate to the rated heater power."""
+    mesh = storage_model
+    assert mesh.source_mask.any()
+    assert mesh.T.min() > 250.0                        # Kelvin, not Celsius
+    power = float(np.sum(mesh.Q_source) * mesh.V_cell)
+    assert power == pytest.approx(50_000.0, rel=1e-9)
+
+
+def test_all_heater_patterns_produce_a_source():
+    """Whatever the pattern, cells must be flagged - the old uniform zone was not.
+
+    A discrete pattern is a bank of hairpin elements, so it needs a mesh that can
+    resolve a sheath: this uses a 1:4 scale model with 50 mm cells instead of the
+    coarse 6 m fixture.
+    """
+    for pattern in (HeaterPattern.UNIFORM_ZONE, HeaterPattern.GRID_VERTICAL,
+                    HeaterPattern.RADIAL_ARRAY, HeaterPattern.SPIRAL,
+                    HeaterPattern.CONCENTRIC_RINGS):
+        mesh = Mesh3D(Lx=2.4, Ly=2.4, Lz=2.6, spacing=0.05)
+        geometry = BatteryGeometry(
+            cylinder=CylinderGeometry(center_x=1.2, center_y=1.2, base_z=0.2, height=1.4,
+                                      r_storage=0.8, insulation_thickness=0.15,
+                                      shell_thickness=0.02, insulation_slab_bottom=0.1,
+                                      insulation_slab_top=0.1, enable_cone_roof=False),
+            tubes=TubeConfig(active=False),
+            heaters=HeaterConfig(power_total=10.0, n_heaters=6, pattern=pattern,
+                                 grid_rows=2, grid_cols=3, sheath_diameter=0.012,
+                                 leg_spacing=0.12, active_length=0.8))
+        geometry.apply_to_mesh(mesh)
+        assert mesh.source_mask.sum() > 0, pattern
+        assert float(np.sum(mesh.Q_source * mesh.V)) == pytest.approx(10_000.0, rel=1e-6)
+
+
+def test_geometry_validation_rejects_a_clipped_roof():
+    mesh = Mesh3D(Lx=6.0, Ly=6.0, Lz=3.0, spacing=0.5)
+    geometry = create_small_test_geometry()
+    with pytest.raises(ValueError, match="Lz"):
+        geometry.apply_to_mesh(mesh)
+
+
+def test_geometry_validation_rejects_a_battery_larger_than_the_domain():
+    mesh = Mesh3D(Lx=3.0, Ly=3.0, Lz=8.0, spacing=0.5)
+    geometry = BatteryGeometry(cylinder=CylinderGeometry(center_x=1.5, center_y=1.5,
+                                                         r_storage=2.0))
+    with pytest.raises(ValueError, match="radius"):
+        geometry.apply_to_mesh(mesh)
+
+
+def test_inactive_tubes_never_create_internal_convection(storage_model):
+    mesh = storage_model
+    assert not (mesh.boundary_type == BoundaryType.CONVECTION).any()
+    assert not (mesh.material_id == int(MaterialID.TUBES)).any()
+
+
+def test_active_tubes_are_inside_the_storage_band(storage_model):
+    mesh = storage_model
+    geometry = create_small_test_geometry()
+    geometry.tubes = TubeConfig(n_tubes=4, active=True, diameter=0.2)
+    geometry.apply_to_mesh(mesh)
+    tubes = mesh.material_id == int(MaterialID.TUBES)
+    assert tubes.any()
+    assert mesh.T[tubes].size == int(tubes.sum())
+    z = mesh.Z[tubes]
+    assert z.min() >= geometry.cylinder.z_storage_start - 1e-9
+    assert z.max() < geometry.cylinder.z_storage_end
+    # tubes must not carry a volumetric heater source
+    assert not mesh.source_mask[tubes].any()
+
+
+def test_zone_volumes_and_masses_are_consistent(storage_model):
+    geometry = create_small_test_geometry()
+    volumes = geometry.zone_volumes()
+    masses = geometry.zone_masses()
+    assert volumes["storage"] == pytest.approx(np.pi * 2.0 ** 2 * 4.0, rel=1e-9)
+    assert masses["storage"] > 0
+    assert set(masses) >= {"storage", "insulation", "shell", "cone_shell", "foundation"}
+    capacity = geometry.estimate_energy_capacity(t_high=873.15, t_low=293.15)
+    assert capacity["E_usable_J"] < capacity["E_thermal_J"]
+    assert capacity["mass_storage_kg"] == pytest.approx(masses["storage"])
+
+
+# ------------------------------------------------------------------ profiles
+def test_power_profile_modes_and_extrapolation():
+    assert PowerProfile(mode="off").power_at(10.0) == 0.0
+    assert PowerProfile(mode="constant", constant_power=1234.0).power_at(0.0) == 1234.0
+    schedule = PowerProfile(mode="schedule", times=[0.0, 100.0], powers=[0.0, 1000.0])
+    assert schedule.power_at(50.0) == pytest.approx(500.0)
+    assert schedule.power_at(5000.0) == pytest.approx(1000.0)   # holds the last value
+
+
+def test_power_profile_rejects_broken_input():
+    with pytest.raises(ValueError):
+        PowerProfile(mode="schedule", times=[10.0, 5.0], powers=[1.0, 2.0])
+    with pytest.raises(ValueError):
+        PowerProfile(mode="schedule", times=[0.0], powers=[1.0, 2.0])
+    with pytest.raises(ValueError):
+        PowerProfile(mode="csv").validate()
+    assert PowerProfile(mode="off").validate() == []
+
+
+def test_extraction_profile_has_no_free_energy_placeholder():
+    profile = ExtractionProfile(mode="power", power=5000.0)
+    assert profile.power_request(0.0) == 5000.0
+    assert profile.validate() == []
+    flow = ExtractionProfile(mode="flow_rate", mass_flow=0.0)
+    assert any("mass_flow" in problem for problem in flow.validate())
+    assert ExtractionProfile(mode="off").power_request(0.0) == 0.0
+
+
+def test_initial_condition_modes_return_kelvin(storage_model):
+    mesh = storage_model
+    uniform = InitialCondition(mode="uniform", t_uniform=373.15)
+    field = uniform.apply_to_mesh(mesh)
+    assert field.min() == field.max() == pytest.approx(373.15)
+    check_kelvin(field, "IC")
+    by_material = InitialCondition(mode="by_material",
+                                   t_by_material={int(MaterialID.SAND): 873.15})
+    field = by_material.apply_to_mesh(mesh)
+    assert field[mesh.material_id == int(MaterialID.SAND)].min() == pytest.approx(873.15)
+    with pytest.raises(ValueError):
+        InitialCondition(mode="by_material", t_by_material={99: 300.0}).apply_to_mesh(mesh)
+
+
+def test_initial_condition_rejects_celsius_values():
+    with pytest.raises(ValueError):
+        InitialCondition(mode="uniform", t_uniform=20.0).apply_to_mesh(
+            Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.5))

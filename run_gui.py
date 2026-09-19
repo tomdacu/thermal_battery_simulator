@@ -1,17 +1,10 @@
-"""
-run_gui.py - Script per avviare la GUI Thermal Battery Simulation
-
-Utilizzo:
-    python run_gui.py
-"""
-
+"""Entry point: launch the Thermal Battery Simulator GUI."""
 import sys
 from pathlib import Path
 
-# Aggiungi la directory corrente al path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gui.main_window import main
+from gui.main_window import main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

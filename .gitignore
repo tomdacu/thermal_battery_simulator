@@ -24,3 +24,17 @@ results/
 # Ignore only generated screenshots
 photo/screenshot*.png
 photo/temp_*.png
+
+# simulation artefacts
+results/
+*.h5
+*.vti
+*.vtk
+*.csv
+!tests/data/*.csv
+
+# tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log

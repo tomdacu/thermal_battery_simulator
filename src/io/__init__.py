@@ -1,15 +1,10 @@
-"""
-src/io/__init__.py - Modulo I/O per salvataggio e caricamento
-"""
-
-from .state_manager import (
-    SimulationState,
+"""State persistence (HDF5)."""
+from .state import (
+    FORMAT_VERSION,
+    StateError,
     StateManager,
-    TransientResults
+    SimulationState,
+    geometry_hash,
 )
 
-__all__ = [
-    'SimulationState',
-    'StateManager', 
-    'TransientResults'
-]
+__all__ = ["FORMAT_VERSION", "StateError", "StateManager", "SimulationState", "geometry_hash"]

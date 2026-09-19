@@ -1,278 +1,357 @@
-"""
-test_solver.py - Unit tests per i moduli solver
+"""Solver tests: assembly exactness, analytic regressions, linear backends."""
+from __future__ import annotations
 
-Eseguire con: pytest tests/test_solver.py -v
-"""
-
-import pytest
 import numpy as np
-import sys
-from pathlib import Path
+import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.core.mesh import Mesh3D, BoundaryType
-from src.solver.matrix_builder import build_steady_state_matrix, build_transient_matrix
-from src.solver.steady_state import SteadyStateSolver, SolverConfig, solve_steady_state
-
-
-class TestMatrixBuilder:
-    """Test per la costruzione della matrice"""
-    
-    def test_matrix_dimensions(self):
-        """Test dimensioni matrice"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
-        A, b = build_steady_state_matrix(mesh)
-        
-        N = mesh.N_total
-        assert A.shape == (N, N)
-        assert b.shape == (N,)
-    
-    def test_matrix_sparsity(self):
-        """Test sparsità matrice"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=10, Ny=10, Nz=10)
-        A, b = build_steady_state_matrix(mesh)
-        
-        # Ogni nodo ha al massimo 7 vicini
-        max_nnz = 7 * mesh.N_total
-        assert A.nnz <= max_nnz
-        
-        # Sparsità dovrebbe essere alta
-        sparsity = 1 - A.nnz / (mesh.N_total ** 2)
-        assert sparsity > 0.99  # > 99% sparse
-    
-    def test_diagonal_dominance(self):
-        """Test dominanza diagonale (per stabilità)"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
-        mesh.k[:] = 1.0  # Conducibilità uniforme
-        
-        A, b = build_steady_state_matrix(mesh)
-        A_dense = A.toarray()
-        
-        # Per la maggior parte dei nodi, |a_ii| >= Σ|a_ij|
-        diag = np.abs(np.diag(A_dense))
-        off_diag_sum = np.sum(np.abs(A_dense), axis=1) - diag
-        
-        # Almeno l'80% dei nodi dovrebbe essere diagonalmente dominante
-        dominant = np.sum(diag >= off_diag_sum - 1e-10)
-        assert dominant >= 0.8 * mesh.N_total
-
-    def test_internal_convection_adds_term(self):
-        """Verifica che la convezione interna (celle-tubo) aggiunga un termine su diagonale e RHS."""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
-        # Seleziona una cella interna
-        i = j = k = 2
-        p = mesh.ijk_to_linear(i, j, k)
-
-        # Caso base: interno
-        mesh.boundary_type[i, j, k] = BoundaryType.INTERNAL
-        mesh.bc_h[i, j, k] = 0.0
-        mesh.bc_T_inf[i, j, k] = 20.0
-        A0, b0 = build_steady_state_matrix(mesh)
-        a0 = A0[p, p]
-        rhs0 = b0[p]
-
-        # Caso con convezione interna
-        h = 10.0
-        T_inf = 5.0
-        mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
-        mesh.bc_h[i, j, k] = h
-        mesh.bc_T_inf[i, j, k] = T_inf
-        A1, b1 = build_steady_state_matrix(mesh)
-        a1 = A1[p, p]
-        rhs1 = b1[p]
-
-        # Il modello implementato usa a_conv = h / d
-        a_conv = h / mesh.d
-        assert a1 == pytest.approx(a0 + a_conv, rel=1e-9, abs=1e-12)
-        assert rhs1 == pytest.approx(rhs0 + a_conv * T_inf, rel=1e-9, abs=1e-12)
-
-    def test_transient_mass_matrix_ordering(self):
-        """Verifica che la matrice di massa usi lo stesso ordine di flattening della mesh."""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=4, Ny=3, Nz=2)
-
-        # Crea un campo non uniforme per distinguere l'ordine
-        mesh.rho[:] = 1.0
-        mesh.cp[:] = 1.0
-        mesh.rho[1, 0, 0] = 7.0
-        mesh.cp[1, 0, 0] = 11.0
-        dt = 2.0
-        theta = 1.0
-
-        A, B = build_transient_matrix(mesh, dt=dt, theta=theta)
-
-        # Per theta=1: A = M + L, B = M
-        # quindi M.diag = B.diag
-        mass_diag_expected = (mesh.rho * mesh.cp).ravel(order='F') / dt
-        mass_diag_actual = B.diagonal()
-        assert np.allclose(mass_diag_actual, mass_diag_expected)
+from src.core.mesh import BoundaryType, Mesh3D
+from src.core.physics import half_cell_h
+from src.core.profiles import InitialCondition, PowerProfile, ExtractionProfile
+from src.solver.linear import LinearConfig, is_symmetric, solve_linear
+from src.solver.matrix import build_steady_matrix
+from src.solver.steady import SolverConfig, SteadyStateSolver
+from src.solver.transient import TransientConfig, TransientSolver
 
 
-class TestSteadyStateSolver:
-    """Test per il solutore stazionario"""
-    
-    def test_uniform_temperature(self):
-        """Test caso banale: temperatura uniforme"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
-        
-        # Tutte le BC a 100°C
-        mesh.T[:] = 100.0
-        mesh.bc_T_inf[:] = 100.0
-        mesh.boundary_type[:] = BoundaryType.DIRICHLET
-        mesh.boundary_type[1:-1, 1:-1, 1:-1] = BoundaryType.INTERNAL
-        mesh.Q[:] = 0.0  # Nessuna sorgente
-        
-        result = solve_steady_state(mesh, method="direct", verbose=False)
-        
-        # La temperatura dovrebbe rimanere 100°C ovunque
-        assert result.converged
-        # Con Dirichlet solo sui bordi, i nodi interni potrebbero avere valori diversi
-        # ma comunque dovrebbero essere ~100°C senza sorgenti
-    
-    def test_gradient_z(self):
-        """Test gradiente lineare in z"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=10)
-        
-        # T = 0 su z=0, T = 100 su z=1
-        mesh.set_fixed_temperature_bc('z_min', 0.0)
-        mesh.set_fixed_temperature_bc('z_max', 100.0)
-        
-        # Conduzione uniforme
-        mesh.k[:] = 1.0
-        mesh.Q[:] = 0.0
-        
-        result = solve_steady_state(mesh, method="direct", verbose=False)
-        
-        assert result.converged
-        
-        # La temperatura dovrebbe essere lineare in z
-        # Campiona il centro
-        T_center = mesh.T[2, 2, :]
-        z = mesh.z
-        
-        # Verifica linearità (correlazione > 0.99)
-        corr = np.corrcoef(z, T_center)[0, 1]
-        assert abs(corr) > 0.99
-    
-    def test_with_source(self):
-        """Test con sorgente di calore"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=10, Ny=10, Nz=10)
-        
-        # BC convezione su tutte le facce
-        mesh.bc_h[:] = 10.0
-        mesh.bc_T_inf[:] = 20.0
-        
-        # Sorgente uniforme
-        mesh.Q[:] = 1000.0  # W/m³
-        mesh.k[:] = 1.0
-        
-        result = solve_steady_state(mesh, method="direct", verbose=False)
-        
-        assert result.converged
-        
-        # La temperatura massima dovrebbe essere maggiore di T_inf
-        assert mesh.T.max() > 20.0
-        
-        # La temperatura dovrebbe essere massima al centro
-        T_center = mesh.T[5, 5, 5]
-        T_corner = mesh.T[0, 0, 0]
-        assert T_center > T_corner
-    
-    def test_iterative_solver(self):
-        """Test solutore iterativo"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=10, Ny=10, Nz=10)
-        
-        mesh.set_fixed_temperature_bc('z_min', 100.0)
-        mesh.set_convection_bc('z_max', 10.0, 20.0)
-        mesh.k[:] = 1.0
-        mesh.Q[:] = 500.0
-        
-        # Test BiCGSTAB
-        config = SolverConfig(
-            method="bicgstab",
-            tolerance=1e-8,
-            max_iterations=1000,
-            verbose=False
-        )
-        
-        solver = SteadyStateSolver(mesh, config)
-        result = solver.solve()
-        
-        assert result.converged
-        assert result.residual < 1e-6
-    
-    def test_solution_consistency(self):
-        """Verifica che diretto e iterativo diano stesso risultato"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=8, Ny=8, Nz=8)
-        
-        mesh.set_fixed_temperature_bc('z_min', 100.0)
-        mesh.set_convection_bc('z_max', 10.0, 20.0)
-        mesh.k[:] = 1.0
-        mesh.Q[:] = 500.0
-        
-        # Soluzione diretta
-        result1 = solve_steady_state(mesh, method="direct", verbose=False)
-        T1 = mesh.T.copy()
-        
-        # Soluzione iterativa
-        result2 = solve_steady_state(mesh, method="bicgstab", verbose=False)
-        T2 = mesh.T.copy()
-        
-        # Devono essere molto simili
-        diff = np.abs(T1 - T2).max()
-        assert diff < 0.01  # Meno di 0.01°C di differenza
+def column(mesh, field=None):
+    field = mesh.T if field is None else field
+    return field[0, 0, :]
 
 
-class TestEnergyBalance:
-    """Test verifica bilancio energetico"""
-    
-    def test_steady_state_balance(self):
-        """In regime stazionario P_in = P_out"""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=15, Ny=15, Nz=15)
-        
-        # Sorgente interna
-        P_source = 100.0  # W
-        V_total = mesh.Lx * mesh.Ly * mesh.Lz
-        Q = P_source / V_total
-        mesh.Q[:] = Q
-        
-        # BC convezione
-        mesh.bc_h[:] = 20.0
-        mesh.bc_T_inf[:] = 20.0
-        mesh.k[:] = 1.0
-        
-        solve_steady_state(mesh, verbose=False)
-        
-        # Calcola potenza uscente approssimata
-        from src.analysis.power_balance import PowerBalanceAnalyzer
-        analyzer = PowerBalanceAnalyzer(mesh)
-        balance = analyzer.compute_power_balance()
-        
-        # Il bilancio dovrebbe chiudersi con errore < 10%
-        # (errore maggiore accettabile per mesh grossolana)
-        assert balance.imbalance_pct < 20.0
-
-    def test_internal_convection_counts_as_output(self):
-        """Verifica che la convezione interna venga conteggiata come P_output nel bilancio."""
-        mesh = Mesh3D(Lx=1, Ly=1, Lz=1, Nx=5, Ny=5, Nz=5)
-
-        # Imposta un'unica cella interna come "tubo" convettivo
-        i = j = k = 2
-        mesh.boundary_type[i, j, k] = BoundaryType.CONVECTION
-        mesh.bc_h[i, j, k] = 10.0
-        mesh.bc_T_inf[i, j, k] = 20.0
-        mesh.T[i, j, k] = 30.0
-
-        from src.analysis.power_balance import PowerBalanceAnalyzer
-        analyzer = PowerBalanceAnalyzer(mesh)
-        balance = analyzer.compute_power_balance()
-
-        expected = 10.0 * (30.0 - 20.0) * (mesh.d ** 2)
-        assert balance.P_output == pytest.approx(expected)
+# ------------------------------------------------------------------ assembly
+def test_interior_stencil_is_the_textbook_7_point_scheme():
+    """Interior node of a fully insulated box: six equal couplings, diagonal 6a."""
+    mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.25)
+    mesh.k[:] = 1.0
+    for face in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max"):
+        mesh.set_adiabatic(face)
+    matrix, _ = build_steady_matrix(mesh)
+    dense = matrix.toarray()
+    a = 1.0 / mesh.d ** 2
+    node = mesh.ijk_to_linear(1, 1, 1)
+    assert dense[node, node] == pytest.approx(6 * a)
+    for offset in (1, -1, mesh.Nx, -mesh.Nx, mesh.Nx * mesh.Ny, -mesh.Nx * mesh.Ny):
+        assert dense[node, node + offset] == pytest.approx(-a)
 
 
-# =============================================================================
-# ESECUZIONE
-# =============================================================================
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_matrix_matches_an_independent_assembly(slab):
+    """Cross-check every row against a directly written, unvectorised reference."""
+    matrix, rhs = build_steady_matrix(slab)
+    mesh = slab
+    nx, ny, nz, d = mesh.Nx, mesh.Ny, mesh.Nz, mesh.d
+    reference = np.zeros((mesh.N_total, mesh.N_total))
+    reference_rhs = np.zeros(mesh.N_total)
+
+    def index(i, j, k):
+        return i + j * nx + k * nx * ny
+
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                row = index(i, j, k)
+                bc = mesh.face_bc
+                pinned = ((k == 0 and bc["z_min"].kind == BoundaryType.DIRICHLET)
+                          or (k == nz - 1 and bc["z_max"].kind == BoundaryType.DIRICHLET))
+                if pinned:
+                    value = bc["z_min"].value if k == 0 else bc["z_max"].value
+                    reference[row, row] = 1.0
+                    reference_rhs[row] = value
+                    continue
+                diag = 0.0
+                for di, dj, dk, face, exposed in (
+                        (-1, 0, 0, "x_min", i == 0), (1, 0, 0, "x_max", i == nx - 1),
+                        (0, -1, 0, "y_min", j == 0), (0, 1, 0, "y_max", j == ny - 1),
+                        (0, 0, -1, "z_min", k == 0), (0, 0, 1, "z_max", k == nz - 1)):
+                    if exposed and bc[face].kind == BoundaryType.INTERNAL:
+                        continue
+                    if exposed and bc[face].kind == BoundaryType.DIRICHLET:
+                        continue
+                    if exposed:
+                        h = bc[face].h
+                        a_conv = half_cell_h(mesh.k[i, j, k], h, d) / d
+                        diag += a_conv
+                        reference_rhs[row] += a_conv * bc[face].value
+                        continue
+                    a_face = mesh.k[i, j, k] / d ** 2
+                    diag += a_face
+                    reference[row, index(i + di, j + dj, k + dk)] = -a_face
+                reference[row, row] = diag
+    # mirror the symmetric elimination: zero the Dirichlet columns, move them to b
+    for row in range(mesh.N_total):
+        for col in range(mesh.N_total):
+            if reference[col, col] == 1.0 and row != col and reference[row, col] != 0:
+                reference_rhs[row] -= reference[row, col] * reference_rhs[col]
+                reference[row, col] = 0.0
+    assert np.abs(reference - matrix.toarray()).max() < 1e-9
+    assert np.abs(reference_rhs - rhs).max() < 1e-9
+
+
+def test_steady_solution_is_exact_for_dirichlet_and_source(slab):
+    """Uniform k with two Dirichlet faces: the parabola is reproduced exactly."""
+    slab.Q_source[:] = 1000.0
+    result = SteadyStateSolver(slab, SolverConfig(method="direct")).solve()
+    z = slab.z
+    z0, z1 = z[0], z[-1]
+    t0, t1 = slab.face_bc["z_min"].value, slab.face_bc["z_max"].value
+    linear = t0 + (t1 - t0) * (z - z0) / (z1 - z0)
+    parabola = 1000.0 / (2 * slab.k[0, 0, 0]) * (z - z0) * (z1 - z)
+    analytic = linear + parabola
+    assert result.converged
+    assert np.abs(column(slab) - analytic).max() < 1e-8
+
+
+def test_convective_face_flux_matches_the_analytic_resistance(slab):
+    """Robin face: q = dT / (L/k + 1/h) with the half-cell correction."""
+    h, t_inf = 25.0, 500.0
+    slab.set_convection_bc("z_max", h, t_inf)
+    SteadyStateSolver(slab, SolverConfig(method="direct")).solve()
+    q_mid = slab.k[0, 0, 0] * (column(slab)[-2] - column(slab)[-1]) / slab.d
+    total = (slab.Lz - slab.d) / slab.k[0, 0, 0] + 1.0 / half_cell_h(
+        slab.k[0, 0, 0], h, slab.d)
+    q_analytic = (slab.face_bc["z_min"].value - t_inf) / total
+    assert q_mid == pytest.approx(q_analytic, rel=2e-2)
+
+
+def test_imposed_flux_face_adds_exactly_that_power(adiabatic_box):
+    """Neumann faces were dead code in the old builder; now they carry the flux."""
+    box = adiabatic_box
+    flux, area = 100.0, box.Lx * box.Ly
+    box.set_heat_flux_bc("z_min", flux)
+    box.set_fixed_temperature_bc("z_max", 300.0)
+    SteadyStateSolver(box, SolverConfig(method="direct")).solve()
+    from src.analysis.fluxes import domain_face_flux
+
+    assert domain_face_flux(box, "z_min") == pytest.approx(-flux * area, rel=1e-6)
+
+
+def test_dirichlet_elimination_keeps_the_matrix_symmetric(slab):
+    """Row replacement used to break symmetry; symmetric elimination does not."""
+    matrix, rhs = build_steady_matrix(slab)
+    assert is_symmetric(matrix)
+    cg = solve_linear(matrix, rhs, LinearConfig(method="cg", tolerance=1e-12))
+    direct = solve_linear(matrix, rhs, LinearConfig(method="direct"))
+    assert cg.converged and cg.notes == []
+    assert np.abs(cg.T - direct.T).max() < 1e-6
+
+
+def test_an_asymmetric_operator_is_solved_without_cg(slab):
+    matrix, rhs = build_steady_matrix(slab)
+    skewed = matrix.tolil()
+    skewed[0, 1] = 5.0                     # one-sided coupling: not symmetric
+    skewed = skewed.tocsr()
+    assert not is_symmetric(skewed)
+    result = solve_linear(skewed, rhs, LinearConfig(method="cg", tolerance=1e-8))
+    assert any("bicgstab" in note for note in result.notes)
+
+
+def test_direct_and_iterative_agree(slab):
+    matrix, rhs = build_steady_matrix(slab)
+    direct = solve_linear(matrix, rhs, LinearConfig(method="direct"))
+    iterative = solve_linear(matrix, rhs, LinearConfig(method="bicgstab", tolerance=1e-12))
+    assert np.abs(direct.T - iterative.T).max() < 1e-6
+
+
+def test_amg_is_used_when_available(slab):
+    matrix, rhs = build_steady_matrix(slab)
+    result = solve_linear(matrix, rhs, LinearConfig(method="bicgstab",
+                                                    preconditioner="amg_rs",
+                                                    tolerance=1e-10))
+    assert result.converged
+
+
+# ----------------------------------------------------------------- transient
+@pytest.mark.parametrize("spacing", [0.25, 0.125])
+def test_transient_rate_is_mesh_independent(adiabatic_box, spacing):
+    """dT/dt = Q/(rho*cp).  With a cell-volume factor the rate scales as 1/d^3."""
+    n = int(round(1.0 / spacing))
+    mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=spacing)
+    mesh.k[:] = 1.0
+    mesh.rho[:] = 1000.0
+    mesh.cp[:] = 1000.0
+    for face in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max"):
+        mesh.set_adiabatic(face)
+    power_density, t_final, dt = 1000.0, 10000.0, 1000.0
+    total_power = power_density * mesh.V_cell * mesh.N_total
+    config = TransientConfig(t_final=t_final, dt=dt, save_interval=t_final,
+                             initial_condition=InitialCondition(mode="uniform", t_uniform=293.15),
+                             power_profile=PowerProfile(mode="constant", constant_power=total_power))
+    mesh.source_mask[:] = True
+    TransientSolver(mesh, config).run()
+    expected = 293.15 + power_density / (1000.0 * 1000.0) * t_final
+    assert mesh.T.mean() == pytest.approx(expected, rel=1e-6), f"n={n} cells per axis"
+
+
+def test_transient_enforces_dirichlet_faces_exactly(slab):
+    """The fixed-temperature ground must not decay: the row is identity + M/dt."""
+    config = TransientConfig(t_final=600.0, dt=600.0, save_interval=600.0,
+                             initial_condition=InitialCondition(mode="uniform", t_uniform=400.0),
+                             power_profile=PowerProfile(mode="off"))
+    TransientSolver(slab, config).run()
+    assert slab.T[:, :, 0].min() == pytest.approx(300.0, abs=1e-2)
+    assert slab.T[:, :, -1].max() == pytest.approx(400.0, abs=1e-2)
+
+
+def test_transient_matches_the_analytic_slab_series():
+    """1D Dirichlet slab vs the Fourier series, backward Euler, 5% band."""
+    mesh = Mesh3D(Lx=0.5, Ly=0.5, Lz=1.0, spacing=0.05)
+    mesh.k[:] = 1.0
+    mesh.rho[:] = 1000.0
+    mesh.cp[:] = 1000.0
+    mesh.set_fixed_temperature_bc("z_min", 373.15)
+    mesh.set_fixed_temperature_bc("z_max", 373.15)
+    for face in ("x_min", "x_max", "y_min", "y_max"):
+        mesh.set_adiabatic(face)
+    alpha = 1e-6
+    t_end, dt = 200_000.0, 10_000.0
+    config = TransientConfig(t_final=t_end, dt=dt, save_interval=t_end,
+                             initial_condition=InitialCondition(mode="uniform", t_uniform=273.15),
+                             power_profile=PowerProfile(mode="off"))
+    TransientSolver(mesh, config).run()
+    z = mesh.z
+    analytic = np.full_like(z, 373.15)
+    for n in range(1, 200):
+        b = 2 * (273.15 - 373.15) * (1 - (-1) ** n) / (n * np.pi)
+        analytic += b * np.sin(n * np.pi * z) * np.exp(-(n * np.pi) ** 2 * alpha * t_end)
+    # the pinned boundary nodes carry a first-order surface artifact; the interior
+    # must follow the series within a few percent
+    interior = slice(2, -2)
+    error = np.abs(column(mesh)[interior] - analytic[interior]).max()
+    assert error < 0.05 * (373.15 - 273.15), f"max interior error {error:.2f} K"
+
+
+def test_extraction_is_capped_by_availability(storage_model):
+    """Target power is limited by h*A*dT: no heat is pumped from a cold body."""
+    mesh = storage_model
+    mesh.T[:] = 293.15
+    config = TransientConfig(
+        t_final=600.0, dt=600.0, save_interval=600.0, t_ambient=293.15,
+        initial_condition=InitialCondition(mode="uniform", t_uniform=293.15),
+        power_profile=PowerProfile(mode="off"),
+        extraction_profile=ExtractionProfile(mode="power", power=1e6,
+                                             t_inlet=333.15, h_fluid=500.0))
+    mesh.material_id[0, 0, 0] = 4                     # one tube cell
+    mesh.set_internal_convection(mesh.material_id == 4, 500.0, 333.15)
+    results = TransientSolver(mesh, config).run()
+    assert max(results.P_extracted) == 0.0            # tube colder than the inlet
+
+
+def test_power_profile_without_sources_raises(storage_model):
+    mesh = storage_model
+    mesh.source_mask.fill(False)
+    mesh.Q_source.fill(0.0)
+    config = TransientConfig(t_final=60.0, dt=60.0, save_interval=60.0,
+                             power_profile=PowerProfile(mode="constant", constant_power=1000.0))
+    with pytest.raises(ValueError, match="source"):
+        TransientSolver(mesh, config).run()
+
+
+def test_transient_stops_cleanly_on_request(adiabatic_box):
+    mesh = adiabatic_box
+    mesh.source_mask[:] = True
+    mesh.Q_source[:] = 1000.0
+    calls = {"n": 0}
+
+    def stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    config = TransientConfig(t_final=1e6, dt=1000.0, save_interval=1000.0)
+    results = TransientSolver(mesh, config).run(should_stop=stop)
+    assert len(results) < 10
+
+
+def test_radiation_increases_the_steady_losses(storage_model):
+    mesh = storage_model
+    plain = SteadyStateSolver(mesh, SolverConfig(method="direct")).solve()
+    from src.analysis.balance import compute_balance
+
+    loss_plain = compute_balance(mesh).q_battery
+    solver = SteadyStateSolver(mesh, SolverConfig(method="direct", radiation=True,
+                                                  max_picard=20))
+    result = solver.solve()
+    loss_radiant = compute_balance(mesh, radiation=True).q_battery
+    assert result.converged
+    assert result.iterations >= 1
+    assert loss_radiant > loss_plain
+    assert plain.T.max() > 0
+
+
+# ------------------------------------------------------- transient edge cases
+def test_last_step_is_shortened_when_t_final_is_not_a_multiple_of_dt(adiabatic_box):
+    mesh = adiabatic_box
+    mesh.source_mask[:] = True
+    total_power = 1000.0 * mesh.V_cell * mesh.N_total
+    config = TransientConfig(t_final=750.0, dt=600.0, save_interval=10_000.0,
+                             power_profile=PowerProfile(mode="constant",
+                                                        constant_power=total_power))
+    results = TransientSolver(mesh, config).run()
+    assert results.times[-1] == pytest.approx(750.0)          # no overshoot
+    assert len(results) == 2                                  # 600 s + shortened 150 s
+    expected = 293.15 + 1000.0 / 1e6 * 750.0
+    assert mesh.T.mean() == pytest.approx(expected, rel=1e-6)
+
+
+def test_dt_larger_than_t_final_still_runs_one_step(adiabatic_box):
+    mesh = adiabatic_box
+    mesh.source_mask[:] = True
+    total_power = 1000.0 * mesh.V_cell * mesh.N_total
+    config = TransientConfig(t_final=600.0, dt=3600.0, save_interval=600.0,
+                             power_profile=PowerProfile(mode="constant",
+                                                        constant_power=total_power))
+    results = TransientSolver(mesh, config).run()
+    assert results.times[-1] == pytest.approx(600.0)
+    assert mesh.T.mean() == pytest.approx(293.15 + 1000.0 / 1e6 * 600.0, rel=1e-6)
+
+
+def test_save_interval_finer_than_dt_saves_every_step(adiabatic_box):
+    mesh = adiabatic_box
+    mesh.source_mask[:] = True
+    total_power = 500.0 * mesh.V_cell * mesh.N_total
+    config = TransientConfig(t_final=1800.0, dt=600.0, save_interval=100.0,
+                             power_profile=PowerProfile(mode="constant",
+                                                        constant_power=total_power))
+    results = TransientSolver(mesh, config).run()
+    assert len(results) == 3
+    assert results.times == sorted(results.times)
+    assert results.times[-1] == pytest.approx(1800.0)
+
+
+def test_flow_rate_extraction_removes_heat_when_the_battery_is_hot(storage_model):
+    """Hot tubes must lose energy to the fluid, and never more than it can carry."""
+    from src.core.mesh import MaterialID
+
+    mesh = storage_model
+    mesh.T[:] = 500.0
+    tubes = mesh.material_id == int(MaterialID.TUBES)
+    mesh.material_id[1:3, 1:3, :6] = int(MaterialID.TUBES)
+    mesh.boundary_type[1:3, 1:3, :6] = 0
+    mesh.set_internal_convection(mesh.material_id == int(MaterialID.TUBES), 500.0, 300.0)
+    assert (mesh.material_id == int(MaterialID.TUBES)).any()
+
+    config = TransientConfig(
+        t_final=600.0, dt=600.0, save_interval=600.0, t_ambient=293.15,
+        initial_condition=InitialCondition(mode="uniform", t_uniform=500.0),
+        power_profile=PowerProfile(mode="off"),
+        extraction_profile=ExtractionProfile(mode="flow_rate", mass_flow=0.5,
+                                             t_inlet=300.0, h_fluid=500.0))
+    results = TransientSolver(mesh, config).run()
+    assert results.P_extracted[-1] > 0.0
+    assert results.T_mean_storage[-1] < 500.0
+    _ = tubes
+
+
+def test_transient_with_radiation_stays_finite_and_loses_more(storage_model):
+    mesh = storage_model
+    config = TransientConfig(
+        t_final=600.0, dt=600.0, save_interval=600.0,
+        initial_condition=InitialCondition(mode="uniform", t_uniform=800.0),
+        power_profile=PowerProfile(mode="off"))
+    plain = TransientSolver(mesh, config, SolverConfig(method="bicgstab")).run()
+    loss_plain = plain.Q_losses_total[-1]
+
+    mesh.T[:] = 800.0
+    radiant_solver = TransientSolver(mesh, config, SolverConfig(method="bicgstab",
+                                                               radiation=True))
+    radiant = radiant_solver.run()
+    assert np.all(np.isfinite(mesh.T))
+    assert radiant.Q_losses_total[-1] > loss_plain

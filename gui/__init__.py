@@ -1,8 +1,4 @@
-"""
-GUI Module for Thermal Battery Simulation
-"""
-
+"""GUI package: modular panels, a controller and a thin main window."""
 from .main_window import ThermalBatteryGUI, main
-from .analysis_tab import AnalysisTab
 
-__all__ = ['ThermalBatteryGUI', 'main', 'AnalysisTab']
+__all__ = ["ThermalBatteryGUI", "main"]
