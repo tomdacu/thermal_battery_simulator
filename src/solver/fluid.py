@@ -59,6 +59,20 @@ class Fluid:
     mu: float = 1.8e-5          # [Pa s]
     k: float = 0.026            # [W/(m K)]
     pr: float = 0.71            # [-]
+    molar_mass: float = 0.02896  # [kg/mol] air; N2 0.02801, steam 0.01802
+
+    def at_pressure(self, pressure: float, temperature: float) -> Fluid:
+        """The same fluid at ``pressure`` [Pa] and ``temperature`` [K] (ideal gas).
+
+        Pressure is the cheap design lever of a gas loop: at a fixed mass flow the
+        velocity falls as ``1/rho`` and the Reynolds number rises as ``rho``, so the
+        film coefficient grows and the pressure drop *falls* - the reason the published
+        designs go to tens of bar instead of pushing the velocity.
+        """
+        base = self.at(temperature)
+        rho = base.rho * pressure / 101325.0        # the reference is 1 atm
+        return Fluid(name=self.name, cp=base.cp, rho=rho, mu=base.mu, k=base.k,
+                     pr=base.pr, molar_mass=self.molar_mass)
 
     def at(self, temperature: float) -> Fluid:
         """The same fluid at another temperature (Sutherland + power laws).
@@ -100,6 +114,45 @@ def pipe_h(mass_flow: float, diameter: float, fluid: Fluid) -> float:
     return float(nu * fluid.k / diameter)
 
 
+def friction_factor(reynolds: float, relative_roughness: float = 0.0) -> float:
+    """Darcy friction factor: laminar ``64/Re``, turbulent Haaland (explicit Colebrook).
+
+    Haaland is within 1.5% of Colebrook over the whole turbulent range and needs no
+    iteration, which keeps the whole loop solvable in closed form.
+    """
+    if reynolds <= 0:
+        return 0.0
+    if reynolds < 2300.0:
+        return 64.0 / reynolds
+    return float(1.0 / (-1.8 * np.log10((relative_roughness / 3.7) ** 1.11
+                                        + 6.9 / reynolds)) ** 2)
+
+
+def pressure_drop(mass_flow: float, diameter: float, length: float, fluid: Fluid,
+                  roughness: float = 4.5e-5, fittings_k: float = 0.0) -> float:
+    """Pressure drop of one pipe run [Pa]: Darcy-Weisbach plus local losses.
+
+    ``roughness`` defaults to 45 um (stainless steel); ``fittings_k`` sums the local
+    loss coefficients of the bends, headers and valves of that run.
+    """
+    if mass_flow <= 0 or diameter <= 0 or length <= 0:
+        return 0.0
+    area = 0.25 * np.pi * diameter ** 2
+    velocity = mass_flow / (fluid.rho * area)
+    re = fluid.rho * velocity * diameter / fluid.mu
+    factor = friction_factor(re, roughness / diameter)
+    return float((factor * length / diameter + fittings_k)
+                 * 0.5 * fluid.rho * velocity ** 2)
+
+
+def fan_power(mass_flow: float, delta_p: float, fluid: Fluid,
+              efficiency: float = 0.7) -> float:
+    """Shaft power of the blower [W]: ``V_dot dp / eta``."""
+    if mass_flow <= 0 or delta_p <= 0 or efficiency <= 0:
+        return 0.0
+    return float(mass_flow / fluid.rho * delta_p / efficiency)
+
+
 @dataclass
 class RunResult:
     """What one pipe run did."""
@@ -124,6 +177,15 @@ class FluidResult:
     power: float = 0.0                  # [W] into the solid
     external_power: float = 0.0         # [W] from the resistors (+) / to the exchanger (-)
     q_fluid: np.ndarray | None = None   # [W/m^3] source term for the solid, + = in
+    delta_p: float = 0.0                # [Pa] pressure drop of the circuit
+    fan_power: float = 0.0              # [W] shaft power of the blower
+
+    @property
+    def circulation_loss(self) -> float:
+        """Fan power as a fraction of the power exchanged with the bed [-]."""
+        if abs(self.power) <= 0.0:
+            return 0.0
+        return self.fan_power / abs(self.power)
 
     @property
     def ntu(self) -> float:
@@ -132,7 +194,9 @@ class FluidResult:
     def summary(self) -> str:
         return (f"loop: T_in {self.t_in:.1f} K -> T_out {self.t_out:.1f} K, "
                 f"NTU {self.ntu:.2f}, bed {self.power / 1000:+.2f} kW, "
-                f"external {self.external_power / 1000:+.2f} kW")
+                f"external {self.external_power / 1000:+.2f} kW, "
+                f"dp {self.delta_p / 1000:.2f} kPa, fan {self.fan_power / 1000:.2f} kW "
+                f"({100 * self.circulation_loss:.1f}% of the bed power)")
 
 
 @dataclass
@@ -146,6 +210,12 @@ class FluidLoop:
     external_power: float = 0.0            # [W] + resistors, - exchanger
     t_in: float | None = None              # [K] prescribed inlet (open loop)
     split: Sequence[float] | None = None   # fraction of the flow per run
+    #: absolute roughness of the pipe wall [m] (45 um: stainless steel)
+    roughness: float = 4.5e-5
+    #: local loss coefficients of the fittings of the *whole* circuit [-]
+    fittings_k: float = 0.0
+    #: blower efficiency (electric power = shaft power / efficiency)
+    fan_efficiency: float = 0.7
 
     # ------------------------------------------------------------------ helpers
     def _flow_split(self) -> np.ndarray:
@@ -247,6 +317,14 @@ class FluidLoop:
             weighted_out += m_dot * float(a * t_in + b)
             weight += m_dot
 
+        # hydraulics: the pressure drop of the circuit and the blower power
+        delta_p = 0.0
+        for run in self.runs:
+            delta_p += pressure_drop(self.mass_flow, run.diameter, run.total_length,
+                                     self.fluid, self.roughness, self.fittings_k)
+        result.delta_p = delta_p
+        result.fan_power = fan_power(self.mass_flow, delta_p, self.fluid,
+                                     self.fan_efficiency)
         result.q_fluid = q_fluid
         result.power = total_power
         result.t_out = weighted_out / weight if weight > 0 else float("nan")

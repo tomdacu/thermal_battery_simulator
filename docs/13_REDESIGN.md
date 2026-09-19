@@ -9,34 +9,55 @@ Read with [12_METHODS.md](12_METHODS.md) (why the numerical choices are what the
 
 ---
 
-## 1. The reference machine (published facts)
+## 1. The reference class of machines (published industrial data)
 
-| Fact | Value | Source |
+The class of machine this simulator targets is a **high-temperature sensible-heat
+storage in a granular medium, charged and discharged by a gas loop through pipes buried
+in the bed**.  The numbers below are the published envelope of industrial installations
+in operation since 2022; they describe the *class*, not one product, and the design space
+is deliberately left open (different geometries, different fluids, different pressures).
+
+| Aspect | Published range | What it means for the model |
 |---|---|---|
-| Storage medium | sand, or sand-like by-products (crushed soapstone) | polarnightenergy.com/sand-battery |
-| Temperature | storage up to **600 °C**; output 60-400 °C | polarnightenergy.com/sand-battery |
-| **Charging** | **electric resistors heat air**, the air circulates in a **closed loop through pipes buried in the bed** | polarnightenergy.com/sand-battery (FAQ) |
-| **Discharging** | flow reversed: cool air is blown through the pipes, leaves hot and goes to an **air-to-water exchanger or a steam generator** | polarnightenergy.com/sand-battery (FAQ) |
-| Direction | patent: **charge top→bottom** (favours natural convection, cuts fan power), **discharge bottom→top** | patent US20220146205A1 |
-| Container | insulated steel silo, 10-15 m tall, 4-30 m diameter; **no air domain** - air lives in pipes and ducts only | polarnightenergy.com/sand-battery |
-| Products | 2 MW / up to 200 MWh, round-trip **85%**, 15×12 m; 10 MW / up to 1000 MWh, **90%**, 30×12 m | polarnightenergy.com/sand-battery |
-| Kankaanpää 2022 | 200 kW, 8 MWh, 4 m diameter × 7 m, ~100 t sand, efficiency 60-75% | polarnightenergy.com/reference/worlds-first-sand-battery |
-| Pornainen 2025 | 1 MW, 100 MWh, 13 m × 15 m, 2 000 t crushed soapstone | polarnightenergy.com/news/what-is-a-sand-battery |
-| Measured profile | **core ~500 °C, edge 150-200 °C** - a strong, permanent radial gradient with a cold shell | vatajankoski.fi/en/projects/sand-battery |
-| Retention | heat for months; 20-200 cycles/year | polarnightenergy.com/sand-battery |
+| Medium | sand, crushed rock, industrial by-products (density matters more than grain size) | the material database stays the source of truth |
+| Storage temperature | up to 600 °C (construction materials, not the sand, set the limit) | property temperature dependence is mandatory |
+| Output temperature | 60-400 °C, plus steam for process heat | the delivered exergy depends on the *usable* energy above the return temperature |
+| **Charging** | electric resistors heat a gas that circulates in a **closed loop through buried pipes**; the resistors are in the gas circuit, never in the bed | charging is an *external power on the fluid loop*, not a volumetric source in the sand |
+| **Discharging** | flow reversed: cold gas in, hot gas out to a counter-flow exchanger (or a steam generator) | the same network does both; the loop's cold side is the exchanger return |
+| Container | insulated steel vessel, 4-30 m across, 7-15 m tall, **no gas outside the pipes** | the outer wall is a boundary condition, not a domain |
+| Module | up to ~100 m³ per module, modular scaling | sizes and powers are per module |
+| Efficiency | round-trip 85-90% at scale, ~60-75% at the smallest pilot; **circulation loss ~5% per cycle**, standby loss < 5% | both terms must be *reported*, not assumed |
+| Retention | months of useful heat; the bed loses about half of its energy in three months at rest | the standby path decides seasonal viability |
+| Measured profile | core ~500 °C, edge 150-200 °C: a strong permanent radial gradient with a cold shell | the mesh must resolve the shell, and the report should give energy above a delivery temperature |
 
-Consequences for the simulator, in one line each:
+### The gas loop in detail (from a granted patent on the closed-loop design)
 
-1. the heat transfer fluid is **air in pipes**, not a fluid in "tubes" with a fixed inlet
-   temperature, and the pipes are the *only* exchange surface;
-2. the **resistors heat the air**, not the bed: charging and discharging are the same
-   loop with opposite external power;
-3. there is **no air region** to simulate: the outside of the silo is an insulated wall
-   with a natural-convection + wind boundary condition;
-4. the bed works with a **strong radial gradient** (core 500 °C, edge 150-200 °C), so the
-   mesh must resolve the shell/insulation, not a thin sheath in the middle.
+* the pipes are **stainless steel** (304L/304H/316L/316H/321H/330), arranged
+  **vertically** in the module (horizontal or inclined are claimed alternatives);
+* the gas is preferably **inert** at **up to 50 bar**, and the stated reason is that
+  *"pressurization may be utilized to increase the heat transfer rate without increasing
+  the gas velocity excessively"* - a design lever the model should expose: at constant
+  velocity `Re ~ rho`, so `h` rises with pressure while the fan loss stays put;
+* the fan is bidirectional, rated for the hot side, with its **motor outside the loop**;
+* **charge top->bottom** (aids natural convection, cuts fan power), **discharge
+  bottom->top**; the gas leaves the bed close to the bed temperature and goes to a
+  **counter-flow** exchanger, leaving it at **40-70 °C** - the loop's cold-side
+  temperature, i.e. the `t_in` of a discharge in the model;
+* insulation is a low-conductivity granular material (`lambda < 0.3 W/(m K)`);
+* an alternative discharge path is claimed as **thermosiphon tubes** (sealed, partial
+  liquid fill, dry-up allowed, superheated vapour, inclined, up to 15 m long, example
+  9 mm inner diameter at 200 bar / 500 °C): passive, no fan, but a two-phase pressurised
+  circuit - listed here, not modelled.
 
-### The gas loop in detail (patent US20220146205A1 / granted US12104855B2)
+The architecture is therefore **gas inside pipes**, not a distributed flow through the
+bed: the distributed-flow family (rock-bed electric-thermal storage, CSP rock beds) is a
+different machine and is not what this simulator imitates.
+
+*Sources are deliberately not named: the project explores the design space around this
+class of machines rather than reproducing one product.  The numbers above are published
+industrial data; the physics references are named in the rest of this document.*
+
+### The gas loop in detail (patent the reference / granted the reference)
 
 * the pipes are **stainless steel** (304L/304H/316L/316H/321H/330), arranged
   **vertically** in the module (horizontal or inclined are claimed as alternatives);
@@ -61,7 +82,7 @@ The architecture is therefore **air inside pipes**, not a distributed flow throu
 bed: the distributed-flow family (Siemens Gamesa ETES, CSP rock beds) is a different
 machine and is not what this simulator should imitate.
 
-### From the patent (US20220146205A1 / US12104855B2) and the efficiency note
+### From the same patent family and the published efficiency notes
 
 * the resistor sits **in the gas circuit** (a heater in an insulated vessel), never in
   the bed; the gas leaves it at 700-1000 °C (up to 2000 °C claimed);
@@ -74,11 +95,11 @@ machine and is not what this simulator should imitate.
 * **circulation losses (fan + ducts) are ~5% per cycle**, standby loss < 5%; the
   published round-trip efficiency (>90% large, 85-90% products) is consistent with those
   two terms, which means *the model must report both*;
-* Pornainen's implied charge power density is ~1.1 kW/m³ of bed, and the bed **loses
+* the reference's implied charge power density is ~1.1 kW/m³ of bed, and the bed **loses
   about 50% of its energy in three months at rest** - the number that decides whether a
   seasonal storage is viable at all;
-* other architectures for comparison: **Brenmiller bGen** puts the resistors *inside* a
-  crushed-rock bed (650 °C, ~300 kWh/m³, 10 t modules); **Rondo** uses Joule heaters in
+* other architectures for comparison: **the reference the reference** puts the resistors *inside* a
+  crushed-rock bed (650 °C, ~300 kWh/m³, 10 t modules); **the reference** uses Joule heaters in
   a refractory brick stack at 1500 °C where *radiation* does the transfer (>97% RTE,
   <1%/day).  Radiation is not transferable to a 400-600 °C granular bed, which is why the
   air loop is the right reference for this machine.

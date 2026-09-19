@@ -175,3 +175,48 @@ def test_an_impossible_operating_point_is_refused():
     with pytest.raises(ValueError, match="cannot carry"):
         FluidLoop(runs=[run], mass_flow=0.005, h_fluid=500.0,
                   external_power=-60_000.0).solve(mesh)
+
+
+# ------------------------------------------------------------------ hydraulics
+def test_the_friction_factor_matches_the_classical_values():
+    from src.solver.fluid import friction_factor
+    # laminar: f = 64/Re
+    assert friction_factor(1000.0) == pytest.approx(0.064, rel=1e-12)
+    # smooth pipe, Re = 1e5: Haaland gives 0.0181 (Colebrook: 0.0180)
+    assert friction_factor(1e5) == pytest.approx(0.0181, rel=2e-2)
+    # rough pipe: more friction than a smooth one at the same Reynolds
+    assert friction_factor(1e5, 0.01) > friction_factor(1e5, 0.0)
+
+
+def test_the_pressure_drop_scales_with_the_square_of_the_flow():
+    from src.solver.fluid import pressure_drop
+    fluid = Fluid()
+    one = pressure_drop(0.05, 0.05, 4.0, fluid)
+    two = pressure_drop(0.10, 0.05, 4.0, fluid)
+    assert one > 0.0
+    # turbulent: dp = (f L/D + K) rho u^2 / 2 with f falling slowly with Re, so the
+    # exponent sits between 1.8 (rough, f ~ Re^-0.2) and 2 (f constant)
+    assert 1.7 < float(np.log(two / one) / np.log(2.0)) < 2.0
+    # local losses add up
+    assert pressure_drop(0.05, 0.05, 4.0, fluid, fittings_k=5.0) > one
+
+
+def test_pressure_is_the_cheap_lever_of_a_gas_loop():
+    """At constant mass flow, pressure raises h and lowers the pressure drop."""
+    from src.solver.fluid import pipe_h, pressure_drop
+    cold = Fluid().at(500.0)
+    dense = Fluid().at_pressure(20.0 * 101325.0, 500.0)   # 20 atm (the reference is 1 atm)
+    assert dense.rho == pytest.approx(cold.rho * 20.0, rel=1e-9)
+    assert pipe_h(0.05, 0.05, dense) > pipe_h(0.05, 0.05, cold)
+    assert pressure_drop(0.05, 0.05, 4.0, dense) < pressure_drop(0.05, 0.05, 4.0, cold)
+
+
+def test_the_loop_reports_its_circulation_loss():
+    mesh = uniform_bed()
+    run = vertical_run(mesh)
+    result = FluidLoop(runs=[run], mass_flow=0.05, h_fluid=500.0, t_in=300.0,
+                       fittings_k=10.0).solve(mesh)
+    assert result.delta_p > 0.0
+    assert result.fan_power > 0.0
+    assert 0.0 < result.circulation_loss < 1.0
+    assert "fan" in result.summary()
