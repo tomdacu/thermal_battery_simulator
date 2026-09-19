@@ -121,6 +121,26 @@ CG+AMG, the energy-balance verification, the GCI-based reporting.
 
 ---
 
+### Pipe bundle geometry (design data used by `src/core/pipes.py`)
+
+Pitches are quoted as multiples of the outer tube diameter: **2.0 d** horizontally,
+**2.0-2.5 d** vertically, **sqrt(3) d** for an equilateral (triangular) lattice; the
+arrangement is **staggered** (alternate rows shifted by half a horizontal pitch), which
+is what the design literature recommends for a bundle in a granular bed.  Published
+examples use 18-25 mm tubes, 9 m long, prefabricated in a workshop and lifted in, with
+collectors made of flat plates and semi-shells at the tube ends.
+
+Two limits come from the same literature and are checked by the generator:
+
+* **header height <= 3 m**: below 1 m the distribution needs no care, between 1 and 3 m
+  it does, above 3 m the bundle must be split into identical parallel modules;
+* **bed height <= 4 m** per module in the fluidised-bed reference, which is a reasonable
+  cap for a static module too.
+
+The sizing number a designer needs is the **specific wetted area** (m^2 of pipe surface
+per m^3 of bed); `BankLayout.specific_area` reports it together with the pitch, the
+bundle width and the header height.
+
 ## 3. The fluid loop (implemented, `src/solver/fluid.py`)
 
 Geometry in `src/core/pipes.py`: a pipe run is a polyline; `rasterize_pipe` returns the

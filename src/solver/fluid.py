@@ -179,13 +179,28 @@ class FluidResult:
     q_fluid: np.ndarray | None = None   # [W/m^3] source term for the solid, + = in
     delta_p: float = 0.0                # [Pa] pressure drop of the circuit
     fan_power: float = 0.0              # [W] shaft power of the blower
+    pressure: float = 101325.0          # [Pa] loop pressure
+    notes: list[str] = field(default_factory=list)
 
     @property
     def circulation_loss(self) -> float:
-        """Fan power as a fraction of the power exchanged with the bed [-]."""
+        """Fan power over the power exchanged with the bed [-].
+
+        The published circulation figure of a storage cycle (~5%) is an *aggregate*:
+        blower, controls and the heating of the hot ducts.  The blower alone is quoted
+        at 1-2% of the plant power in the packed-bed literature, so both denominators
+        are reported: this one (thermal) and ``circulation_loss_electric``.
+        """
         if abs(self.power) <= 0.0:
             return 0.0
         return self.fan_power / abs(self.power)
+
+    @property
+    def circulation_loss_electric(self) -> float:
+        """Fan power over the external power of the loop (the electricity in)."""
+        if abs(self.external_power) <= 0.0:
+            return 0.0
+        return self.fan_power / abs(self.external_power)
 
     @property
     def ntu(self) -> float:
@@ -216,6 +231,9 @@ class FluidLoop:
     fittings_k: float = 0.0
     #: blower efficiency (electric power = shaft power / efficiency)
     fan_efficiency: float = 0.7
+    #: absolute pressure of the loop [Pa]: sets the density and the validity of the
+    #: incompressible pressure-drop treatment (valid while dp/p < 10%)
+    pressure: float = 101325.0
 
     # ------------------------------------------------------------------ helpers
     def _flow_split(self) -> np.ndarray:
@@ -228,12 +246,12 @@ class FluidLoop:
             raise ValueError("split must give one positive fraction per run")
         return split / split.sum()
 
-    def _h(self, mass_flow_run: float) -> float:
+    def _h(self, mass_flow_run: float, fluid: Fluid) -> float:
         if self.h_fluid is not None:
             return float(self.h_fluid)
         diameters = [run.diameter for run in self.runs if run.diameter > 0]
         diameter = float(np.mean(diameters)) if diameters else 0.05
-        return pipe_h(mass_flow_run, diameter, self.fluid)
+        return pipe_h(mass_flow_run, diameter, fluid)
 
     # -------------------------------------------------------------------- solve
     def solve(self, mesh: Mesh3D, wall: np.ndarray | None = None) -> FluidResult:
@@ -245,6 +263,9 @@ class FluidLoop:
         outlet and mean fluid temperature, so the loop balance and the per-cell power
         are evaluated in one vectorised pass after the march.
         """
+        # a pressurised loop uses the density of its pressure, not of 1 atm
+        fluid = (self.fluid if abs(self.pressure - 101325.0) <= 1.0
+                 else self.fluid.at_pressure(self.pressure, self.t_in or 300.0))
         wall_flat = np.asarray(mesh.T if wall is None else wall).ravel(order="F")
         volume = mesh.V.ravel(order="F")
         split = self._flow_split()
@@ -254,11 +275,11 @@ class FluidLoop:
         slope = offset = 0.0
         for run, fraction in zip(self.runs, split, strict=True):
             m_dot = float(self.mass_flow * fraction)
-            h = self._h(m_dot)
+            h = self._h(m_dot, fluid)
             if m_dot <= 0 or h <= 0 or run.cells.size == 0:
                 marches.append(None)
                 continue
-            mc = m_dot * self.fluid.cp
+            mc = m_dot * fluid.cp
             count = run.cells.size
             # columns: in_a, in_b, out_a, out_b, mean_a, mean_b
             coeff = np.empty((count, 6), dtype=float)
@@ -306,14 +327,14 @@ class FluidLoop:
             t_in_cell = coeff[:, 0] * t_in + coeff[:, 1]
             t_out_cell = coeff[:, 2] * t_in + coeff[:, 3]
             t_mean = coeff[:, 4] * t_in + coeff[:, 5]
-            q_cell = m_dot * self.fluid.cp * (t_in_cell - t_out_cell)     # [W]
+            q_cell = m_dot * fluid.cp * (t_in_cell - t_out_cell)          # [W]
             q_fluid[run.cells] += q_cell / volume[run.cells]              # [W/m^3]
             run_power = float(np.sum(q_cell))
             total_power += run_power
             result.runs.append(RunResult(
                 name=run.name, cells=run.cells, t_fluid=t_mean, q_solid=q_cell,
                 t_out=float(a * t_in + b), mass_flow=m_dot, power=run_power,
-                ntu=float(np.sum(h * run.area / (m_dot * self.fluid.cp)))))
+                ntu=float(np.sum(h * run.area / (m_dot * fluid.cp)))))
             weighted_out += m_dot * float(a * t_in + b)
             weight += m_dot
 
@@ -321,10 +342,16 @@ class FluidLoop:
         delta_p = 0.0
         for run in self.runs:
             delta_p += pressure_drop(self.mass_flow, run.diameter, run.total_length,
-                                     self.fluid, self.roughness, self.fittings_k)
+                                     fluid, self.roughness, self.fittings_k)
         result.delta_p = delta_p
-        result.fan_power = fan_power(self.mass_flow, delta_p, self.fluid,
+        result.pressure = float(self.pressure)
+        result.fan_power = fan_power(self.mass_flow, delta_p, fluid,
                                      self.fan_efficiency)
+        if delta_p > 0.1 * self.pressure:
+            result.notes.append(
+                f"the circuit drops {delta_p / self.pressure * 100:.0f}% of its absolute "
+                f"pressure: the gas is no longer incompressible, the density varies "
+                f"along the loop and this pressure-drop model loses validity")
         result.q_fluid = q_fluid
         result.power = total_power
         result.t_out = weighted_out / weight if weight > 0 else float("nan")

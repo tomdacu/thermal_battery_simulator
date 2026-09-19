@@ -232,3 +232,74 @@ def test_the_loop_reports_its_circulation_loss():
     assert result.fan_power > 0.0
     assert 0.0 < result.circulation_loss < 1.0
     assert "fan" in result.summary()
+
+
+def test_the_circulation_loss_is_reported_against_both_denominators():
+    """The published ~5% is an aggregate; the blower alone is 1-2% of the plant power."""
+    mesh = uniform_bed()
+    run = vertical_run(mesh)
+    result = FluidLoop(runs=[run], mass_flow=0.05, h_fluid=500.0, t_in=300.0,
+                       external_power=-2000.0, fittings_k=10.0).solve(mesh)
+    assert result.circulation_loss > 0.0
+    assert result.circulation_loss_electric == pytest.approx(
+        result.fan_power / abs(result.external_power), rel=1e-12)
+    assert result.circulation_loss == pytest.approx(
+        result.fan_power / abs(result.power), rel=1e-12)
+
+
+def test_a_pressurised_loop_uses_the_density_of_its_pressure():
+    mesh = uniform_bed()
+    run = vertical_run(mesh)
+    common = dict(runs=[run], mass_flow=0.05, h_fluid=500.0, t_in=300.0,
+                  external_power=-2000.0)
+    ambient = FluidLoop(**common).solve(mesh)
+    dense = FluidLoop(pressure=20.0 * 101325.0, **common).solve(mesh)
+    assert dense.delta_p < ambient.delta_p           # lower velocity, less fan work
+    assert dense.fan_power < ambient.fan_power
+
+
+def test_a_circuit_that_drops_its_own_pressure_is_flagged():
+    """Above dp/p = 10% the incompressible treatment must be declared invalid."""
+    mesh = uniform_bed()
+    run = vertical_run(mesh)
+    result = FluidLoop(runs=[run], mass_flow=0.5, h_fluid=500.0, t_in=300.0,
+                       external_power=-2000.0, fittings_k=200.0,
+                       pressure=101325.0).solve(mesh)
+    assert result.delta_p > 0.1 * result.pressure
+    assert any("incompressible" in note for note in result.notes)
+
+
+# ------------------------------------------------------------------- layouts
+def test_the_staggered_bank_follows_the_published_pitches():
+    from src.core.pipes import staggered_bank
+    mesh = uniform_bed(spacing=0.25, cells=16)          # 4 m box
+    layout = staggered_bank(mesh, center=(2.0, 2.0), radius=1.5, z_bottom=0.0,
+                            z_top=2.0, diameter=0.025)
+    assert layout.n_pipes > 100
+    assert layout.horizontal_pitch == pytest.approx(3 ** 0.5 * 0.025, rel=1e-12)
+    assert layout.vertical_pitch == pytest.approx(3 ** 0.5 * 0.025, rel=1e-12)
+    # every pipe really sits inside the circle, at the right height
+    for run in layout.runs:
+        x, y = run.points[0, 0] - 2.0, run.points[0, 1] - 2.0
+        assert x ** 2 + y ** 2 <= 1.5 ** 2 + 1e-9
+        assert run.points[0, 2] == 0.0 and run.points[-1, 2] == 2.0
+    # the specific area is the sizing number: pi d L n / V
+    expected = np.pi * 0.025 * 2.0 * layout.n_pipes / (np.pi * 1.5 ** 2 * 2.0)
+    assert layout.specific_area == pytest.approx(expected, rel=1e-9)
+
+
+def test_a_tall_bundle_is_flagged_for_the_header_limit():
+    from src.core.pipes import HEADER_LIMIT, staggered_bank
+    mesh = uniform_bed(spacing=0.5, cells=12)
+    layout = staggered_bank(mesh, center=(3.0, 3.0), radius=2.0, z_bottom=0.0,
+                            z_top=4.0, diameter=0.05, vertical_pitch=0.5)
+    assert layout.bundle_height > HEADER_LIMIT
+    assert any("split into parallel modules" in note for note in layout.notes)
+
+
+def test_a_pitch_smaller_than_the_tube_is_refused():
+    from src.core.pipes import staggered_bank
+    mesh = uniform_bed()
+    with pytest.raises(ValueError, match="pitch"):
+        staggered_bank(mesh, center=(1.0, 1.0), radius=1.0, z_bottom=0.0, z_top=1.0,
+                       diameter=0.05, horizontal_pitch=0.02)

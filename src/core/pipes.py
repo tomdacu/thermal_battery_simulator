@@ -145,3 +145,100 @@ def describe(runs: Iterable[PipeRun]) -> str:
                      f"L {run.total_length:7.2f} m  A {run.total_area:7.3f} m2  "
                      f"d {run.diameter * 1000:.1f} mm")
     return "\n".join(lines)
+
+
+#: pitches published for tube bundles in a granular bed, in multiples of the outer
+#: diameter: horizontal 2.0, vertical 2.0-2.5, equilateral (triangular) sqrt(3)
+PITCH_HORIZONTAL = 2.0
+PITCH_VERTICAL = 2.5
+PITCH_TRIANGULAR = 3.0 ** 0.5
+
+#: header (collector) height limits: below 1 m no care is needed, 1-3 m needs flow
+#: distribution care, above 3 m the bundle must be split into parallel modules
+HEADER_SAFE = 1.0
+HEADER_LIMIT = 3.0
+
+
+@dataclass
+class BankLayout:
+    """A bundle of vertical pipes and the numbers a designer needs."""
+
+    runs: list[PipeRun]
+    horizontal_pitch: float
+    vertical_pitch: float
+    bundle_width: float
+    bundle_height: float
+    bed_volume: float
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def n_pipes(self) -> int:
+        return len(self.runs)
+
+    @property
+    def area(self) -> float:
+        return float(sum(run.total_area for run in self.runs))
+
+    @property
+    def specific_area(self) -> float:
+        """Wetted area per unit bed volume [m^2/m^3] - the sizing number."""
+        return self.area / self.bed_volume if self.bed_volume > 0 else 0.0
+
+    def summary(self) -> str:
+        return (f"bundle: {self.n_pipes} pipes, pitch {self.horizontal_pitch * 1000:.0f}"
+                f"/{self.vertical_pitch * 1000:.0f} mm, width {self.bundle_width:.2f} m, "
+                f"header {self.bundle_height:.2f} m, area {self.area:.2f} m2 "
+                f"({self.specific_area:.2f} m2/m3)")
+
+
+def staggered_bank(mesh: Mesh3D, center: tuple[float, float], radius: float,
+                   z_bottom: float, z_top: float, diameter: float,
+                   horizontal_pitch: float | None = None,
+                   vertical_pitch: float | None = None,
+                   triangular: bool = True, name: str = "bank") -> BankLayout:
+    """Vertical pipes on a staggered lattice inside a circle: the standard bundle.
+
+    Pitches default to the published practice for tube bundles in a granular bed
+    (``2.0 d`` horizontal, ``sqrt(3) d`` equilateral, ``2.5 d`` square).  The layout is
+    staggered (alternate rows shifted by half a horizontal pitch), which is what the
+    design literature recommends, and the header height is checked against the
+    collector limits.
+    """
+    p_h = float(horizontal_pitch or (PITCH_TRIANGULAR if triangular else PITCH_HORIZONTAL)
+                * diameter)
+    p_v = float(vertical_pitch or (PITCH_TRIANGULAR if triangular else PITCH_VERTICAL)
+                * diameter)
+    if p_h < diameter or p_v < diameter:
+        raise ValueError("the pitch cannot be smaller than the tube diameter")
+
+    runs: list[PipeRun] = []
+    rows = int(np.floor(2.0 * radius / p_v)) + 1
+    y0 = -0.5 * (rows - 1) * p_v
+    for row in range(rows):
+        y = y0 + row * p_v
+        offset = 0.5 * p_h if (triangular and row % 2) else 0.0
+        half = float(np.sqrt(max(radius ** 2 - y ** 2, 0.0)))
+        columns = int(np.floor((2.0 * half - offset) / p_h)) + 1
+        x0 = -0.5 * (columns - 1) * p_h + offset
+        for column in range(max(columns, 0)):
+            x = x0 + column * p_h
+            if x ** 2 + y ** 2 <= radius ** 2 + 1e-12:
+                runs.append(rasterize_pipe(
+                    mesh, [(center[0] + x, center[1] + y, z_bottom),
+                           (center[0] + x, center[1] + y, z_top)],
+                    diameter, name=f"{name}_{len(runs)}"))
+
+    layout = BankLayout(runs=runs, horizontal_pitch=p_h, vertical_pitch=p_v,
+                        bundle_width=2.0 * radius,
+                        bundle_height=max(rows - 1, 1) * p_v,
+                        bed_volume=float(np.pi * radius ** 2 * max(z_top - z_bottom, 0.0)))
+    if layout.bundle_height > HEADER_LIMIT:
+        layout.notes.append(
+            f"the header would be {layout.bundle_height:.1f} m tall: above "
+            f"{HEADER_LIMIT:.0f} m the bundle must be split into parallel modules to "
+            f"keep the flow distribution uniform")
+    elif layout.bundle_height > HEADER_SAFE:
+        layout.notes.append(
+            f"header {layout.bundle_height:.1f} m: check the flow distribution between "
+            f"the tubes")
+    return layout
