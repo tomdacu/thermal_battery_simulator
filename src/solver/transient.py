@@ -27,6 +27,7 @@ from ..core.mesh import MaterialID, Mesh3D
 from ..core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from .linear import PreconditionerCache, solve_linear
 from ..core.grid import GridIndex
+from .fluid import FluidLoop
 from .matrix import build_transient_operators, transient_rhs
 from .results import TransientResults
 from .steady import SolverConfig
@@ -44,6 +45,10 @@ class TransientConfig:
     initial_condition: InitialCondition = field(default_factory=InitialCondition)
     power_profile: PowerProfile = field(default_factory=PowerProfile)
     extraction_profile: ExtractionProfile = field(default_factory=ExtractionProfile)
+    #: a closed gas loop through pipes buried in the bed: when present it *is* the
+    #: heat transfer path, and the profiles drive its external power (resistors while
+    #: charging, exchanger while discharging) instead of depositing heat in the sand
+    fluid_loop: FluidLoop | None = None
 
     def n_steps(self) -> int:
         return int(np.ceil(self.t_final / self.dt))
@@ -83,6 +88,8 @@ class TransientSolver:
         # cell volumes to the iterative solver so it can symmetrise (see solve_linear)
         self._scale = None if self.mesh.uniform else self.mesh.V.ravel(order="F")
         self.notes = []
+        #: outcome of the last fluid-loop march (None when no loop is configured)
+        self.fluid_result = None
 
     # ------------------------------------------------------------------ setup
     def apply_initial_condition(self) -> None:
@@ -100,6 +107,29 @@ class TransientSolver:
         # exchange area the tube cells can offer to the fluid, per unit volume
         self._tube_area_over_v = float(np.sum(self.mesh.V[self._tube]
                                               / self.mesh.h_char[self._tube]))
+
+    def _set_fluid_loop(self, power: float, extraction: float) -> bool:
+        """March the loop and deposit its power; True when the loop did the work.
+
+        The external power of the loop is what the resistors inject (``power``) plus
+        what the exchanger takes out (``extraction``): the gas carries the heat, the
+        sand sees the pipes, and the fan power is reported with the cycle.
+        """
+        loop = self.config.fluid_loop
+        if loop is None:
+            return False
+        # the resistors add to the gas, the exchanger takes from it
+        loop.external_power = float(power) - float(extraction)
+        result = loop.solve(self.mesh)
+        self.fluid_result = result
+        flat = result.q_fluid
+        if flat is None:
+            return False
+        q = flat.reshape(self.mesh.T.shape, order="F")
+        self.mesh.Q_source = np.where(q > 0.0, q, 0.0)
+        self.mesh.Q_sink = np.where(q < 0.0, q, 0.0)
+        self.mesh.bc_h[self._tube] = 0.0
+        return True
 
     def _set_power(self, power: float) -> None:
         if self._n_source is None:
@@ -166,8 +196,10 @@ class TransientSolver:
                 break
             step_dt = min(dt, cfg.t_final - t)
             power = cfg.power_profile.power_at(t)
-            self._set_power(power)
-            self._set_extraction(t)
+            extraction = cfg.extraction_profile.power_request(t)
+            if not self._set_fluid_loop(power, extraction):
+                self._set_power(power)
+                self._set_extraction(t)
 
             if not stationary_operator or step_dt != dt:
                 # the shortened final step needs operators built for its own dt,
