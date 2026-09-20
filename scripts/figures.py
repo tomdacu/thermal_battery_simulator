@@ -70,27 +70,40 @@ def battery_with_pipes() -> None:
         tube = pv.Line((x, y, z0), (x, y, z1))
         plot.add_mesh(tube.tube(radius=0.035, n_sides=10), color=COLD,
                       smooth_shading=True)
-    for ring_radius, z in ((1.25, z1), (0.75, z1 + 0.25), (1.25, base + 0.15),
-                           (0.75, base + 0.15)):
+
+    def ring_points(radius: float, z: float) -> np.ndarray:
         angles = np.linspace(0.0, 2.0 * np.pi, 97)
-        points = np.column_stack([ring_radius * np.cos(angles),
-                                  ring_radius * np.sin(angles),
-                                  np.full(angles.shape, z)])
-        ring_line = pv.lines_from_points(points)
-        plot.add_mesh(ring_line.tube(radius=0.05, n_sides=10),
-                      color=HOT if z > base + 1.0 else COLD, smooth_shading=True)
-    for index in range(4):
-        angle = 2 * np.pi * index / 4 + 0.4
-        x, y = 1.25 * np.cos(angle), 1.25 * np.sin(angle)
-        link = pv.Line((x, y, z1), (0.75 * np.cos(angle), 0.75 * np.sin(angle), z1 + 0.25))
-        plot.add_mesh(link.tube(radius=0.05, n_sides=10), color=HOT, smooth_shading=True)
-    outlet = pv.Line((0.0, 0.0, base + height - 0.35), (0.0, 0.0, base + height + 0.9))
-    plot.add_mesh(outlet.tube(radius=0.075, n_sides=12), color=HOT, smooth_shading=True)
-    plot.add_mesh(pv.Cylinder(center=(0, 0, base + height + 0.75), direction=(0, 0, 1),
-                              radius=0.22, height=0.5, resolution=32, capping=True),
-                  color="#c0c0c0")
+        return np.column_stack([radius * np.cos(angles), radius * np.sin(angles),
+                                np.full(angles.shape, z)])
+
+    # two concentric manifolds at each end, joined by radial links: a collector that
+    # is a single ring would starve the inner risers
+    for radius in (1.25, 0.65):
+        for z in (z0, z1):
+            plot.add_mesh(pv.lines_from_points(ring_points(radius, z))
+                          .tube(radius=0.05, n_sides=10),
+                          color=HOT if z > base + 1.0 else COLD, smooth_shading=True)
+    for index in range(6):
+        angle = 2 * np.pi * index / 6 + 0.25
+        for z in (z0, z1):
+            link = pv.Line((0.65 * np.cos(angle), 0.65 * np.sin(angle), z),
+                           (1.25 * np.cos(angle), 1.25 * np.sin(angle), z))
+            plot.add_mesh(link.tube(radius=0.045, n_sides=10),
+                          color=HOT if z > base + 1.0 else COLD, smooth_shading=True)
+    # the ducts leave from the *side*: a real installation is not axisymmetric, and
+    # neither the inlet nor the outlet comes out of the roof
+    cold_duct = pv.Line((-radius - 0.9, 0.0, base + 0.25), (0.0, 0.0, base + 0.15))
+    plot.add_mesh(cold_duct.tube(radius=0.10, n_sides=12), color=COLD,
+                  smooth_shading=True)
+    hot_duct = pv.Line((0.65, 0.0, z1 + 0.05), (radius + 1.1, 0.0, z1 + 0.75))
+    plot.add_mesh(hot_duct.tube(radius=0.10, n_sides=12), color=HOT,
+                  smooth_shading=True)
+    plot.add_mesh(pv.Cylinder(center=(-radius - 1.05, 0.0, base + 0.28),
+                              direction=(1, 0, 0), radius=0.16, height=0.3,
+                              resolution=24, capping=True), color="#c0c0c0")
     plot.camera_position = [(7.5, -7.5, 5.4), (0, 0, base + height / 2), (0, 0, 1)]
-    plot.add_text("cold gas in at the bottom (blue)\nhot gas collected at the top (red)",
+    plot.add_text("cold gas in from the side, at the bottom (blue)\n"
+                  "hot gas collected at the top, out from the side (red)",
                   position="upper_left", font_size=13, color=INK)
     plot.screenshot(str(OUT / "geometry_buried_pipes.png"))
     plot.close()
