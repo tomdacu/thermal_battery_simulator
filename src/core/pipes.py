@@ -16,7 +16,10 @@ This module therefore does two things:
 
 The sum of the areas equals ``pi * d * total length`` to machine precision, which is
 the invariant the fluid solve relies on: distributing the exchange over the cells must
-not create or destroy surface.
+not create or destroy surface.  Stated per cell: the wetted area of cell ``c`` is
+``pi d L_c`` with ``L_c`` the length of *centreline* inside that cell, and
+``sum_c pi d L_c = pi d L_total``.  No area is ever counted from the mask - the mask
+paints material, it does not measure surface.
 """
 from __future__ import annotations
 
@@ -44,7 +47,11 @@ class PipeRun:
 
     @property
     def area(self) -> np.ndarray:
-        """Wetted area of the pipe inside each crossed cell [m^2]."""
+        """Wetted area built inside each crossed cell [m^2]: ``pi d L_cell``.
+
+        Geometric, from the centreline length in the cell: the voxel mask is never
+        involved, and ``sum(area) == perimeter * sum(length)`` exactly.
+        """
         return self.perimeter * self.length
 
     @property
