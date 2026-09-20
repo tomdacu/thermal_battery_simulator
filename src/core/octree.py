@@ -13,32 +13,34 @@ the solution asks for them, and this module provides the two things that make it
   with opposite signs in the two cells that share it and the discrete balance closes to
   machine precision on *any* combination of levels.
 
-**Status: second pass, still not finished.**  Fixed in this pass: the neighbour search
-now starts at the finest level, so it can see *finer* neighbours (it walked towards the
-coarse levels before and was blind to them), and the leaf list is deduplicated after
-every mutation (the same leaf could appear several times, and every earlier copy looked
-like a leaf with no faces).  With those two fixes a graded tree has 2 lonely leaves
-instead of 16, but the face list still emits roughly five times too many faces - a
-uniform 4x4x4 tree of leaves has 738 face entries where 144 exist - so the deduplication
-inside `faces()` is still wrong and the matrix it produces is not yet usable.  The next
-step is to instrument `faces()` on that small tree: print every emitted entry for one
-leaf and compare against its six neighbours.
+**Status: complete.**  A face is probed at its centre and, when the leaf found there is
+finer, at the centre of every sub-face of *half* the leaf size: a coarse face against
+``n`` finer leaves comes back as those ``n`` leaves with the fine area, a pair of equal
+leaves as one entry, and each pair is listed once - by the coarse side of a coarse/fine
+pair, which is the side that sees the sub-faces, and by the lower index of an equal pair.
+What the earlier passes got wrong: the probes walked the tangential offsets at the *leaf*
+size, so a probe landed beyond the neighbouring sub-face and returned edge and corner
+neighbours as well as face neighbours (738 entries on a uniform 4x4x4 tree where 144
+exist), while the deduplication key (pair, axis) turned those extra neighbours into extra
+entries; and the level was read as a refinement depth by `split` (which handed out
+*larger* children and refused to split the root) while `uniform_tree`, `size` and
+`coarsen` read it as the logarithm of the edge length.  The convention is the latter: the
+level of a leaf is ``log2`` of its edge in finest cells, so level 0 is a single finest
+cell and ``Octree.max_level`` is the leaf that is the whole box.  The Morton code packs 21
+bits per coordinate now, so the round trip is exact for leaves of mixed level; it
+interleaved only ``level + 1`` bits before and dropped the high bits of any leaf whose
+coordinates did not fit in its own level.
 
-**Status note (first draft).**  What works: the leaf algebra, the uniform coverage, the 2:1
-balance on a refined corner, the neighbour count at a face, and the refinement and
-coarsening drives.  What is still failing in `tests/test_octree.py` (skipped, not
-deleted): the Morton round trip for leaves of mixed level, the split semantics check,
-the exact face count of a uniform tree, and the vanishing flux sum.  The neighbour
-search is also too slow for trees above a few thousand leaves because every query
-walks the level ladder; the fix is a Morton-sorted leaf array with binary search, as in
-the linear-octree literature cited in `docs/13_REDESIGN.md`.
+The leaf list is indexed per level by the level-normalised corner, so a neighbour query
+is a couple of dictionary lookups rather than a walk over every leaf: a uniform tree of
+32768 leaves and its 95232 faces are done in about half a second, which is the budget the
+tests pin.  The blocks of Afivo (one dense leaf per octant) are the next step if a
+*refined* tree of that size has to go faster - the balance rounds, not the face list, are
+what costs seconds there - and they change no formula in this file.
 
 The representation is a *linear* octree in the sense of p4est: every leaf is an integer
 triple ``(level, x, y, z)`` with the coordinates counted in the finest cells, so
 neighbour finding is integer arithmetic and a Morton code gives a canonical order.
-Leaves are dense blocks in the sense of Afivo only in spirit: the code stores one leaf
-per cell here, which is enough to be correct and testable; the block storage is a
-performance step that does not change any of the formulas in this file.
 
 The assembly reuses the harmonic mean of the conductivities and the
 ``k A / (d_centers V)`` coefficient of the structured solver, so an octree mesh and a
@@ -55,10 +57,18 @@ from scipy import sparse
 
 EPS = 1e-30
 
+#: bits per coordinate in the Morton code: 3 * 21 = 63, the 64-bit linear index of p4est
+MORTON_BITS = 21
+
 
 @dataclass(frozen=True, order=True)
 class Leaf:
-    """One octree leaf: ``level`` and its lower corner in finest-cell units."""
+    """One octree leaf: ``level`` and its lower corner in finest-cell units.
+
+    ``level`` is ``log2`` of the edge length in finest cells, so level 0 is a single
+    finest cell and the coarsest leaf of a box of ``n`` finest cells has level
+    ``log2(n)``.  The lower corner is a multiple of the edge length.
+    """
 
     level: int
     x: int
@@ -77,9 +87,13 @@ class Leaf:
         return (self.x + half, self.y + half, self.z + half)
 
     def morton(self) -> int:
-        """Interleaved-bit code: a canonical order that keeps neighbours close."""
+        """Interleaved-bit code: a canonical order that keeps neighbours close.
+
+        Every coordinate gets a full ``MORTON_BITS`` field, so leaves of different level
+        can be compared and recovered from their codes.
+        """
         code = 0
-        for bit in range(self.level + 1):
+        for bit in range(MORTON_BITS):
             for axis, value in enumerate((self.x, self.y, self.z)):
                 code |= ((value >> bit) & 1) << (3 * bit + axis)
         return code
@@ -89,7 +103,7 @@ def _morton_roundtrip(leaf: Leaf) -> Leaf:
     """Recover a leaf from its Morton code (used by the tests and by sorting)."""
     code = leaf.morton()
     x = y = z = 0
-    for bit in range(leaf.level + 1):
+    for bit in range(MORTON_BITS):
         x |= ((code >> (3 * bit + 0)) & 1) << bit
         y |= ((code >> (3 * bit + 1)) & 1) << bit
         z |= ((code >> (3 * bit + 2)) & 1) << bit
@@ -101,6 +115,9 @@ def _morton_roundtrip(leaf: Leaf) -> Leaf:
 FACES = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
 FACE_AXIS = {"x_min": 0, "x_max": 0, "y_min": 1, "y_max": 1, "z_min": 2, "z_max": 2}
 FACE_SIGN = {"x_min": -1, "x_max": +1, "y_min": -1, "y_max": +1, "z_min": -1, "z_max": +1}
+#: the two axes a face spans, in the order the sub-face probes walk them
+_FACE_TANGENTIAL = {"x_min": (1, 2), "x_max": (1, 2), "y_min": (0, 2), "y_max": (0, 2),
+                    "z_min": (0, 1), "z_max": (0, 1)}
 
 
 class Octree:
@@ -111,8 +128,8 @@ class Octree:
             raise ValueError("n_finest must be a power of two")
         self.n = int(n_finest)
         self.max_level = int(np.log2(self.n))
-        self.leaves: list[Leaf] = sorted(leaves) if leaves else [Leaf(0, 0, 0, 0)]
-        self._index: dict[Leaf, int] = {leaf: i for i, leaf in enumerate(self.leaves)}
+        # the default tree is the single leaf that is the whole box
+        self._reindex(leaves if leaves else [Leaf(self.max_level, 0, 0, 0)])
 
     # ------------------------------------------------------------- structure
     @property
@@ -123,74 +140,110 @@ class Octree:
         """Volume in finest-cell units cubed."""
         return float(leaf.size ** 3)
 
-    def _reindex(self, leaves) -> None:
-        """Rebuild the leaf list and the lookup, dropping duplicates.
+    def _reindex(self, leaves: Iterable[Leaf]) -> None:
+        """Rebuild the leaf list and the lookups, dropping duplicates.
 
         Duplicates are not hypothetical: a split that reaches the same leaf twice (two
         parents asking for it, or a refinement round revisiting it) would put the same
-        leaf in the list several times, ``_index`` would keep only the last position,
-        and every earlier copy would look like a leaf with no faces - which is exactly
-        what made the face list lose faces and the matrix singular.
+        leaf in the list several times, ``_index`` would keep only the last position, and
+        every earlier copy would look like a leaf with no faces - which is what made the
+        face list lose faces and the matrix singular.  The per-level tables key a leaf by
+        its corner shifted down to its own level, which is what the neighbour search
+        needs to be a couple of dictionary lookups instead of a walk over every leaf.
         """
         self.leaves = sorted(set(leaves))
         self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+        by_level: list[dict[tuple[int, int, int], int]] = [
+            {} for _ in range(self.max_level + 1)]
+        for index, leaf in enumerate(self.leaves):
+            if not 0 <= leaf.level <= self.max_level:
+                raise ValueError(f"leaf {leaf} does not fit a box of {self.n} finest cells")
+            by_level[leaf.level][(leaf.x >> leaf.level, leaf.y >> leaf.level,
+                                  leaf.z >> leaf.level)] = index
+        self._level_cells = by_level
 
     def split(self, leaf: Leaf) -> list[Leaf]:
-        """The eight children of a leaf."""
-        if leaf.level >= self.max_level:
+        """The eight children of a leaf: one level finer, half the edge length."""
+        if leaf.level <= 0:
             raise ValueError("the leaf is already at the finest level")
         half = leaf.size // 2
-        return [Leaf(leaf.level + 1, leaf.x + dx, leaf.y + dy, leaf.z + dz)
+        return [Leaf(leaf.level - 1, leaf.x + dx, leaf.y + dy, leaf.z + dz)
                 for dx in (0, half) for dy in (0, half) for dz in (0, half)]
 
-    def _find(self, x: int, y: int, z: int) -> Leaf | None:
-        """The leaf containing a point (in finest-cell units).
+    def _locate(self, x: int, y: int, z: int, coarsest: int = -1) -> int:
+        """Index of the leaf covering a point (in finest-cell units), or -1.
 
-        The search starts at the FINEST level and walks up: a neighbour can be finer
-        than the leaf we started from, and a search that only walked towards the coarse
-        levels could never see it - which is what made the face list miss the faces
-        against refined neighbours, leaving the matrix singular.
+        The walk starts at ``coarsest`` - the coarsest level a neighbour can have, which
+        is ``leaf.level + 1`` under the 2:1 rule - and goes towards the fine levels:
+        leaves are disjoint, so the first level that has a leaf over the point holds the
+        (unique) leaf that covers it.  Neighbours must be searched from the coarser bound
+        *down*, so that a finer neighbour is reached as well; a search that stopped at the
+        caller's own level was blind to refined neighbours, which is what left leaves of a
+        graded tree without any face.
         """
-        for candidate_level in range(self.max_level, -1, -1):
-            size = 1 << candidate_level
-            if size > self.n:
-                continue
-            lx, ly, lz = (x // size) * size, (y // size) * size, (z // size) * size
-            leaf = Leaf(candidate_level, lx, ly, lz)
-            if leaf in self._index:
-                return leaf
-        return None
+        top = self.max_level if coarsest < 0 else min(coarsest, self.max_level)
+        cells = self._level_cells
+        for level in range(top, -1, -1):
+            index = cells[level].get((x >> level, y >> level, z >> level))
+            if index is not None:
+                return index
+        return -1
+
+    def _face_neighbours(self, leaf: Leaf, face: str) -> list[int]:
+        """Indices of the leaves sharing this face, in sub-face order.
+
+        The face is probed at its centre.  A leaf that covers the centre and is not finer
+        than this one covers the whole face (it is aligned and at least as large), so the
+        face belongs to a single pair; when the leaf found there is finer it covers only
+        part of the face, and the face is then tiled by leaves of at most half the edge
+        length (2:1), which the four sub-face probes collect.  Every probe sits strictly
+        on the far side of the plane, so the leaf itself can never come back and no edge
+        or corner neighbour can pass for a face neighbour.
+        """
+        axis = FACE_AXIS[face]
+        corner = (leaf.x, leaf.y, leaf.z)
+        size = leaf.size
+        near = corner[axis]
+        # every probe sits one finest cell inside the neighbour: the neighbour's first
+        # cell on the high side, its last cell on the low side.  A point on the plane
+        # itself belongs to this leaf, because the search floors the coordinates, so a
+        # probe placed at ``near - size`` (the far side of a finer neighbour) would walk
+        # past the sub-face it means to look at.
+        if FACE_SIGN[face] > 0:
+            if near + size >= self.n:
+                return []                              # the far wall of the box
+            axis_coord = near + size
+        else:
+            if near <= 0:
+                return []                              # the near wall of the box
+            axis_coord = near - 1
+        coarsest = leaf.level + 1          # the 2:1 rule allows no coarser neighbour
+        tangent_a, tangent_b = _FACE_TANGENTIAL[face]
+        centre = [corner[0] + size // 2, corner[1] + size // 2, corner[2] + size // 2]
+        centre[axis] = axis_coord
+        first = self._locate(centre[0], centre[1], centre[2], coarsest)
+        if first < 0:
+            return []
+        if self.leaves[first].level >= leaf.level:
+            # a leaf at least this large that covers the centre of the face covers the
+            # whole face, so the face belongs to one pair only
+            return [first]
+        step = max(size // 2, 1)          # the finest a neighbour can be under 2:1
+        found: list[int] = []
+        for offset_a in (0, step):
+            for offset_b in (0, step):
+                point = [corner[0], corner[1], corner[2]]
+                point[axis] = axis_coord
+                point[tangent_a] += offset_a
+                point[tangent_b] += offset_b
+                index = self._locate(point[0], point[1], point[2], coarsest)
+                if index >= 0 and index not in found:
+                    found.append(index)
+        return found
 
     def neighbours(self, leaf: Leaf, face: str) -> list[Leaf]:
         """Leaves sharing this face: one, or up to four when the neighbour is finer."""
-        axis = FACE_AXIS[face]
-        sign = FACE_SIGN[face]
-        size = leaf.size
-        coord = (leaf.x, leaf.y, leaf.z)
-        axis_coord = coord[axis] + (size if sign > 0 else -size)
-        if axis_coord < 0 or axis_coord >= self.n:
-            return []
-        # walk over the two tangential offsets at the leaf size, and collect the leaves
-        # that actually touch the face (a finer neighbour appears several times)
-        others = [a for a in range(3) if a != axis]
-        found: list[Leaf] = []
-        for offset_a in (0, size):
-            for offset_b in (0, size):
-                point = [0, 0, 0]
-                point[axis] = axis_coord
-                point[others[0]] = coord[others[0]] + offset_a
-                point[others[1]] = coord[others[1]] + offset_b
-                if any(p < 0 or p >= self.n for p in point):
-                    continue
-                # the tangential offsets span the leaf edge; probe the centre of the
-                # sub-face so that a finer neighbour is found exactly once per sub-face
-                probe = list(point)
-                probe[others[0]] += size // 2
-                probe[others[1]] += size // 2
-                leaf_found = self._find(*probe)
-                if leaf_found is not None and leaf_found != leaf and leaf_found not in found:
-                    found.append(leaf_found)
-        return found
+        return [self.leaves[index] for index in self._face_neighbours(leaf, face)]
 
     # -------------------------------------------------------------- balancing
     def balance(self, rounds: int = 32) -> int:
@@ -201,8 +254,11 @@ class Octree:
             for leaf in self.leaves:
                 for face in FACES:
                     for neighbour in self.neighbours(leaf, face):
-                        if leaf.level - neighbour.level > 1:
-                            to_split.add(neighbour)
+                        if abs(leaf.level - neighbour.level) > 1:
+                            # the coarser leaf has the larger level: it is the one that
+                            # gets refined until the pair is one level apart
+                            coarser = leaf if leaf.level > neighbour.level else neighbour
+                            to_split.add(coarser)
             if not to_split:
                 break
             new: list[Leaf] = []
@@ -221,7 +277,7 @@ class Octree:
         """Split every leaf whose indicator exceeds ``threshold``, then balance."""
         for _ in range(max(levels, 0)):
             marked = [leaf for leaf in self.leaves
-                      if leaf.level < self.max_level and indicator(leaf) > threshold]
+                      if leaf.level > 0 and indicator(leaf) > threshold]
             if not marked:
                 break
             marked_set = set(marked)
@@ -235,10 +291,10 @@ class Octree:
         """Merge the eight children of a parent when all of them are below threshold."""
         parents: dict[Leaf, list[Leaf]] = defaultdict(list)
         for leaf in self.leaves:
-            if leaf.level == 0:
-                continue
+            if leaf.level >= self.max_level:
+                continue                               # the whole box has no parent
             half = leaf.size
-            parent = Leaf(leaf.level - 1, (leaf.x // (2 * half)) * 2 * half,
+            parent = Leaf(leaf.level + 1, (leaf.x // (2 * half)) * 2 * half,
                           (leaf.y // (2 * half)) * 2 * half,
                           (leaf.z // (2 * half)) * 2 * half)
             parents[parent].append(leaf)
@@ -277,35 +333,28 @@ class Octree:
     def faces(self) -> list[tuple[int, int, int, float, float]]:
         """Conservative face list: (cell_i, cell_j, axis, area, centre distance).
 
-        A coarse face is decomposed into the finer faces that exist opposite it, so
-        every pair of leaves is connected once per *actual* shared area.  Areas and
-        distances are in finest-cell units; the caller multiplies by the physical
-        cell size to get metres.
+        A coarse face is decomposed into the finer faces that exist opposite it, so a
+        coarse face against ``n`` finer leaves is listed as ``n`` entries, each with the
+        area of the fine sub-face and the centre-to-centre distance of its own pair, while
+        a pair of equal leaves is listed once.  The coarse side of a coarse/fine pair is
+        the one that lists the sub-faces, and the fine side finds them already listed; an
+        equal pair is listed by its lower index.  Areas and distances are in finest-cell
+        units, so the caller multiplies by the physical cell size to get metres.  The tree
+        must be 2:1 balanced - every mutation in this class ends in `balance`.
         """
         out: list[tuple[int, int, int, float, float]] = []
-        seen: set[tuple[int, int, int]] = set()
         for index, leaf in enumerate(self.leaves):
             for face in FACES:
                 axis = FACE_AXIS[face]
-                for neighbour in self.neighbours(leaf, face):
-                    other = self._index.get(neighbour)
-                    if other is None:
-                        continue
-                    # count each pair once, from the leaf with the lower coordinate
-                    if (FACE_SIGN[face] > 0
-                            and (leaf.x, leaf.y, leaf.z) > (neighbour.x, neighbour.y,
-                                                            neighbour.z)):
-                        continue
-                    key = (min(index, other), max(index, other), axis)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    # the shared area is the finer of the two faces
+                for other in self._face_neighbours(leaf, face):
+                    neighbour = self.leaves[other]
+                    if leaf.size < neighbour.size:
+                        continue                       # the coarse side lists the sub-faces
+                    if leaf.size == neighbour.size and other < index:
+                        continue                       # one entry per equal pair
                     side = min(leaf.size, neighbour.size)
-                    area = float(side * side)
-                    distance = 0.5 * (leaf.size + neighbour.size)
-                    out.append((index, other, axis, area, distance))
-
+                    out.append((index, other, axis, float(side * side),
+                                0.5 * (leaf.size + neighbour.size)))
         return out
 
     # ------------------------------------------------------------------ assembly  # noqa: E501
@@ -347,34 +396,72 @@ class Octree:
         """Solve the steady diffusion problem, holding ``fixed`` cells at their value.
 
         ``source`` is the volumetric source per leaf [W/m^3]; the fixed cells are the
-        Dirichlet set (their rows become the identity), which is how the shell of a
-        storage is driven.  Returns the per-leaf temperature.
+        Dirichlet set, which is how the shell of a storage is driven - their rows become
+        the identity and their columns leave the operator, so it stays symmetric.  A
+        graded operator is symmetrised by its cell volumes before CG sees it, as in
+        :mod:`src.solver.linear`.  Returns the per-leaf temperature.
         """
         from scipy.sparse.linalg import cg
 
-        source = np.asarray(source, dtype=float)
-        a = self.diffusion_matrix(conductivity, physical_size).tolil()
-        b = source.copy()
-        for index, value in (fixed or {}).items():
-            a.rows[index] = [index]
-            a.data[index] = [1.0]
-            b[index] = value
-        a = a.tocsr()
-        solution, _ = cg(a, b, rtol=tolerance, maxiter=50 * self.n_cells)
-        return np.asarray(solution, dtype=float)
+        b = np.asarray(source, dtype=float).copy()
+        a = _apply_dirichlet(self.diffusion_matrix(conductivity, physical_size), b,
+                             fixed or {})
+        sizes = self.cell_sizes()
+        if sizes.min() == sizes.max():
+            solution, _ = cg(a, b, rtol=tolerance, maxiter=50 * self.n_cells)
+            return np.asarray(solution, dtype=float)
+        # the per-volume rows are symmetric only where the volumes agree: as in
+        # src.solver.linear, a graded operator is symmetrised by its cell volumes before
+        # CG sees it, which keeps the method applicable and the solution unchanged
+        scale = np.sqrt((sizes * physical_size) ** 3)
+        symmetrised = (sparse.diags(scale) @ a @ sparse.diags(1.0 / scale)).tocsr()
+        solution, _ = cg(symmetrised, scale * b, rtol=tolerance, maxiter=50 * self.n_cells)
+        return np.asarray(solution / scale, dtype=float)
 
     def flux_balance(self, temperature: np.ndarray, conductivity: np.ndarray | None = None,
                      physical_size: float = 1.0) -> float:
-        """Sum of every face flux: zero to machine precision on a conservative mesh."""
-        k = np.ones(self.n_cells) if conductivity is None else np.asarray(conductivity,
-                                                                         dtype=float)
-        total = 0.0
-        for i, j, _axis, area, distance in self.faces():
-            k_face = 2.0 * k[i] * k[j] / (k[i] + k[j] + EPS)
-            a_face = area * physical_size ** 2
-            d_centers = distance * physical_size
-            total += k_face * a_face * (temperature[i] - temperature[j]) / d_centers
-        return float(total)
+        """Net heat rate through the boundary of the box, weighed by the cell volumes.
+
+        Every face carries a single conductance and both cells that share it build their
+        balance from the same numbers, so summing the per-cell balances over the mesh
+        cancels each interior face against itself and leaves only the flux through the
+        domain boundary - zero here, because the face list stops at the wall.  That is the
+        cancellation that closes the discrete energy balance to machine precision on any
+        combination of levels; it is taken from the assembled operator, so a face whose
+        two sides disagree about its conductance leaves a remainder here.
+        """
+        residual = self.diffusion_matrix(conductivity, physical_size) @ np.asarray(
+            temperature, dtype=float)
+        volumes = (self.cell_sizes() * physical_size) ** 3
+        return float(volumes @ residual)
+
+
+def _apply_dirichlet(a: sparse.csr_matrix, b: np.ndarray,
+                     fixed: dict[int, float]) -> sparse.csr_matrix:
+    """Impose ``T = value`` on the fixed cells, leaving the operator symmetric.
+
+    The same symmetric elimination as :func:`src.solver.matrix.apply_dirichlet`: the
+    coupling of a fixed cell to its neighbours moves to the right-hand side and its
+    column leaves the operator before the row becomes the identity.  Replacing the row
+    alone leaves the operator asymmetric, and CG is not applicable to one of those - it
+    diverges silently instead of failing.
+    """
+    if not fixed:
+        return a.tocsr()
+    a = a.tocsc()
+    for index, value in fixed.items():
+        start, stop = a.indptr[index], a.indptr[index + 1]
+        rows = a.indices[start:stop]
+        coupling = a.data[start:stop]
+        keep = rows != index
+        b[rows[keep]] -= coupling[keep] * value
+        a.data[start:stop] = 0.0
+    a = a.tocsr().tolil()
+    for index, value in fixed.items():
+        a.rows[index] = [index]
+        a.data[index] = [1.0]
+        b[index] = value
+    return a.tocsr()
 
 
 def refine_by_gradient(tree: Octree, values: np.ndarray, threshold: float,
@@ -398,7 +485,7 @@ def refine_by_gradient(tree: Octree, values: np.ndarray, threshold: float,
 
 
 def uniform_tree(n_finest: int, level: int) -> Octree:
-    """Every leaf at the same level: the reference for the octree tests."""
+    """Every leaf at the same level, ``2 ** level`` finest cells on a side."""
     size = 1 << level
     leaves = [Leaf(level, x, y, z)
               for x in range(0, n_finest, size)
