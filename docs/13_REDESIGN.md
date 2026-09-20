@@ -57,52 +57,24 @@ different machine and is not what this simulator imitates.
 class of machines rather than reproducing one product.  The numbers above are published
 industrial data; the physics references are named in the rest of this document.*
 
-### The gas loop in detail (patent the reference / granted the reference)
-
-* the pipes are **stainless steel** (304L/304H/316L/316H/321H/330), arranged
-  **vertically** in the module (horizontal or inclined are claimed as alternatives);
-* the gas is preferably **inert (nitrogen)** at **up to 50 bar**, and the patent states
-  the reason explicitly: *"pressurization may be utilized to increase the heat transfer
-  rate without increasing the gas velocity excessively"*.  That is a design lever the
-  model should expose: at constant velocity `Re ~ rho`, so `h` rises with pressure while
-  the fan loss stays put - the cheap way to cut the circulation loss;
-* the fan is bidirectional, rated to 1200 °C, with its **motor outside the loop**;
-* **charge top->bottom** (aids natural convection, cuts fan power), **discharge
-  bottom->top**; the gas leaves the bed close to the bed temperature and goes to a
-  **counter-flow** external exchanger, leaving it at **40-70 °C** - that is the loop's
-  cold-side temperature, i.e. the `t_in` of a discharge in the model;
-* a module is at most ~100 m³, underground, insulated with expanded clay (LECA,
-  `lambda < 0.3 W/(m K)`);
-* alternative discharge path claimed: **thermosiphon tubes** (sealed, water fill <= 25%
-  of the tube volume, dry-up allowed, superheated steam, 45-90° inclination, up to 15 m
-  long, example 9 mm inner diameter at 200 bar / 500 °C).  Passive, no fan, but a
-  two-phase pressurised circuit: not modelled here, listed as an alternative.
-
-The architecture is therefore **air inside pipes**, not a distributed flow through the
-bed: the distributed-flow family (Siemens Gamesa ETES, CSP rock beds) is a different
-machine and is not what this simulator should imitate.
-
 ### From the same patent family and the published efficiency notes
 
-* the resistor sits **in the gas circuit** (a heater in an insulated vessel), never in
+* the **resistor sits in the gas circuit** (a heater in an insulated vessel), never in
   the bed; the gas leaves it at 700-1000 °C (up to 2000 °C claimed);
-* **charge top→bottom, discharge bottom→top** with a bidirectional fan; the fan motor is
-  *outside* the loop;
-* the gas may be an **inert gas (N2) at up to 50 bar**: pressure raises the film
-  coefficient without raising the velocity, which is the cheap way to cut the fan loss;
-* bed temperature preferably 300-500 °C, insulation with `lambda < 0.3 W/(m K)`
-  (expanded clay / LECA is named);
-* **circulation losses (fan + ducts) are ~5% per cycle**, standby loss < 5%; the
-  published round-trip efficiency (>90% large, 85-90% products) is consistent with those
-  two terms, which means *the model must report both*;
-* the reference's implied charge power density is ~1.1 kW/m³ of bed, and the bed **loses
-  about 50% of its energy in three months at rest** - the number that decides whether a
-  seasonal storage is viable at all;
-* other architectures for comparison: **the reference the reference** puts the resistors *inside* a
-  crushed-rock bed (650 °C, ~300 kWh/m³, 10 t modules); **the reference** uses Joule heaters in
-  a refractory brick stack at 1500 °C where *radiation* does the transfer (>97% RTE,
-  <1%/day).  Radiation is not transferable to a 400-600 °C granular bed, which is why the
-  air loop is the right reference for this machine.
+* a module is at most ~100 m³, often underground, insulated with expanded clay (LECA,
+  `lambda < 0.3 W/(m K)`);
+* bed temperature preferably 300-500 °C, and its implied charge power density is
+  ~1.1 kW/m³ of bed;
+* **circulation losses (fan + ducts) are ~5 % per cycle**, standby loss < 5 %; the
+  published round-trip efficiency (>90 % large, 85-90 % products) is consistent with
+  those two terms, which means *the model must report both*;
+* the bed **loses about 50 % of its energy in three months at rest** - the number that
+  decides whether a seasonal storage is viable at all;
+* other architectures for comparison: resistors *inside* a crushed-rock bed (650 °C,
+  ~300 kWh/m³, 10 t modules) and Joule heaters in a refractory brick stack at 1500 °C
+  where *radiation* does the transfer (>97 % round-trip, <1 %/day).  Radiation is not
+  transferable to a 400-600 °C granular bed, which is why the gas loop is the right
+  reference for this machine.
 
 ---
 
@@ -122,6 +94,11 @@ CG+AMG, the energy-balance verification, the GCI-based reporting.
 ---
 
 ### Pipe bundle geometry (design data used by `src/core/pipes.py`)
+
+The full treatment of the buried-pipe networks - the four layouts, the collection
+modes, the parameters, the worked examples and what the tests check - is
+**[15_PIPE_NETWORKS.md](15_PIPE_NETWORKS.md)**; this subsection keeps only the design
+data that motivated the generator.
 
 Pitches are quoted as multiples of the outer tube diameter: **2.0 d** horizontally,
 **2.0-2.5 d** vertically, **sqrt(3) d** for an equilateral (triangular) lattice; the
@@ -166,13 +143,15 @@ T_mean = T_wall + (T_in - T_wall)(1 - e^-NTU)/NTU,     NTU = h A /(m_dot c_p)
 * an impossible operating point (a flow that cannot carry the requested power) is
   **refused with a message**, not returned as a negative temperature.
 
-Verified in `tests/test_fluid.py` (13 tests): the geometric area; the effectiveness
-relation on a uniform wall; conservation (the enthalpy drop of the air equals the
-source term integrated over the bed); the two limits (`NTU -> 0` area-limited,
-`NTU -> inf` flow-limited); the lumped model's error factor `NTU/(1-e^-NTU)`; a closed
-loop with no external power settling at the wall temperature; charging/discharging
-signs and the loop balance; the bank splitting the flow; the refusal of an impossible
-point.
+Verified in `tests/test_fluid.py` (23 collected cases on 2026-09-20 - see
+[09](09_TESTING.md) for the command and the caveat that counts move): the geometric
+area; the effectiveness relation on a uniform wall; conservation (the enthalpy drop of
+the air equals the source term integrated over the bed); the two limits (`NTU -> 0`
+area-limited, `NTU -> inf` flow-limited); the lumped model's error factor
+`NTU/(1-e^-NTU)`; a closed loop with no external power settling at the wall
+temperature; charging/discharging signs and the loop balance; the bank splitting the
+flow; the friction factor, the pressure drop, the circulation loss and the refusal of an
+impossible point.
 
 ### What the numbers say for this machine
 
@@ -189,7 +168,7 @@ means); the flow-limited power `m_dot c_p (T_bed - T_in)` is the physical ceilin
 
 ---
 
-## 4. The outside of the silo (planned)
+## 4. The outside of the silo
 
 Delete the air region; the battery envelope gets a Robin condition with
 
@@ -204,19 +183,35 @@ as a cheap directional split, or a cylinder-in-crossflow correlation if the extr
 fidelity is wanted).
 
 Why this is defensible: the film resistance is a small share of the envelope resistance
-(`R_film = 0.2` vs `R_insulation = 7.5 m²K/W` → 2.6%), and a 10× change of `h` moved the
-losses by 0.9% in the current model.  What matters is the **insulation** and the
+(`R_film = 0.2` vs `R_insulation = 7.5 m²K/W` → 2.6 %), and a 10× change of `h` moved
+the losses by 0.9 % in the current model.  What matters is the **insulation** and the
 **thermal bridges** (the pipe penetrations through the shell), which the current model
 does not represent at all.
 
-Implementation: the assembly must accept a **Robin face between an active cell and an
-inactive cell** (the excluded air), with `h_out` and `T_ambient`; inactive cells are
-dropped from the linear system.  This is the same machinery as the current per-face BC,
-extended to internal surfaces.
+### Status: the capability exists, the wiring from the geometry does not
+
+Implemented and tested **in isolation**:
+
+| piece | where |
+|---|---|
+| the correlations (`AirProperties`, `rayleigh`, `h_natural_vertical`, `h_natural_horizontal`, `h_wind`, `h_out`) | `src/core/environment.py` |
+| the mask and the surface data (`mesh.excluded`, `mesh.h_out`, `mesh.t_ambient`, `mesh.h_contact`) | `src/core/mesh.py` |
+| no conduction into excluded cells; the film `h_out·A·(T − T_ambient)` on every active/excluded interface; excluded cells pinned at the ambient so the system stays non-singular | `src/solver/matrix.py` (`face_coefficients`, `build_steady_matrix`, `dirichlet_rows`) |
+| the same loss in the audit, so the balance still closes | `src/analysis/fluxes.py::environment_flux`, `analysis/balance.py` |
+| a real contact resistance between two materials (`h_contact`), in series with the two half cells | `src/solver/matrix.py::face_coefficients` |
+| the physics statements | `tests/test_environment.py` |
+
+**Missing**: nothing fills `mesh.excluded` from a run.  `BatteryGeometry` still paints
+the air around the vessel as `MaterialID.AIR` cells and applies convection to the six box
+faces (`apply_boundary_conditions`), and no caller translates the painted air into the
+excluded mask or sets `h_out`.  A normal simulation therefore still conducts through the
+air, and the outside film is never applied.  The test builds the mask by hand, which is
+why the capability is verified while the machine does not use it.  Closing this gap is
+the step that makes the box of air disappear from the default model.
 
 ---
 
-## 5. The mesh (planned, research done)
+## 5. The mesh: the octree and its status
 
 The user's picture - cubes that grow away from the material interfaces, one level
 difference at most between neighbours, a coarse face covered by four fine faces - is the
@@ -224,59 +219,84 @@ standard **octree AMR with a 2:1 balance constraint**.
 
 Facts from the literature (see the research notes):
 
-* **p4est** stores the octree as a linear array of leaves, 24 bytes per octant,
-  identified by a **Morton index** (interleaved bits) plus a level; neighbour finding is
-  integer arithmetic on the coordinates, and the ghost layer is built from the
-  "half-size" face/edge/corner neighbours, which is exactly why the 2:1 balance is
-  required.  Balance and node numbering dominate the mesh cost (>90% on fractal meshes).
+* **p4est** stores the octree as a linear array of leaves, identified by a **Morton
+  index** (interleaved bits) plus a level; neighbour finding is integer arithmetic on the
+  coordinates, and the ghost layer is built from the "half-size" face/edge/corner
+  neighbours, which is exactly why the 2:1 balance is required.  Balance and node
+  numbering dominate the mesh cost (>90 % on fractal meshes).
 * **Dendro** keeps the same linear-octree structure with hanging-node management in a
-  single tree traversal, 1 byte per octant, and reports that applying the Laplacian costs
-  "comparable to a direct-indexing regular grid with the same number of elements";
-  geometric multigrid needs ~12 iterations against ~7 of BoomerAMG, with a much cheaper
-  setup - but its own authors state it "is not robust in the presence of discontinuous
-  coefficients, in contrast to AMG".  **Our domain is exactly discontinuous
-  coefficients**, so AMG stays.
+  single tree traversal, and reports that applying the Laplacian costs "comparable to a
+  direct-indexing regular grid with the same number of elements"; geometric multigrid
+  needs ~12 iterations against ~7 of BoomerAMG, with a much cheaper setup - but its own
+  authors state it "is not robust in the presence of discontinuous coefficients, in
+  contrast to AMG".  **Our domain is exactly discontinuous coefficients**, so AMG stays.
 * **Afivo** uses a *block* octree (leaves are N^D boxes, N ≥ 8) with a 2-cell buffer and
   a 2:1 rule that includes diagonal neighbours; the block form is what makes the stencil
   vectorised, which matters in NumPy.
 * **BoxLib/AMReX/Chombo** use level-based patches with *flux registers* to correct the
   fine-coarse boundary flux - the classical conservative treatment.
 
-Decision for this codebase:
+### What exists now (`src/core/octree.py`, `tests/test_octree.py`)
 
-1. **block-based octree** (Afivo-style: leaves are 8³ boxes, so every leaf is a dense
-   NumPy block and the FV stencil stays vectorised);
-2. **2:1 balance** with the buffer, enforced after every refine/coarsen;
-3. **conservative flux at a fine-coarse face**: the coarse face is decomposed into its
-   four fine sub-faces and each carries its own conductance (the "flux register"
-   approach); the *hanging nodes* on the coarse side are eliminated by constrained
-   interpolation, which keeps the operator symmetric → **CG+AMG keep working**;
-4. refinement criterion: **a priori** from the physics (the plan of
-   `src/analysis/mesh_plan.py`: `thickness/N` per layer, `2k/h` at convective surfaces,
-   the pipe spacing) plus an **a posteriori** local truncation error estimate (apply the
-   discrete operator to the interpolated field: `tau = |A T - b|` locally) to catch what
-   the a priori rule misses;
-5. convergence is reported with the GCI of `src/analysis/convergence.py`, which already
-   works on any sequence of grids and therefore on refined/coarsened ones.
+A **cell-level** linear octree, in the p4est sense: a leaf is an integer
+`(level, x, y, z)` with the coordinates counted in finest cells, `level = log2` of the
+edge length in those cells, and a Morton code (21 bits per coordinate, so the round trip
+is exact for a mixed-level leaf) giving a canonical order.  The leaf list is indexed per
+level by the level-normalised corner, so a neighbour query is a couple of dictionary
+lookups.
 
-Verification planned: an analytic composite wall (exact flux), a spherical source in an
-infinite medium (exact radial profile), and the invariant that the energy balance still
-closes to machine precision on an unbalanced-then-balanced octree.
+* the **2:1 balance** is enforced after every refine/coarsen: a coarse face is shared with
+  at most four finer faces;
+* the **face list is conservative**: a coarse face against `n` finer leaves comes back as
+  those `n` sub-faces with the fine area, an equal pair as one entry, and each pair is
+  listed once - so a flux appears with opposite signs in the two cells that share it and
+  the discrete balance closes to machine precision on any combination of levels;
+* the assembly reuses the harmonic mean and the `k A/(d_centers V)` coefficient of the
+  structured solver, so an octree mesh and a graded Cartesian mesh agree where their cells
+  agree;
+* `refine_by_gradient` provides the a posteriori indicator;
+* the tests solve 1-D conduction and a two-material wall against their analytic answers,
+  check the conservative face list, and pin the cost budget: a uniform tree of 32768
+  leaves and its 95232 faces in about half a second.
+
+### What is still open
+
+* **It is not the mesh of the main solver.**  `Mesh3D`, `SteadyStateSolver` and
+  `TransientSolver` still run on the structured (uniform or graded) grid.
+  `src/solver/octree_solver.py` now puts the octree on the *physics* path (steady
+  conduction on the leaf list, equivalence with the structured solver on a matching
+  uniform grid, a conservative flux report, an objective-driven refinement cycle), but
+  no caller routes a `BatteryGeometry` into it: adopting it as the production mesh is
+  still a migration, not a switch.
+* **The transient** has no octree driver at all: only the steady problem is solved.
+* **Block-based leaves** (Afivo-style) remain the planned optimisation if a *refined*
+  tree of that size has to go faster: the balance rounds, not the face list, are what
+  cost seconds there, and blocks change no formula in the module.
+* The **graded Cartesian path** (`src/core/refinement.py`) stays the production mesh in
+  the meantime: it is what the GUI builds, what the automatic mesh search refines
+  ([09](09_TESTING.md), [10](10_MESH_AND_HEATERS.md)).
+
+The a priori plan of `src/analysis/mesh_plan.py` (`thickness/N` per layer, `2k/h` at
+convective surfaces) plus the GCI reporting of `src/analysis/convergence.py` are the two
+other pieces of the refinement story and both exist.  The mesh-loop side is now wired:
+the flux-jump indicator of `src/core/octree.py` and `refine_on_objective` in
+`src/solver/octree_solver.py` refine a tree on a physical objective, and they reuse
+`analysis.convergence`'s `ConvergenceTarget`/`ConvergenceLevel`, so an adaptive run and
+the structured search report the same quantities.  What is missing is the *connection*:
+`SteadyStateSolver` does not call any of it, and the octree has no transient driver.
 
 ---
 
 ## 6. Migration order
 
-| # | Step | Verification |
+| # | Step | State |
 |---|---|---|
-| 1 | fluid loop (`src/solver/fluid.py`, `src/core/pipes.py`) | **done** - 13 tests |
-| 2 | wall BC without the air domain (`h_natural + h_wind`) | analytic wall with a film; losses insensitive to `h`; balance closes |
-| 3 | pipe layouts matching the reference (vertical banks, top-down charge, bottom-up discharge) | area invariant; loop balance |
-| 4 | block-octree mesh with 2:1 + conservative fine-coarse flux | composite wall and radial source against the analytic solution |
-| 5 | a posteriori refinement loop + GCI reporting | the mesh stops refining when the answer stops moving |
-| 6 | losses with the real standby paths (pipe penetrations, foundation) | seasonal loss per day against the published efficiency |
-
----
+| 1 | fluid loop (`src/solver/fluid.py`, `src/core/pipes.py`) | **done**, verified by `tests/test_fluid.py` |
+| 2 | wall BC without the air domain (`h_natural + h_wind`) | **capability done, wiring open**: correlations, `mesh.excluded`/`h_out`/`h_contact`, the assembly, the audit and the tests exist (§4); `BatteryGeometry` still paints the air box and fills neither mask nor film |
+| 3 | pipe layouts matching the reference (vertical banks, top-down charge, bottom-up discharge) | **done and extended** (spiral layout, wall thickness/material, roughness, insulated headers, `paint`, hydraulics, the `FluidLoop` built from the network): `src/core/pipes.py`, `src/core/pipe_network.py`, `tests/test_pipes.py`; [15](15_PIPE_NETWORKS.md) is the authority |
+| 4 | octree mesh with the 2:1 balance and a conservative fine-coarse flux | **core + physics done, not the production mesh**: `src/core/octree.py` and `src/solver/octree_solver.py` solve analytic cases and refine on an objective, but `Mesh3D`/`SteadyStateSolver` still use the structured grid (§5) |
+| 5 | a posteriori refinement loop + GCI reporting | **done as pieces**: the GCI report (`src/analysis/convergence.py`) and the flux-jump indicator with `refine_on_objective` (`src/core/octree.py`, `src/solver/octree_solver.py`) exist on separate paths - the *structured* search still chooses from the a priori plan and the Richardson prediction, and nothing connects the indicator to it |
+| 6 | losses with the real standby paths (pipe penetrations, foundation) | **open** (§7 item 1) |
 
 ## 7. Open decisions
 
@@ -290,3 +310,46 @@ closes to machine precision on an unbalanced-then-balanced octree.
    phase in the geometric mean (see [12_METHODS.md](12_METHODS.md) §8); with the new
    architecture this must be settled because the bed conductivity now controls the
    charge/discharge time.
+
+## 8. Status of the redesign (2026-09-20)
+
+Every row is a measurement or a file reference, not a plan.  The test counts were read
+with `python -m pytest tests/ --collect-only -q` on this working tree on 2026-09-20 and
+they move while work is in flight (see [09](09_TESTING.md) §1): treat them as a reading,
+not a specification.
+
+| piece | state | evidence |
+|---|---|---|
+| gas loop: effectiveness relation, closed loop, film coefficient, pressure, blower, circulation loss | done | `src/solver/fluid.py`; `tests/test_fluid.py`, 23 collected cases |
+| pipe geometry and networks: runs, geometric wetted area, layouts (incl. spiral), four collection modes, wall material/roughness, insulated headers, `paint`, hydraulics, branch split, the `FluidLoop` built from the network | done | `src/core/pipes.py`, `src/core/pipe_network.py`; `tests/test_pipes.py`, 60 collected cases; [15](15_PIPE_NETWORKS.md) |
+| environment: no air domain, natural + wind film, contact resistance | capability done, **not wired to the geometry**: `BatteryGeometry` still paints the air and sets box-face convection | `src/core/environment.py`, `Mesh3D.excluded/h_out/h_contact`, `src/solver/matrix.py`, `src/analysis/fluxes.py`; `tests/test_environment.py`, 9 collected cases |
+| adaptive mesh: 2:1 octree with a conservative face list, its Laplacian, the flux-jump indicator and an objective-driven refinement; steady solve on the leaf list | core and physics done, **not the production mesh** (no transient driver, no route from `BatteryGeometry`) | `src/core/octree.py`, `src/solver/octree_solver.py`; `tests/test_octree.py` (14) and `tests/test_octree_solver.py` (12) |
+| cycle accounting: charge / standby / discharge through the loop, per-step stops, energy decomposition | done | `src/analysis/cycle.py`; `tests/test_cycle.py`, 10 collected cases |
+| graded Cartesian mesh + automatic mesh search | done, and it is the production path | `src/core/refinement.py`, `src/analysis/convergence.py`, `src/analysis/mesh_plan.py`; 10 + 9 collected cases |
+| GUI: the Pipes tab, the automatic-mesh button, the graded/heater controls | in place | `gui/views/geometry_panel.py`; widget defaults measured in [06](06_GUI_CONFIGURATION.md) |
+| figures: one script regenerates them all | done | `scripts/figures.py`, seven files in `docs/figures/` (list in [README](../README.md#-figures)) |
+
+Measured numbers worth keeping in view (all readings of 2026-09-20, re-run the commands
+before quoting them):
+
+* the **suite** collects 311 cases (300 without the GUI sweep); the same command said
+  295/284 and 270/259 earlier in the same session, because the octree solver, the pipe
+  extension and the cycle completion landed in between ([09](09_TESTING.md) §1);
+* the octree builds a uniform tree of **32768 leaves and 95232 faces in about half a
+  second** (the budget `tests/test_octree.py` pins);
+* the graded mesher reaches the target cell size in a band while keeping the neighbour
+  ratio within `growth` (`tests/test_refinement.py`), and a uniform `GridSpec`
+  reproduces the legacy uniform mesh bit for bit (`tests/test_graded_mesh.py`);
+* the **automatic mesh search** on the default geometry does not reach the 2 K default
+  tolerance inside the 400 000-cell default budget, and says so instead of pretending
+  (`tests/test_convergence.py`, and the GUI reports "stopped" with the limit);
+* the **energy balance closes to machine precision** on the battery, on a graded grid,
+  on the octree face list and on the network-built loop (separate tests, separate
+  implementations of the same identity).
+
+The open items, in the order they should be taken, are: (1) fill `mesh.excluded`/`h_out`
+from `BatteryGeometry` so the air box disappears from a normal run (§4); (2) route the
+geometry into the octree path (`refine_on_objective` exists; `SteadyStateSolver` does not
+call it) and give the octree a transient driver if the adaptive mesh is to become the
+production mesh (§5); (3) connect the flux-jump indicator to the structured mesh search
+of step 5 in §6; (4) the standby paths of §7 item 1.

@@ -94,6 +94,13 @@ Each of the six domain faces carries its own condition
 (`Mesh3D.face_bc`, `FaceBC`), so a face can be convective while its neighbour is
 adiabatic and a corner node receives one contribution per exposed face.
 
+The same Robin law also applies to an **internal** surface: when the air around the
+vessel is excluded from the problem, the outer surface of the insulation/shell is where
+the film acts, with `h_out` the sum of the natural and wind shares
+(`src/core/environment.py`, [13](13_REDESIGN.md) §4).  A third resistance can sit
+*between* two materials: a contact conductance `mesh.h_contact` in series with the two
+half cells.
+
 ## 1.7 Dimensionless numbers
 
 $$Bi = \frac{h L_c}{k}, \qquad Fo = \frac{\alpha t}{L_c^2}, \qquad
@@ -140,7 +147,37 @@ sink is imposed on the tube cells, **capped** by the available
 $h A (T_{tube} - T_{inlet})$ - so the model can never extract heat from a body
 colder than the inlet (`src/solver/transient.py`).
 
-## 1.10 References
+That lumped model puts the *inlet* temperature everywhere.  The redesigned heat path is
+a **1-D network** whose gas temperature falls along the run
+(`src/solver/fluid.py`), which for a storage that discharges at large NTU is the
+difference between a plausible and an overstated extraction
+([13](13_REDESIGN.md) §3, [15](15_PIPE_NETWORKS.md)).
+
+## 1.10 Heat exchanged with a flowing gas
+
+For one pipe segment with wetted area $A$, wall temperature $T_w$ and mass flow
+$\dot m$:
+
+$$NTU = \frac{h A}{\dot m c_p}, \qquad
+T_{out} = T_w + (T_{in}-T_w)e^{-NTU}, \qquad
+T_{mean} = T_w + (T_{in}-T_w)\frac{1-e^{-NTU}}{NTU}$$
+
+so the power delivered to the solid is $q = \dot m c_p (T_{in} - T_{out})$, and the two
+limits are the *area-limited* regime ($NTU \ll 1$, $q \approx hA\,\Delta T$) and the
+*flow-limited* one ($NTU \gg 1$, $q \approx \dot m c_p \Delta T$).  A storage discharges
+in the second regime by design.
+
+The film coefficient follows the usual correlations for internal flow (laminar
+$Nu = 3.66$, turbulent Dittus-Boelter, blended in between, `solver/fluid.py::pipe_h`),
+the friction factor comes from the classical correlations, and the **fan work** is
+
+$$P_{fan} = \frac{\dot m}{\rho}\Delta p \qquad\text{(per unit flow, the circulation
+loss of the loop)}$$
+
+which the cycle accounting reports as `E_circulation` next to the standby loss - the two
+terms that decide the round-trip efficiency of a real machine.
+
+## 1.11 References
 
 1. Incropera, DeWitt, Bergman, Lavine - *Fundamentals of Heat and Mass Transfer*
 2. Çengel - *Heat Transfer: A Practical Approach*

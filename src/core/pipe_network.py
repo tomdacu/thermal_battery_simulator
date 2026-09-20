@@ -29,6 +29,10 @@ Layouts (the plan inside the circle of radius ``radius - wall_clearance``):
     concentric rings - **every ring carries its own risers** and is linked to its
     neighbours by radial jumpers, so a ring with no riser or with no link is a
     configuration error (``PipeNetwork.validate``);
+``spiral``
+    one Archimedean spiral: radius ``r(phi) = p_v phi / 2 pi`` with the tubes one
+    horizontal pitch apart *along* the arc and one vertical pitch apart *between*
+    turns, walked from the wall inwards, so the distributor is a spiral feeder;
 ``radial``
     radial files of risers, spaced by the horizontal pitch along the radius and with
     the files pitched by the vertical pitch at the mean radius (the inner radius of the
@@ -65,7 +69,38 @@ Design rules, with the sources collected in ``docs/15_PIPE_NETWORKS.md``:
   parallel modules;
 * a module keeps its bed below 4 m of height;
 * the nozzles must leave through the *wall*: an outlet that would go through the roof
-  is refused, because the roof carries the insulation and the cone, not a nozzle band.
+  is refused, because the roof carries the insulation and the cone, not a nozzle band;
+* the junctions between the tubes and the headers are where the gas turns and where the
+  surface is singular, so the mesh band around the two header elevations is refined to
+  ``junction_refinement`` when it is set.
+
+The *tube* is a tube and not a line: ``diameter`` is its outer diameter and
+``wall_thickness`` its wall, so the gas flows in a bore of ``diameter - 2 t``.  The bore
+is what the hydraulics uses (velocity, Reynolds, friction); the outer diameter stays
+what the pitches, the clearance and the wetted area ``pi d L`` are made of.  The tube
+material is a label with a wall roughness: ``stainless_steel`` is a drawn tube
+(eps = 15 um), ``carbon_steel`` a commercial one (eps = 46 um), and the relative
+roughness ``eps / d_bore`` is what the friction factor of the march sees.
+
+The headers can be **insulated** (``insulated_headers``): a lagged distributor and
+collector exchange nothing with the bed - they only carry the gas - so the heat
+transfer surface of the design is the risers (and the ducts, which are never lagged
+in a real plant) instead of the whole network.
+
+Three methods take the network out of the drawing and into the solver:
+
+* :meth:`PipeNetwork.paint` voxelises the network on a mesh, marks the cells it
+  crosses with :data:`~src.core.mesh.MaterialID.TUBES` (the entry of the material
+  table that *is* a pipe: the same one the lumped tube bank uses) and writes the
+  convective link of every exchanging pipe cell, so a transient that runs without a
+  loop sees the pipes where they are;
+* :meth:`PipeNetwork.fluid_loop` builds the gas circuit as a
+  :class:`~src.solver.fluid.FluidLoop`: one run per branch with the branch split of
+  :meth:`PipeNetwork.split`, and the pressure drop the headers, the connectors and the
+  ducts add folded into the loop as its circuit fittings
+  (:meth:`PipeNetwork.hydraulics`);
+* :meth:`PipeNetworkConfig.junction_bands` returns the elevation bands a graded mesh
+  should refine around the two header elevations (the tube-header junctions).
 
 Every length is metres and every elevation is measured from the domain floor, exactly
 as in :mod:`src.core.geometry`.
@@ -73,19 +108,25 @@ as in :mod:`src.core.geometry`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .mesh import Mesh3D
+from .materials import MaterialManager
+from .mesh import MaterialID, Mesh3D
 from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULAR,
                     PITCH_VERTICAL, PipeRun, rasterize_pipe)
+
+if TYPE_CHECKING:                       # the solver layer imports this module's layer
+    from ..solver.fluid import Fluid, FluidLoop
 
 # ---------------------------------------------------------------------- vocabulary
 LAYOUT_STAGGERED = "staggered"
 LAYOUT_GRID = "grid"
 LAYOUT_RINGS = "rings"
 LAYOUT_RADIAL = "radial"
-LAYOUTS = (LAYOUT_STAGGERED, LAYOUT_GRID, LAYOUT_RINGS, LAYOUT_RADIAL)
+LAYOUT_SPIRAL = "spiral"
+LAYOUTS = (LAYOUT_STAGGERED, LAYOUT_GRID, LAYOUT_RINGS, LAYOUT_RADIAL, LAYOUT_SPIRAL)
 
 COLLECTION_DIRECT = "distributor_collector"
 COLLECTION_REVERSE = "reverse_return"
@@ -101,7 +142,9 @@ BALANCED_COLLECTIONS = (COLLECTION_REVERSE, COLLECTION_TWO_LEVEL)
 
 SPLIT_EQUAL = "equal"
 SPLIT_PATH = "path"
-SPLITS = (SPLIT_EQUAL, SPLIT_PATH)
+SPLIT_RING = "ring"
+SPLIT_SECTOR = "sector"
+SPLITS = (SPLIT_EQUAL, SPLIT_PATH, SPLIT_RING, SPLIT_SECTOR)
 
 #: prefix of the non-blocking messages returned by ``validate()``
 WARNING = "warning: "
@@ -116,6 +159,45 @@ TWO_LEVEL_GAP = 2.0
 
 #: a module keeps its bed below this height [m] (``docs/13_REDESIGN.md``)
 MODULE_HEIGHT_LIMIT = 4.0
+
+#: the tube-header junction band spans one tube diameter either side of the header
+JUNCTION_BAND = 1.0
+
+
+# -------------------------------------------------------------------- materials
+@dataclass(frozen=True)
+class PipeMaterial:
+    """The material of the tube wall: the label it carries and its roughness.
+
+    The keys of :data:`PIPE_MATERIALS` are the keys of
+    :data:`src.core.materials.STRUCTURAL_MATERIALS`, so the paint writes the thermal
+    properties of the very material the label names.
+    """
+
+    label: str
+    roughness: float          # [m] absolute roughness of a new pipe
+
+    def __str__(self) -> str:
+        return f"{self.label} (eps {self.roughness * 1e6:.0f} um)"
+
+
+#: drawn tube and commercial steel, the two finishes a buried pipe is bought in.
+#: Idelchik's handbook of hydraulic resistance quotes 0.0015 mm for drawn stainless
+#: and 0.046 mm for commercial carbon steel; the default of
+#: :func:`src.solver.fluid.pressure_drop` (45 um) is the commercial figure.
+PIPE_STAINLESS = "stainless_steel"
+PIPE_CARBON = "carbon_steel"
+PIPE_MATERIALS: dict[str, PipeMaterial] = {
+    PIPE_STAINLESS: PipeMaterial("stainless steel, drawn", 1.5e-5),
+    PIPE_CARBON: PipeMaterial("carbon steel, commercial", 4.6e-5),
+}
+
+#: above this relative roughness the friction factor leaves the Moody chart range
+ROUGHNESS_LIMIT = 0.05
+
+#: share of the wetted area the uninsulated headers may carry before it is worth
+#: saying so: above a quarter the exchange is no longer the tube bundle's
+HEADER_AREA_LIMIT = 0.25
 
 
 # ------------------------------------------------------------------- configuration
@@ -140,6 +222,9 @@ class PipeNetworkConfig:
     band_bottom: float = 0.3                # [m] active band, from the floor
     band_top: float | None = None           # [m]; None = height - band_bottom
     diameter: float = 0.05                  # [m] outer diameter of the tubes
+    wall_thickness: float = 0.002           # [m] tube wall: the bore drives the gas
+    material: str = PIPE_STAINLESS          # tube wall: a label and a roughness
+    roughness: float | None = None          # [m]; None = the roughness of `material`
     horizontal_pitch: float | None = None   # [m] spacing inside a row / ring / file
     vertical_pitch: float | None = None     # [m] spacing between rows / rings / files
     layout: str = LAYOUT_STAGGERED
@@ -153,6 +238,9 @@ class PipeNetworkConfig:
     elevation_in: float | None = None       # [m]; None = below the distributor
     elevation_out: float | None = None      # [m]; None = at the collector
     split_mode: str = SPLIT_EQUAL
+    n_sectors: int = 4                      # sectors of the `sector` split
+    insulated_headers: bool = False         # the headers exchange nothing with the bed
+    junction_refinement: float | None = None  # [m] cell size asked at the junctions
 
     # ------------------------------------------------------------- derived sizes
     @property
@@ -191,6 +279,35 @@ class PipeNetworkConfig:
         return float(self.duct_diameter)
 
     @property
+    def inner_diameter(self) -> float:
+        """Bore of the tubes [m]: what the gas flows through and the hydraulics uses."""
+        return self.diameter - 2.0 * self.wall_thickness
+
+    @property
+    def duct_inner_diameter(self) -> float:
+        """Bore of the headers, the ducts and the jumpers [m]."""
+        return self.duct_d - 2.0 * self.wall_thickness
+
+    @property
+    def pipe_material(self) -> PipeMaterial | None:
+        """The tube wall as a label and a roughness (None for an unknown key)."""
+        return PIPE_MATERIALS.get(self.material)
+
+    @property
+    def absolute_roughness(self) -> float:
+        """Absolute roughness of the wall [m]: the material's unless overridden."""
+        if self.roughness is not None:
+            return float(self.roughness)
+        material = self.pipe_material
+        return 0.0 if material is None else material.roughness
+
+    @property
+    def relative_roughness(self) -> float:
+        """``eps / d_bore`` [-]: what the friction factor of the march sees."""
+        bore = self.inner_diameter
+        return self.absolute_roughness / bore if bore > 0 else 0.0
+
+    @property
     def z_bottom(self) -> float:
         """Elevation of the distributor (bottom of the active band) [m]."""
         return self.base_z + self.band_bottom
@@ -213,21 +330,33 @@ class PipeNetworkConfig:
 
     @property
     def inlet_elevation(self) -> float:
-        """Elevation of the inlet nozzle [m]: below the distributor (cold side)."""
+        """Elevation of the inlet nozzle [m]: below the distributor (cold side).
+
+        Halfway between the floor and the distributor by default, and never so low
+        that the duct does not fit over the floor.
+        """
         if self.elevation_in is not None:
             return float(self.elevation_in)
-        return self.base_z + 0.5 * (self.z_bottom - self.base_z)
+        midway = self.base_z + 0.5 * (self.z_bottom - self.base_z)
+        return max(midway, self.base_z + 0.5 * self.duct_d)
 
     @property
     def outlet_elevation(self) -> float:
-        """Elevation of the outlet nozzle [m]: at the collector (hot side)."""
+        """Elevation of the outlet nozzle [m]: at the collector (hot side).
+
+        The collector elevation by default - one level up on the two-level chain and
+        midway to the roof on the central collection - never so high that the duct
+        would leave through the roof.
+        """
         if self.elevation_out is not None:
             return float(self.elevation_out)
         if self.collection == COLLECTION_CENTRAL:
-            return 0.5 * (self.z_top + self.level_gap + self.roof_z)
-        if self.collection == COLLECTION_TWO_LEVEL:
-            return self.z_top + self.level_gap
-        return self.z_top
+            wanted = 0.5 * (self.z_top + self.level_gap + self.roof_z)
+        elif self.collection == COLLECTION_TWO_LEVEL:
+            wanted = self.z_top + self.level_gap
+        else:
+            wanted = self.z_top
+        return min(wanted, self.roof_z - 0.5 * self.duct_d)
 
     @property
     def outlet_azimuth(self) -> float:
@@ -237,6 +366,27 @@ class PipeNetworkConfig:
         if self.collection == COLLECTION_DIRECT:
             return self.azimuth_in
         return self.azimuth_in + 180.0
+
+    def junction_bands(self) -> list[tuple[float, float, float]]:
+        """Elevation bands a graded mesh should refine, as ``(low, high, target)``.
+
+        The tube-header junction sits on the two header elevations: the gas turns
+        there and the surface is singular, so the band of one tube diameter either
+        side of them is what ``junction_refinement`` asks the grid to resolve.  No
+        band when the configuration asks for no refinement, and a band that runs past
+        the vessel wall is clipped to it.
+        """
+        target = self.junction_refinement
+        if target is None:
+            return []
+        half = JUNCTION_BAND * self.diameter
+        bands = []
+        for elevation in (self.z_bottom, self.z_top):
+            low = max(elevation - half, self.base_z)
+            high = min(elevation + half, self.roof_z)
+            if high > low:
+                bands.append((low, high, float(target)))
+        return bands
 
     # ---------------------------------------------------------------- validation
     def validate(self) -> list[str]:
@@ -254,9 +404,58 @@ class PipeNetworkConfig:
         if self.diameter <= 0:
             problems.append(
                 f"the tube outer diameter must be > 0, got {self.diameter:.4f} m")
+        if self.wall_thickness < 0:
+            problems.append(
+                f"the wall thickness must be >= 0, got {self.wall_thickness * 1000:.2f} "
+                f"mm: a negative wall is a tube nobody can buy")
+        elif self.inner_diameter <= 0:
+            problems.append(
+                f"a wall of {self.wall_thickness * 1000:.2f} mm leaves no bore in a "
+                f"{self.diameter * 1000:.1f} mm tube: keep the wall below "
+                f"{0.5 * self.diameter * 1000:.2f} mm")
+        elif self.wall_thickness <= 0:
+            problems.append(
+                f"{WARNING}the wall thickness is zero: the hydraulics uses the outer "
+                f"diameter as the bore, while a real {self.diameter * 1000:.0f} mm "
+                f"steel tube has a wall of 1.5-3 mm")
         if self.duct_diameter is not None and self.duct_diameter <= 0:
             problems.append(
                 f"the duct diameter must be > 0, got {self.duct_diameter:.4f} m")
+        elif self.duct_inner_diameter <= 0:
+            problems.append(
+                f"a wall of {self.wall_thickness * 1000:.2f} mm leaves no bore in a "
+                f"{self.duct_d:.3f} m duct: keep the duct diameter above "
+                f"{2.0 * self.wall_thickness:.3f} m")
+        if self.material not in PIPE_MATERIALS:
+            problems.append(
+                f"unknown tube material {self.material!r}: expected one of "
+                f"{tuple(PIPE_MATERIALS)}")
+        if self.roughness is not None and self.roughness < 0.0:
+            problems.append(
+                f"the absolute roughness must be >= 0, got {self.roughness:.3e} m")
+        elif self.relative_roughness > ROUGHNESS_LIMIT:
+            problems.append(
+                f"{WARNING}the relative roughness eps/d is "
+                f"{self.relative_roughness:.3f}, above the {ROUGHNESS_LIMIT:.2f} of the "
+                f"Moody chart: a {self.absolute_roughness * 1e3:.1f} mm roughness in a "
+                f"{self.inner_diameter * 1000:.0f} mm bore is not a pipe wall")
+        if self.junction_refinement is not None:
+            if self.junction_refinement <= 0:
+                problems.append(
+                    f"the junction refinement must be > 0, got "
+                    f"{self.junction_refinement:.4f} m: use None to leave the band "
+                    f"unrefined")
+            elif self.junction_refinement > self.diameter:
+                problems.append(
+                    f"{WARNING}the junction refinement "
+                    f"({self.junction_refinement * 1000:.1f} mm) is coarser than the "
+                    f"tube it refines ({self.diameter * 1000:.1f} mm), so the band "
+                    f"around the two headers cannot resolve the junction")
+        if not isinstance(self.insulated_headers, bool):
+            problems.append(
+                f"insulated_headers must be a flag, got {self.insulated_headers!r}")
+        if self.n_sectors < 1:
+            problems.append(f"n_sectors must be >= 1, got {self.n_sectors}")
         if self.layout not in LAYOUTS:
             problems.append(f"unknown layout {self.layout!r}: expected one of {LAYOUTS}")
         if self.collection not in COLLECTIONS:
@@ -265,6 +464,10 @@ class PipeNetworkConfig:
         if self.split_mode not in SPLITS:
             problems.append(
                 f"unknown split mode {self.split_mode!r}: expected one of {SPLITS}")
+        elif self.split_mode == SPLIT_RING and self.layout != LAYOUT_RINGS:
+            problems.append(
+                f"the {SPLIT_RING!r} distribution gives every ring main the same "
+                f"flow, so it needs layout={LAYOUT_RINGS!r}, not {self.layout!r}")
         if self.collection == COLLECTION_TWO_LEVEL and self.layout != LAYOUT_RINGS:
             problems.append(
                 f"the two-level collection stacks concentric rings, so it needs "
@@ -337,6 +540,19 @@ class PipeNetworkConfig:
                 f"{WARNING}the inlet duct at {self.inlet_elevation:.2f} m sits above "
                 f"the distributor ({self.z_bottom:.2f} m): the duct then crosses the "
                 f"active band and short-circuits part of the sand")
+        if (not self.insulated_headers and self.duct_d >= 2.0 * self.diameter
+                and self.z_top - self.z_bottom > HEADER_LIMIT):
+            problems.append(
+                f"{WARNING}the headers are not insulated, they are d = "
+                f"{self.duct_d * 1000:.0f} mm wide and the gas travels "
+                f"{self.z_top - self.z_bottom:.1f} m of them at the bed temperature: "
+                f"lag them (insulated_headers) or split the bundle into modules")
+        if self.split_mode == SPLIT_SECTOR and self.inner_radius > 0:
+            empty = _empty_sectors(self)
+            if empty:
+                problems.append(
+                    f"sector(s) {empty} of n_sectors = {self.n_sectors} hold no riser: "
+                    f"reduce n_sectors or enlarge the vessel")
         return problems
 
 
@@ -375,9 +591,35 @@ def _serpentine(groups: list[list[tuple[float, float]]]) -> list[tuple[float, fl
     return points
 
 
+def _spiral_group(config: PipeNetworkConfig) -> list[list[tuple[float, float]]]:
+    """Riser positions of the spiral layout, as the single walk the feeder follows.
+
+    An Archimedean spiral ``r(phi) = p_v phi / 2 pi``: one turn of the walk raises the
+    radius by the vertical pitch, and the walk steps ``p_h`` of *arc* at a time, so the
+    two published pitches describe the layout exactly as they do for the lattices.
+    The walk starts at the clearance circle - where the inlet duct arrives - and ends
+    half a horizontal pitch off the axis, which leaves the centre free for the return.
+    """
+    p_h, p_v, r_eff = config.pitch_h, config.pitch_v, config.inner_radius
+    if p_h <= 0.0 or p_v <= 0.0 or r_eff <= 0.0:
+        return []
+    pitch = p_v / (2.0 * np.pi)                 # radius gained per radian
+    start = float(np.deg2rad(config.azimuth_in))
+    theta, points = r_eff / pitch, []
+    while theta > 0.0:
+        radius = pitch * theta
+        if radius < 0.5 * p_h:                  # the innermost turn stops off the axis
+            break
+        points.append((radius * np.cos(start + theta), radius * np.sin(start + theta)))
+        theta -= p_h / radius                   # one horizontal pitch of arc onwards
+    return [points]
+
+
 def _lattice_groups(config: PipeNetworkConfig) -> list[list[tuple[float, float]]]:
     """Riser positions of the lattice layouts, one list per row (or per radial file)."""
     p_h, p_v, r_eff = config.pitch_h, config.pitch_v, config.inner_radius
+    if config.layout == LAYOUT_SPIRAL:
+        return _spiral_group(config)
     if config.layout == LAYOUT_RADIAL:
         n_files = int(config.n_files) if config.n_files else \
             max(3, int(round(np.pi * r_eff / p_v)))
@@ -467,6 +709,40 @@ def _levels(config: PipeNetworkConfig, n_groups: int) -> list[float]:
     return [config.level_gap * (index % 2) for index in range(n_groups)]
 
 
+def _sector_of(config: PipeNetworkConfig, x: float, y: float) -> int:
+    """Index of the angular sector a plan position falls in [-]."""
+    sectors = max(int(config.n_sectors), 1)
+    angle = (np.arctan2(y, x) - np.deg2rad(config.azimuth_in)) % (2.0 * np.pi)
+    return int(np.floor(angle / (2.0 * np.pi / sectors))) % sectors
+
+
+def _empty_sectors(config: PipeNetworkConfig) -> list[int]:
+    """Sectors of the ``sector`` split no riser falls in ([] when every one is fed)."""
+    if config.n_sectors < 1:
+        return []
+    used = {_sector_of(config, x, y) for x, y in _plan(config).points}
+    return [index for index in range(int(config.n_sectors)) if index not in used]
+
+
+def _group_share(labels: list[int], count: int) -> np.ndarray:
+    """Share per branch when the flow is divided per group and then inside it [-].
+
+    The whole flow is split equally between the groups and each group then divides its
+    share equally between its own branches, so the shares sum to one whatever the group
+    sizes are: that is what makes a *grouped* distribution different from the equal one
+    (a ring main or a sector gets its share of the flow, not its risers' share).
+    """
+    if count == 0:
+        return np.empty(0)
+    sizes: dict[int, int] = {}
+    for label in labels:
+        sizes[label] = sizes.get(label, 0) + 1
+    if not sizes or len(labels) != count:
+        return np.full(count, 1.0 / count)
+    groups = float(len(sizes))
+    return np.asarray([1.0 / (groups * sizes[label]) for label in labels], dtype=float)
+
+
 # --------------------------------------------------------------- branch and network
 @dataclass(frozen=True)
 class Branch:
@@ -494,8 +770,10 @@ class PipeNetwork:
     and the pressure loss of every pipe of the design are carried by the run itself,
     so nothing is lost between the geometry and the fluid solve.  The thermal march of
     the gas uses the risers with the branch split
-    (``FluidLoop(runs=network.risers, split=network.split())``); the headers and the
-    ducts stay available for the hydraulics and for the voxelisation.
+    (``FluidLoop(runs=network.risers, split=network.split())``, or
+    :meth:`fluid_loop` which also folds the circuit's pressure drop in); the headers
+    and the ducts stay available for the hydraulics and for the voxelisation, and
+    :meth:`paint` writes both into a mesh.
     """
 
     config: PipeNetworkConfig
@@ -508,6 +786,9 @@ class PipeNetwork:
     outlet: PipeRun
     branches: list[Branch] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: plan group of every branch (the ring main on the ring layouts; the riser itself
+    #: on the ladder layouts), in branch order: what the ``ring`` split divides
+    groups: list[int] = field(default_factory=list)
 
     # ---------------------------------------------------------------- geometry
     @property
@@ -520,6 +801,26 @@ class PipeNetwork:
     def headers(self) -> list[PipeRun]:
         """Distributor and collector runs together: the collectors of the design."""
         return [*self.distributors, *self.collectors]
+
+    @property
+    def insulated(self) -> list[PipeRun]:
+        """The runs that exchange nothing with the bed: the lagged headers."""
+        return self.headers if self.config.insulated_headers else []
+
+    @property
+    def inner_diameter(self) -> float:
+        """Bore of the tubes [m]: what the gas of a branch flows through."""
+        return self.config.inner_diameter
+
+    @property
+    def roughness(self) -> float:
+        """Absolute roughness of the pipe wall [m] (the material's or the override)."""
+        return self.config.absolute_roughness
+
+    @property
+    def relative_roughness(self) -> float:
+        """``eps / d_bore`` [-]: the number the friction factor is read with."""
+        return self.config.relative_roughness
 
     @property
     def n_risers(self) -> int:
@@ -556,6 +857,18 @@ class PipeNetwork:
     def specific_area(self) -> float:
         """Wetted area per unit active volume [m^2/m^3] - the sizing number."""
         return self.total_area / self.bed_volume if self.bed_volume > 0 else 0.0
+
+    @property
+    def exchange_area(self) -> float:
+        """Wetted area that exchanges heat with the bed [m^2].
+
+        The whole network, unless the headers are lagged (``insulated_headers``): a
+        lagged distributor and collector only carry the gas, so the heat transfer
+        surface of the design is what is left.
+        """
+        if not self.insulated:
+            return self.total_area
+        return self.total_area - float(sum(run.total_area for run in self.headers))
 
     def plan_xy(self) -> tuple[np.ndarray, np.ndarray]:
         """Plan coordinates of the risers, relative to the vessel axis [m]."""
@@ -617,26 +930,59 @@ class PipeNetwork:
     def split(self) -> np.ndarray:
         """Share of the total mass flow per branch [-]: sums to 1 by construction.
 
-        ``equal`` is the design target (every riser sees the same flow); ``path``
-        follows the branch path, the coarse distribution rule a header is sized
-        against, in which the branch that travels furthest carries proportionally
-        more.  The result is what ``FluidLoop(split=...)`` wants.
+        Four distributions, all of them what ``FluidLoop(split=...)`` wants:
+
+        ``equal``
+            the design target: every riser sees the same flow;
+        ``path``
+            proportional to the branch path, the coarse rule a header is sized
+            against, in which the branch that travels furthest carries more;
+        ``ring``
+            equal per *header group* (one ring main each), then equal inside the
+            group: the flow is distributed between the rings, not between the risers,
+            so a ring with few taps feeds each of them more;
+        ``sector``
+            equal per angular sector of ``n_sectors`` about the inlet azimuth, then
+            equal inside the sector: the bed is charged the same in every direction
+            whatever the lattice does at its edges.
+
+        The two grouped modes are what a *plumbing* choice asks for (a manifold per
+        ring, a quadrant valve per sector); ``equal`` and ``path`` are the hydraulic
+        ones.
         """
         count = len(self.branches)
         if count == 0:
             return np.empty(0)
-        if self.config.split_mode == SPLIT_PATH:
+        mode = self.config.split_mode
+        if mode == SPLIT_PATH:
             weights = self.paths()
             total = float(np.sum(weights))
             if total > 0.0:
                 return weights / total
+        elif mode == SPLIT_RING:
+            return _group_share(self._group_labels(), count)
+        elif mode == SPLIT_SECTOR:
+            return _group_share(self._sector_labels(), count)
         return np.full(count, 1.0 / count)
+
+    def _group_labels(self) -> list[int]:
+        """Header group (ring main) of every branch, in branch order."""
+        if len(self.groups) == len(self.branches):
+            return [int(group) for group in self.groups]
+        return list(range(len(self.branches)))
+
+    def _sector_labels(self) -> list[int]:
+        """Angular sector of every branch about the inlet azimuth [-], branch order."""
+        x, y = self.plan_xy()
+        return [_sector_of(self.config, float(px), float(py))
+                for px, py in zip(x, y, strict=True)]
 
     # ------------------------------------------------------------------ output
     def summarize(self) -> dict:
         """The numbers of :meth:`summary` as a dictionary (GUI and reports)."""
         split = self.split()
         paths = self.paths()
+        config = self.config
         return {
             "n_risers": self.n_risers,
             "n_headers": len(self.headers),
@@ -644,6 +990,7 @@ class PipeNetwork:
             "riser_length": self.riser_length,
             "total_area": self.total_area,
             "riser_area": self.riser_area,
+            "exchange_area": self.exchange_area,
             "bed_volume": self.bed_volume,
             "specific_area": self.specific_area,
             "bundle_width": self.bundle_width,
@@ -656,12 +1003,25 @@ class PipeNetwork:
             "path_spread": self.path_spread(),
             "split_min": float(np.min(split)) if split.size else 0.0,
             "split_max": float(np.max(split)) if split.size else 0.0,
+            "split_mode": config.split_mode,
+            "n_sectors": int(config.n_sectors),
+            "layout": config.layout,
+            "collection": config.collection,
+            "diameter": config.diameter,
+            "wall_thickness": config.wall_thickness,
+            "inner_diameter": config.inner_diameter,
+            "material": config.material,
+            "roughness": config.absolute_roughness,
+            "relative_roughness": config.relative_roughness,
+            "insulated_headers": bool(config.insulated_headers),
+            "junction_refinement": config.junction_refinement,
         }
 
     def summary(self) -> str:
         """Design summary: tubes, pitches, bundle, lengths, areas, headers, split."""
         config = self.config
         data = self.summarize()
+        material = config.pipe_material
         lines = [
             f"network: {config.layout} layout, {config.collection}, "
             f"{self.n_risers} risers in {len(self.distributors)} distributor and "
@@ -671,6 +1031,10 @@ class PipeNetwork:
             f"({config.pitch_h / config.diameter:.2f} d / "
             f"{config.pitch_v / config.diameter:.2f} d), d = "
             f"{config.diameter * 1000:.1f} mm",
+            f"tube: {config.diameter * 1000:.1f} x {config.wall_thickness * 1000:.1f} "
+            f"mm wall, bore {config.inner_diameter * 1000:.1f} mm, "
+            f"{material if material is not None else config.material}, relative "
+            f"roughness {config.relative_roughness:.5f}",
             f"bundle: {data['bundle_width']:.2f} x {data['bundle_height']:.2f} m plan "
             f"inside r = {data['bundle_radius']:.2f} m of a {config.radius:.2f} m "
             f"vessel, risers {self.riser_length / max(self.n_risers, 1):.2f} m long",
@@ -687,6 +1051,30 @@ class PipeNetwork:
             f"{data['path_min']:.2f}-{data['path_max']:.2f} m "
             f"(spread {data['path_spread']:.3f}x)",
         ]
+        if config.split_mode == SPLIT_SECTOR:
+            lines.append(f"distribution: {int(config.n_sectors)} sectors about the "
+                         f"inlet azimuth {config.azimuth_in:.0f} deg, each fed the "
+                         f"same share of the flow")
+        elif config.split_mode == SPLIT_RING:
+            lines.append(f"distribution: {len(self.distributors)} header groups, each "
+                         f"fed the same share of the flow")
+        if self.insulated:
+            lines.append(
+                f"insulated headers: the {len(self.headers)} header runs carry the gas "
+                f"and exchange nothing, so the heat transfer surface is "
+                f"{data['exchange_area']:.1f} m2 of {self.total_area:.1f} m2")
+        else:
+            header_area = float(sum(run.total_area for run in self.headers))
+            share = header_area / self.total_area if self.total_area else 0.0
+            lines.append(f"bare headers: no lagging, so {100 * share:.1f}% of the "
+                         f"wetted area sits in the {len(self.headers)} distributor and "
+                         f"collector runs and reaches the sand unlagged")
+        if config.junction_refinement is not None:
+            lines.append(
+                f"junctions: the mesh band around the two header elevations asks for "
+                f"cells of {config.junction_refinement * 1000:.1f} mm "
+                f"(one tube diameter either side of {config.z_bottom:.2f} and "
+                f"{config.z_top:.2f} m)")
         lines.extend(f"note: {note}" for note in self.notes)
         return "\n".join(lines)
 
@@ -747,6 +1135,14 @@ class PipeNetwork:
             problems.append(
                 f"the run {run.name!r} is not connected to the inlet duct: the "
                 f"headers of a network must be linked to each other and to the duct")
+        if not self.insulated:
+            header_area = float(sum(run.total_area for run in self.headers))
+            if header_area > HEADER_AREA_LIMIT * self.total_area and header_area > 0.0:
+                problems.append(
+                    f"{WARNING}the headers carry {header_area:.1f} m2 of the "
+                    f"{self.total_area:.1f} m2 wetted area and are not insulated: lag "
+                    f"them (insulated_headers) so the bed is charged through the "
+                    f"tubes, or shorten the headers")
         return problems
 
     # ----------------------------------------------------------- voxelisation
@@ -776,6 +1172,253 @@ class PipeNetwork:
         return (np.asarray(order, dtype=np.int64),
                 np.asarray([lengths[cell] for cell in order], dtype=float),
                 np.asarray([areas[cell] for cell in order], dtype=float))
+
+    # ---------------------------------------------------------------- the mesh
+    def _vessel_mask(self, mesh: Mesh3D, cells: np.ndarray) -> np.ndarray:
+        """Whether each flat cell of ``cells`` has its centre inside the vessel."""
+        x = mesh.X.ravel(order="F")[cells]
+        y = mesh.Y.ravel(order="F")[cells]
+        z = mesh.Z.ravel(order="F")[cells]
+        radius = np.hypot(x - self.center[0], y - self.center[1])
+        return ((radius <= self.config.radius + 1e-9)
+                & (z >= self.config.base_z - 1e-9)
+                & (z <= self.config.roof_z + 1e-9))
+
+    def _cells_3d(self, mesh: Mesh3D, cells: np.ndarray) -> np.ndarray:
+        """Boolean mask of the 3-D grid holding the flat ``cells``."""
+        flat = np.zeros(mesh.N_total, dtype=bool)
+        flat[cells] = True
+        return flat.reshape(mesh.T.shape, order="F")
+
+    def paint(self, mesh: Mesh3D, h_fluid: float = 500.0,
+              t_fluid: float = 300.0) -> PaintReport:
+        """Mark the pipes of the network on ``mesh`` and give them a gas film.
+
+        The cells the centrelines cross and whose centre falls inside the vessel become
+        :data:`~src.core.mesh.MaterialID.TUBES` - the entry of the material table that
+        *is* a pipe, the same one the lumped tube bank uses, so a mesh never carries
+        two kinds of tube - with the thermal properties of the tube material of the
+        configuration and no volumetric source.  Every cell that exchanges then carries
+        the convective link to the gas (``h_fluid``, ``t_fluid``): the risers always,
+        the headers and the ducts only when they are not lagged.
+
+        Nothing is measured off the mask: the wetted area stays the geometric
+        ``pi d L`` of the centrelines, and the report states how much of it fell
+        outside the vessel (the nozzle stubs) and how much is left without a film.
+        """
+        cells, _, areas = self.voxelize(mesh)
+        riser_cells = self._riser_cells(mesh)
+        inside = self._vessel_mask(mesh, cells)
+        riser_inside = self._vessel_mask(mesh, riser_cells)
+        painted = cells[inside]
+        mask = self._cells_3d(mesh, painted)
+        riser_mask = self._cells_3d(mesh, riser_cells[riser_inside])
+        props = MaterialManager().get(self.config.material)
+        mesh.material_id[mask] = int(MaterialID.TUBES)
+        mesh.k[mask], mesh.rho[mask], mesh.cp[mask] = props.k, props.rho, props.cp
+        mesh.Q_source[mask] = 0.0
+        mesh.source_mask[mask] = False
+        mesh.set_internal_convection(mask, float(h_fluid), float(t_fluid))
+        if self.insulated:
+            lagged = mask & ~riser_mask
+            mesh.set_internal_convection(lagged, 0.0, float(t_fluid))
+        report = PaintReport(
+            cells=int(painted.size), riser_cells=int(riser_mask.sum()),
+            area=float(np.sum(areas[inside])), dropped=float(np.sum(areas[~inside])),
+            insulated=float(self.total_area - self.exchange_area),
+            h_fluid=float(h_fluid), t_fluid=float(t_fluid),
+            material=self.config.material, notes=list(self.notes))
+        if report.dropped > 0.0:
+            report.notes.append(
+                f"{report.dropped:.3f} m2 of pipe fell outside the vessel (the nozzle "
+                f"stubs): it is not painted, because a cell outside the wall is not "
+                f"part of the bed")
+        if report.insulated > 0.0:
+            report.notes.append(
+                f"{report.insulated:.2f} m2 of lagged header was painted as a pipe but "
+                f"carries no gas film: it only conducts in the sand")
+        return report
+
+    def _riser_cells(self, mesh: Mesh3D) -> np.ndarray:
+        """Flat indices of the cells the risers cross on ``mesh``."""
+        cells: dict[int, float] = {}
+        for run in self.risers:
+            placed = rasterize_pipe(mesh, run.points, run.diameter, name=run.name)
+            for cell in placed.cells.tolist():
+                cells[cell] = 0.0
+        return np.asarray(sorted(cells), dtype=np.int64)
+
+    # -------------------------------------------------------------- the circuit
+    def hydraulics(self, mass_flow: float, fluid: Fluid | None = None) -> Hydraulics:
+        """Pressure drop of every branch circuit at the design flow [Pa].
+
+        A branch pushes its share of the flow through its riser *and* through the
+        pipes that are shared with the other branches: its arc in the distributor, the
+        collector arc the return follows and the two ducts, which every branch
+        crosses.  The gas flows in the bores, so the wall thickness of the tube is the
+        diameter the friction sees.
+
+        The headers, the connectors and the ducts are then folded into one equivalent
+        fitting coefficient per branch (referred to the velocity in the tube), which is
+        what :meth:`fluid_loop` hands to :class:`~src.solver.fluid.FluidLoop`: its
+        parallel march has one run per branch, so it cannot take a shared pipe as a run
+        of its own without stealing flow from the risers.
+        """
+        from ..solver.fluid import pressure_drop
+
+        if mass_flow <= 0.0:
+            raise ValueError(f"the design mass flow must be > 0, got {mass_flow} kg/s")
+        fluid = self._fluid_or_default(fluid)
+        split = self.split()
+        bore, duct = self.inner_diameter, self.config.duct_inner_diameter
+        roughness = self.roughness
+        duct_length = self.inlet.total_length + self.outlet.total_length
+        riser_drop = np.empty(len(self.branches))
+        shared_drop = np.empty(len(self.branches))
+        for index, branch in enumerate(self.branches):
+            m_dot = mass_flow * float(split[index]) if split.size else mass_flow
+            arcs = (max(branch.feed_length - self.inlet.total_length, 0.0)
+                    + max(branch.return_length - self.outlet.total_length, 0.0))
+            riser_drop[index] = pressure_drop(m_dot, bore, branch.riser.total_length,
+                                              fluid, roughness)
+            shared_drop[index] = pressure_drop(m_dot, duct, arcs + duct_length, fluid,
+                                               roughness)
+        area_bore = 0.25 * np.pi * bore ** 2
+        velocity = mass_flow * split / (fluid.rho * area_bore) if split.size else 0.0
+        fittings = np.where(velocity > 0.0,
+                            2.0 * shared_drop / (fluid.rho * velocity ** 2), 0.0)
+        return Hydraulics(mass_flow=float(mass_flow), riser_drop=riser_drop,
+                          shared_drop=shared_drop,
+                          fittings_k=float(np.mean(fittings)) if fittings.size else 0.0,
+                          duct_length=float(duct_length))
+
+    @staticmethod
+    def _fluid_or_default(fluid: Fluid | None) -> Fluid:
+        """The gas of the march: the caller's, or the module default (air at 300 K)."""
+        from ..solver.fluid import Fluid as FluidType
+        return FluidType() if fluid is None else fluid
+
+    def _gas_runs(self, mesh: Mesh3D | None = None) -> list[PipeRun]:
+        """The risers as the *gas* sees them: bore diameter, inner wetted surface.
+
+        The design numbers of the network (``total_area``, ``specific_area``) stay the
+        outer geometric ``pi d L`` - that is the surface the bed sees - while the march
+        of the gas works on the other side of the wall: its film coefficient and its
+        friction are the bore's, and the surface it exchanges through is the inner
+        ``pi d_bore L``.  One run per branch, so the split of
+        :meth:`split` lines up with the run order of :class:`FluidLoop`.
+        """
+        bore = self.inner_diameter
+        runs = self.risers if mesh is None else [
+            rasterize_pipe(mesh, run.points, run.diameter, name=run.name)
+            for run in self.risers]
+        if bore <= 0.0:
+            return list(runs)
+        return [PipeRun(name=run.name, points=run.points, diameter=bore,
+                        cells=run.cells, length=run.length) for run in runs]
+
+    def fluid_loop(self, mass_flow: float, fluid: Fluid | None = None,
+                   external_power: float = 0.0, t_in: float | None = None,
+                   h_fluid: float | None = None, fittings_k: float = 0.0,
+                   fan_efficiency: float = 0.7, pressure: float = 101325.0,
+                   mesh: Mesh3D | None = None) -> FluidLoop:
+        """Build the gas circuit of the network as the 1-D loop the analyses march.
+
+        One run per branch, in branch order, with the branch split of :meth:`split`:
+        the march, the per-cell exchange the solver deposits and the enthalpy balance
+        are the parallel-riser model of :class:`~src.solver.fluid.FluidLoop`, and the
+        runs are the risers because a header - traversed by every branch, with a
+        temperature that varies along it - cannot be one parallel run without taking
+        flow away from the tubes.  The runs carry the *bore* and the inner wetted area,
+        so the film coefficient, the friction and the exchange surface the loop sees
+        are all on the gas side of the wall (see :meth:`_gas_runs`).
+
+        The rest of the circuit is in the loop where it belongs: the pressure drop of
+        the headers, the connectors and the ducts comes from :meth:`hydraulics` and
+        enters as the equivalent fitting coefficient of the circuit, so the fan figure
+        is the whole circuit's and not the tubes' alone.  ``fittings_k`` adds the local
+        losses of the plant (bends, valves) on top of it.
+
+        ``mesh`` re-rasterises the risers on another grid, the way
+        :meth:`voxelize` does: pass the mesh the solve will use when it is not the one
+        the network was built on.  ``h_fluid`` is passed to the loop as it is (None
+        lets the loop compute the film coefficient of each run from its own flow and
+        the bore).
+        """
+        from ..solver.fluid import FluidLoop
+
+        fluid = self._fluid_or_default(fluid)
+        circuit = self.hydraulics(mass_flow, fluid)
+        runs = self._gas_runs(mesh)
+        return FluidLoop(runs=runs, mass_flow=float(mass_flow), fluid=fluid,
+                         h_fluid=h_fluid, external_power=float(external_power),
+                         t_in=t_in, split=self.split(), roughness=self.roughness,
+                         fittings_k=float(fittings_k) + circuit.fittings_k,
+                         fan_efficiency=fan_efficiency, pressure=pressure)
+
+
+# -------------------------------------------------------------- the two reports
+@dataclass(frozen=True)
+class Hydraulics:
+    """What the gas circuit of the network costs at a design mass flow."""
+
+    mass_flow: float                    # [kg/s] the whole loop
+    riser_drop: np.ndarray              # [Pa] per branch: the tube alone
+    shared_drop: np.ndarray             # [Pa] per branch: its header arcs and the ducts
+    fittings_k: float                   # [-] the shared pipes, at the tube velocity
+    duct_length: float                  # [m] the two ducts every branch crosses
+
+    @property
+    def branch_drop(self) -> np.ndarray:
+        """Pressure drop of every branch [Pa], in branch order."""
+        return self.riser_drop + self.shared_drop
+
+    @property
+    def mean_drop(self) -> float:
+        """Mean branch drop [Pa]: what the fan of the parallel circuit sees."""
+        return float(np.mean(self.branch_drop)) if self.branch_drop.size else 0.0
+
+    @property
+    def spread(self) -> float:
+        """``max(dp)/min(dp)`` over the branches [-]: 1.0 means a balanced circuit."""
+        drops = self.branch_drop
+        if drops.size == 0 or float(np.min(drops)) <= 0.0:
+            return 1.0
+        return float(np.max(drops) / np.min(drops))
+
+    def summary(self) -> str:
+        shared = float(np.mean(self.shared_drop)) if self.shared_drop.size else 0.0
+        share = shared / self.mean_drop if self.mean_drop > 0.0 else 0.0
+        return (f"circuit at {self.mass_flow:.4f} kg/s: mean branch drop "
+                f"{self.mean_drop:.1f} Pa ({100 * share:.0f}% of it in the headers, "
+                f"the connectors and the {self.duct_length:.1f} m of duct), spread "
+                f"{self.spread:.3f}x, equivalent fittings K = {self.fittings_k:.2f}")
+
+
+@dataclass(frozen=True)
+class PaintReport:
+    """What :meth:`PipeNetwork.paint` marked on a mesh."""
+
+    cells: int                # pipe cells painted
+    riser_cells: int          # of them, reached by a riser (they always exchange)
+    area: float               # [m^2] wetted area painted (inside the vessel)
+    dropped: float            # [m^2] wetted area left out (the nozzle stubs)
+    insulated: float          # [m^2] painted but lagged: no gas film
+    h_fluid: float            # [W/(m^2 K)] film the pipe cells were given
+    t_fluid: float            # [K] gas temperature of that film
+    material: str             # key of the tube material in the material database
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        lines = [
+            f"painted: {self.cells:,} cells as tubes ({self.riser_cells:,} of them on "
+            f"a riser), {self.area:.2f} m2 of wetted area, film {self.h_fluid:.0f} "
+            f"W/(m2 K) at {self.t_fluid - 273.15:.1f} degC",
+            f"material: {self.material}; outside the vessel: {self.dropped:.3f} m2; "
+            f"lagged: {self.insulated:.2f} m2",
+        ]
+        lines.extend(f"note: {note}" for note in self.notes)
+        return "\n".join(lines)
 
 
 # ----------------------------------------------------------------- connectivity
@@ -997,7 +1640,7 @@ def build_pipe_network(mesh: Mesh3D, config: PipeNetworkConfig,
     network = PipeNetwork(config=config, center=(cx, cy), risers=risers,
                           distributors=distributors, collectors=collectors,
                           connectors=connectors, inlet=inlet, outlet=outlet,
-                          branches=branches)
+                          branches=branches, groups=list(plan.group))
     span = network.header_span
     if span > HEADER_LIMIT:
         network.notes.append(

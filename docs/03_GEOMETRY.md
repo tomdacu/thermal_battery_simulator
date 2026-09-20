@@ -56,7 +56,7 @@ Later steps win, but the overlaps are explicit now:
 | 9 | cone: sand fill (optional) then steel shell | `z_cone_base ≤ z ≤ z_cone_apex` |
 | 10 | discrete heaters | element mask ∩ storage band → `material_id = HEATERS` + `source_mask` |
 | 11 | tubes | element mask ∩ storage band → `material_id = TUBES` (steel), sources cleared |
-| 12 | domain boundary conditions | see §5 |
+| 12 | domain boundary conditions | see §6 |
 
 Bands are half-open `[start, end)`, so no cell is painted twice by two adjacent
 bands.  **A zone thinner than a cell is widened to one cell** (growing away from
@@ -65,6 +65,14 @@ otherwise contain no cell centre and disappear from the model entirely - the roo
 used to vanish at every realistic cell size.  The **concrete foundation is painted over the footprint only** (it used
 to cover the whole X–Y plane, silently adding a lateral conduction path across
 the entire domain floor).
+
+Step 1 leaves the air around the vessel as `MaterialID.AIR` cells that still *conduct*,
+and step 12 puts the outside convection on the six box faces.  `Mesh3D` also supports
+the redesign variant - an **excluded** mask with an outer film at the active/excluded
+interface ([13](13_REDESIGN.md) §4, [02](02_FDM_DISCRETIZATION.md) §5.5) - but
+`apply_to_mesh` does not fill it: `mesh.excluded` stays all-False and `mesh.h_out` zero
+for every geometry the GUI can build.  The capability is tested in isolation
+(`tests/test_environment.py`); the geometry wiring is an open item.
 
 ## 3. Heaters: hairpin (U-shaped) sheathed elements
 
@@ -96,9 +104,9 @@ thinner than a cell, surface power outside 3-8 W/cm².
 | pattern | layout |
 |---|---|
 | `uniform_zone` (default) | no discrete element: the power is spread over the whole storage band, honouring `offset_bottom/offset_top` |
-| `grid_vertical`, `chess_pattern` | `grid_rows × grid_cols` hairpins |
-| `radial_array`, `spiral`, `concentric_rings` | hairpins on `n_rings` concentric rings |
-| `custom` | a square arrangement sized on `custom_positions` |
+| `grid_vertical`, `chess_pattern` | `grid_rows × grid_cols` hairpins (both names map to the same grid bank) |
+| `spiral` | a rectangular bank sized from `n_heaters` (about `sqrt(n) × sqrt(n)`) |
+| `radial_array`, `concentric_rings` | hairpins on `n_rings` concentric rings; the count per ring follows the circumference and the leg spacing |
 
 **Power normalisation.**  Whatever the pattern, the injected power is exactly
 `power_total`: the source density is $Q = P/\sum V$ over the cells that were painted,
@@ -118,7 +126,28 @@ so $\sum Q V = P$ (`tests/test_heaters.py`).
 * The fluid coupling is the internal convection of
   [02](02_FDM_DISCRETIZATION.md) §5.4, set from `h_fluid`/`t_fluid` (Kelvin).
 
-## 5. Boundary conditions applied by the geometry
+The tube pattern is the **legacy extraction model**: a set of convective cells with the
+inlet temperature everywhere.  The redesign replaces it with a *pipe network* whose gas
+temperature falls along the run ([13](13_REDESIGN.md), [15](15_PIPE_NETWORKS.md)); the
+two coexist in the GUI (*Tubes* and *Pipes* sub-tabs) and only the tubes are painted into
+the material field today.
+
+## 5. Buried pipe networks
+
+`src/core/pipes.py` and `src/core/pipe_network.py` describe the gas side geometrically:
+a riser is a polyline (`PipeRun`), `rasterize_pipe` returns the cells it crosses with the
+**geometric** length in each of them (so the wetted area is `π d L`, never the staircase
+surface of the mask), and `build_pipe_network(mesh, config)` assembles a whole vessel:
+layout, collection mode, headers, the two nozzles through the wall and the branch split,
+then reports `summary()` and `validate()`.
+
+This is deliberately **not** part of `apply_to_mesh` yet: the network is built on demand
+(the *Build network* button, `GeometryPanel.pipe_network_config()`), the risers are not
+painted into `material_id`, and the gas loop of `src/solver/fluid.py` is driven by the
+caller.  Layouts, collection modes, design rules and worked examples are in
+[docs/15](15_PIPE_NETWORKS.md).
+
+## 6. Boundary conditions applied by the geometry
 
 `BatteryGeometry.apply_boundary_conditions`:
 
@@ -132,7 +161,7 @@ so $\sum Q V = P$ (`tests/test_heaters.py`).
 Temperatures are Kelvin (`BatteryGeometry.t_ambient = 293.15`,
 `t_ground = 283.15` by default).
 
-## 6. Validation
+## 7. Validation
 
 `BatteryGeometry.validate(mesh)` returns a list of problems and `apply_to_mesh`
 raises `ValueError` on a non-empty list.  It checks:
@@ -147,7 +176,7 @@ The mesh itself validates its fields (`Mesh3D.validate`): positive $k,\rho,c_p$,
 non-negative sources, sinks ≤ 0, and `check_kelvin` on the temperature field and
 the face conditions.
 
-## 7. Reporting
+## 8. Reporting
 
 `BatteryGeometry.zone_volumes()` / `zone_masses()` return a consistent key set
 (`storage`, `slab_bottom`, `slab_top`, `insulation_radial`, `insulation`,

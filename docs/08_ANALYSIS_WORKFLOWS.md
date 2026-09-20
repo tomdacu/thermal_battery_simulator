@@ -1,8 +1,9 @@
 # 8. Analysis workflows
 
-The three runs the application offers, what each one computes, and how the
+The runs the application offers, what each one computes, and how the
 reported numbers are defined.  Entry points: `src/solver/steady.py`,
-`src/analysis/losses.py`, `src/solver/transient.py`.
+`src/analysis/losses.py`, `src/solver/transient.py`, `src/analysis/convergence.py`,
+`src/analysis/cycle.py`, `src/solver/fluid.py`.
 
 ## 1. Steady state
 
@@ -86,7 +87,86 @@ temperature, insulation and shell means, heater and extracted power, the four
 loss terms, stored energy, the three cumulative energies, exergy, and optionally
 the full fields.  `export_csv()` writes the whole time series.
 
-## 4. Definitions of the reported quantities
+## 4. Automatic mesh search
+
+**Question**: which grid makes the steady answer trustworthy at the tolerances the
+user asked for?
+
+Entry point `src/analysis/convergence.py::find_mesh(build, solve, target, ...)`; in the
+GUI it is the *Find the mesh* button and the `automesh` job kind (it runs on the same
+background thread as a simulation).
+
+1. `main_window._refresh_plan` recomputes the **a priori plan**
+   (`src/analysis/mesh_plan.py`): cells across a layer (`thickness/N`) and the
+   convective sub-layer (`2k/h`) per region, which *tightens* the manual targets
+   (`GeometryPanel.set_plan_targets` / `planned`).
+2. The search builds and solves the **steady** case on a sequence of grids, each one
+   `refine` finer (default 0.6), up to `max_levels` (default 4).
+3. The error model (observed order from the level pairs, Richardson extrapolation, the
+   GCI of Roache with $F_s = 1.25$) predicts the grid that should meet
+   `delta_temperature` [K] on the storage mean and `delta_power` (relative) on the heat
+   leaving the battery; the search **jumps** to that grid rather than walking one level
+   at a time.
+4. It stops when both changes are within tolerance.  If the cell budget or the minimum
+   cell size prevents the refinement, it reports **stopped** with the reason instead of
+   calling two identical grids "converged".
+5. The adopted `GridSpec` is returned in the report and used by the build; the panel
+   shows `converged: <cells> cells, dT .. K, dP ..%`.
+
+**Reported**: `ConvergenceReport` - the levels tried (`ConvergenceLevel`: cells,
+dT, dP, wall time), the chosen one, `converged`, the observed order and the GCI, plus a
+human-readable `message` when it stopped.
+
+## 5. Cycle: charge, standby, discharge
+
+**Question**: what does a full operating cycle cost and where does the energy go?
+
+`src/analysis/cycle.py::run_cycle(mesh, loop, settings, solver_config, progress)` drives
+the three phases with the **transient solver**, in chunks (`settings.chunk`, default
+12 h) so the driver can watch the state and stop a phase where the physics says so:
+
+* **charge** until the storage mean reaches `t_target` (default 773.15 K), with the
+  resistors as the external power of the loop, limited by `charge_limit`;
+* **standby** for `standby_time`;
+* **discharge** until the delivery temperature falls below `t_delivery_min`, requesting
+  `discharge_power` at the exchanger.
+
+The accounting is the identity that cannot hide a term:
+
+$$E_{in} = \Delta E_{stored} + E_{delivered} + E_{standby} + E_{circulation}
++ E_{unrecovered}$$
+
+with `E_in` what the resistors take from the grid, `E_delivered` what the exchanger
+hands to the user, `E_standby` what leaks through the envelope while the store sits,
+`E_circulation` the blower work, and `E_unrecovered` the heat still in the bed when the
+discharge stops - the number that decides whether a low-temperature tail is worth
+chasing.  `CycleReport` also carries the per-phase rows (`CyclePhase`) and `summary()`.
+
+The phase boundaries are inspected per chunk, so a discharge fast compared with the bed
+capacity can overshoot the delivery floor inside one chunk; a per-step stopping criterion
+inside the transient solver is the clean fix and is the item being completed in
+`src/analysis/cycle.py` (its module docstring carries the live status).
+
+## 6. The gas loop as the heat path
+
+The redesign charges and discharges the bed through a **closed gas loop in buried
+pipes** ([13](13_REDESIGN.md), [15](15_PIPE_NETWORKS.md)).  The pieces a run uses:
+
+1. `src/core/pipes.py` / `src/core/pipe_network.py` give the geometry: runs (polylines),
+   the wetted area per cell, the branches and their flow shares;
+2. `src/solver/fluid.py::FluidLoop` marches each run with the exact relation
+   $T_{out} = T_w + (T_{in}-T_w)e^{-NTU}$, $NTU = hA/(\dot m c_p)$, deposits
+   $\dot m c_p (T_{in}-T_{out})$ in the bed as a volumetric source `q_fluid` [W/m³] - the
+   same term charges and discharges, its sign follows the loop - and computes the film
+   coefficient from the flow (`pipe_h`) unless the caller fixes it;
+3. the loop is closed, so every temperature is affine in the loop inlet temperature and
+   the balance $\sum_i \dot m_i c_p (T_{out,i} - T_{in}) = -Q_{ext}$ is solved for
+   $T_{in}$ in one step; `Q_ext > 0` are the resistors, `Q_ext < 0` the exchanger;
+4. pressure drop, fan power and the circulation loss share come from the same module
+   (`friction_factor`, `pressure_drop`, `fan_power`), and an operating point the flow
+   cannot carry is refused with a message.
+
+## 7. Definitions of the reported quantities
 
 | quantity | definition | where |
 |---|---|---|
@@ -98,6 +178,9 @@ the full fields.  `export_csv()` writes the whole time series.
 | `Ex_stored` | $\sum \rho c_p[(T-T_0)-T_0\ln(T/T_0)]V$ | `fluxes.stored_exergy` |
 | `Ex_destroyed` | exergy entering with the heaters (Carnot factor at the storage temperature) minus what is stored | `fluxes.destroyed_exergy` |
 | `imbalance` | $P_{in} - P_{extracted} - Q_{domain} - dE/dt$; the self-check, ~0 for a correct solve | `compute_balance` |
+| `Q_environment` | $h_{out}A(T-T_{ambient})$ over the active/excluded interfaces; folded into `Q_domain` so the balance closes when the air is excluded | `fluxes.environment_flux` |
+| `E_circulation` | blower work of the gas loop, from the pressure drop and the flow | `solver/fluid.py::fan_power`, `analysis/cycle.py` |
+| `E_delivered` / `E_unrecovered` | heat handed to the user during a discharge / heat still in the bed when the delivery temperature falls below its floor | `analysis/cycle.py` |
 | thermal autonomy | `E_stored / Q_losses` expressed in hours | `balance.thermal_autonomy` |
 | mean storage T | mean over `MaterialID.SAND` cells | `Balance.t_mean_storage` |
 
@@ -106,7 +189,7 @@ Losses are reported twice on purpose: *envelope* losses describe the battery
 describe the simulated box.  The first is the engineering number, the second is
 the one that must close the energy balance.
 
-## 5. Saving and restoring a state
+## 8. Saving and restoring a state
 
 `StateManager.save_state(mesh, name, geometry_params)` writes an HDF5 file with
 version, creation time, the temperature unit, the geometry hash

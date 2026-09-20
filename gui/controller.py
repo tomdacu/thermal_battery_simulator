@@ -18,6 +18,7 @@ from src.core.materials import MaterialManager
 from src.analysis.losses import LossesConfig, solve_losses
 from src.core.geometry import BatteryGeometry
 from src.core.mesh import Mesh3D
+from src.core.pipe_network import PipeNetwork
 from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from src.solver.steady import SolverConfig, SteadyStateSolver
 from src.solver.transient import TransientConfig, TransientSolver
@@ -48,6 +49,11 @@ class RunConfig:
     power_profile: PowerProfile = field(default_factory=PowerProfile)
     extraction_profile: ExtractionProfile = field(default_factory=ExtractionProfile)
     start_from_steady: bool = False
+    #: the buried pipe network the Pipes tab built and painted (None = the lumped
+    #: tube bank of the geometry is the heat exchanger)
+    pipe_network: PipeNetwork | None = None
+    #: total mass flow of the gas circuit of that network [kg/s]
+    pipe_flow: float = 0.0
 
     def solver_config(self) -> SolverConfig:
         return SolverConfig(method=self.method, preconditioner=self.preconditioner,
@@ -189,12 +195,32 @@ class SimulationController(QObject):
                 power_profile=config.power_profile,
                 extraction_profile=config.extraction_profile,
                 t_ambient=config.battery.t_ambient,
+                fluid_loop=self._fluid_loop(config, mesh),
                 **settings,
             )
             return TransientSolver(mesh, t_cfg, solver_config).run(progress, should_stop)
 
         return {"steady": steady, "losses": losses, "transient": transient,
                 "automesh": automesh}[config.analysis]
+
+    def _fluid_loop(self, config: RunConfig, mesh: Mesh3D):
+        """The gas circuit of a network the Pipes tab built, or None.
+
+        With a network the gas *is* the heat transfer path: the loop marches the pipes
+        on the mesh (the cells the paint marked) and the profiles drive its external
+        power instead of depositing heat in the sand.  Without one the lumped tube bank
+        of the geometry keeps doing the job, as it always did.
+        """
+        network = config.pipe_network
+        if network is None:
+            return None
+        if config.pipe_flow <= 0.0:
+            raise ValueError(
+                "the buried pipe network needs a circuit mass flow > 0 kg/s: set it in "
+                "the Pipes tab")
+        circuit = network.hydraulics(config.pipe_flow)
+        self.log.emit(f"[pipes] {circuit.summary()}")
+        return network.fluid_loop(config.pipe_flow, mesh=mesh)
 
     def _finish(self, analysis: str, result) -> None:
         self.finished.emit(analysis, result)

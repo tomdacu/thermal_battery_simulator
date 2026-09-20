@@ -131,3 +131,71 @@ the realistic hairpin heater bank is specified in `docs/10_MESH_AND_HEATERS.md`.
   HDF5 round trip and unit upgrade, plus a head-less GUI smoke test.
 * `README`, `requirements.txt`, `.gitignore` updated; `LICENSE` (PolyForm-Noncommercial-1.0.0) and
   the README license statement now agree.
+
+---
+
+## Documentation catch-up (seventh pass, 2026-09-20)
+
+The documentation had fallen several passes behind the code: it still described the
+GPU backends, a 4-tab GUI with a colormap selector, the rod-heater path, 147/169 test
+counts and a "planned" redesign whose first four pieces had already landed.  This pass
+rewrites the documents against the code that exists, and every number quoted in them is
+now a **measurement with the command that produced it**.
+
+### Rewritten for the current code
+
+| file | what it now says |
+|---|---|
+| `README.md` | the real project structure (`core/{octree,pipe_network,pipes,environment}.py`, `solver/{fluid,octree_solver}.py`, `analysis/{cycle,convergence,mesh_plan}.py`, `scripts/figures.py`), the document table 00-15, a **figures section** with the seven files that exist in `docs/figures/` and the function that draws each, the real GUI structure, the real default solver (BiCGSTAB + Jacobi in the GUI, direct LU in `LinearConfig`), no GPU recommendation, and the test count with its command and date |
+| `docs/00_INDEX.md` | refreshed descriptions (10, 13, 14, 15) and an explicit statement that every quoted count is a measurement |
+| `docs/01_THEORY.md` | the internal film and the contact resistance, and the NTU/effectiveness + fan-work definitions of the gas loop (`solver/fluid.py`) |
+| `docs/02_FDM_DISCRETIZATION.md` | per-volume coefficients with the cached `GridIndex.face_factors`, contact resistance, the excluded-air film at active/excluded interfaces, GPU claims removed, graded/octree validation rows |
+| `docs/03_GEOMETRY.md` | the true heater pattern → bank mapping (the checkerboard is the grid bank, the spiral is a rectangular bank, there is no `custom` heater pattern), the reality that `apply_to_mesh` never fills `mesh.excluded`, and a section on the buried pipe networks |
+| `docs/04_GUI_DESIGN.md` | the real layout (four left tabs with their sub-tabs), the getter tables including the mesh/pipes getters, the run cycle with the `automesh` job, `backend()` removed, the 3D view controls and its fixed `coolwarm` scale |
+| `docs/05_ARCHITECTURE.md` | the two workstreams beside the main path (gas-side redesign, adaptive mesh) with what is and is not wired, the new contracts (excluded film, contact resistance, geometric wetted area, conservative face list), the `automesh` job kind, and the removed code list extended (rod-heater path, colormap selector, `accelerators.py`) |
+| `docs/06_GUI_CONFIGURATION.md` | every control with the default **read from the live panels off-screen** (heater power 5 kW, six heater patterns and the bank each maps to, the *Pipes* tab, the automatic-mesh tolerances, the 3D view sliders) and the truth about the exports (the time-series CSV has a button, the VTK/CSV field export does not) |
+| `docs/07_CODE_STRUCTURE.md` | the module map taken from the source, marking which names the package `__init__` files re-export, and the test table with the collected count per file |
+| `docs/08_ANALYSIS_WORKFLOWS.md` | the automatic mesh search, the cycle with its energy identity and per-step stops, and the gas loop as the heat path, plus the new reported quantities (`environment_flux`, circulation, delivered/unrecovered) |
+| `docs/09_TESTING.md` | the real collected count per file with the command and the date, the GPU backend and GUI-colormap claims removed, the scene combination count corrected (4 fields x 4 cuts x 3 fractions = 48) |
+| `docs/10_MESH_AND_HEATERS.md` | status per part (1-3 implemented, 4 open), the hairpin bank is **no longer the design path** (the resistors belong in the gas circuit), one element type instead of the promised selector, and no unkept promises |
+| `docs/11_HANDOFF.md` | the state of the work: current counts, the passes that landed (fluid loop, networks, environment, octree, cycle, octree solver, figures), the real work-in-progress list and the quick verification commands |
+| `docs/13_REDESIGN.md` | the duplicated patent subsection merged, and §4/§5/§6 rewritten with their true status plus a new **§8 status of the redesign** with the file and test behind every row |
+
+### Verification of this pass
+
+* `python -m pytest tests/ --collect-only -q` → **311 collected**, 300 without
+  `tests/test_gui_sweep.py` (2026-09-20).  The same command reported 270/259 and later
+  295/284 in the same session, which is why the documents record the command and the
+  date next to every count instead of a bare number;
+* `python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py` → **299 passed, 1
+  failed**, and the failure is a wall-clock budget, not physics:
+  `tests/test_octree.py::test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_under_a_second`
+  asserts under a second for a 32768-leaf tree and measured 1.30-1.55 s with the machine
+  idle (2.06 s under load).  It is reported to the owner of that module; the documentation
+  pass itself changes no code, so nothing here can have caused or fixed it;
+* `python -m ruff check src tests gui --select F,E9,B,SIM,UP` → **all checks passed**
+  (the six findings in `src/solver/octree_solver.py` / `tests/test_octree_solver.py`
+  that appeared while that module was landing were fixed by its author);
+* every path written into these documents was checked to exist in the tree (the only
+  exceptions are the three files listed as *removed* in `docs/05`, which is the point of
+  that section);
+* the GUI defaults were read by instantiating `GeometryPanel`, `MaterialsPanel`,
+  `AnalysisPanel`, `SolverPanel`, `VizView` and `ResultsPanel` off-screen
+  (`QT_QPA_PLATFORM=offscreen`, `THERMAL_DISABLE_3D=1`), not copied from the previous
+  tables.
+
+### Still open (documented, not fixed)
+
+* `BatteryGeometry` still paints the air box: `mesh.excluded`/`mesh.h_out` are never
+  filled from a run, so the outside film is a tested capability, not the default model;
+* the octree is not the mesh of the main solver: `src/solver/octree_solver.py` exists and
+  is tested, `SteadyStateSolver` does not call it and there is no transient driver;
+* the graded-vs-uniform cost/accuracy measurements of `docs/10` part 4, and the possible
+  sub-grid heater model;
+* the automatic mesh search still cannot reach the default 2 K tolerance inside the
+  default 400 000-cell budget on the default geometry (it says so);
+* docs/12, 14 and 15 are owned by other agents in the same cycle and are not touched here;
+* one test fails on this machine and is **not** a physics failure:
+  `tests/test_octree.py::test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_under_a_second`
+  (a one-second wall-clock budget for a 32768-leaf tree; measured 1.55 s idle).  The
+  budget or the test needs the owner's decision; the rest of its file passes.

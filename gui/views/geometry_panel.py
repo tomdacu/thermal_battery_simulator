@@ -12,7 +12,13 @@ from src.core.mesh import Mesh3D
 from src.core.refinement import Band, GridSpec
 from src.core.heaters import (SURFACE_POWER_LIMIT_W_CM2,
                               SURFACE_POWER_MIN_W_CM2)
-from src.core.pipe_network import PipeNetworkConfig, build_pipe_network
+from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
+                                   COLLECTION_REVERSE, COLLECTION_TWO_LEVEL,
+                                   LAYOUT_GRID, LAYOUT_RADIAL, LAYOUT_RINGS,
+                                   LAYOUT_SPIRAL, LAYOUT_STAGGERED, PIPE_CARBON,
+                                   PIPE_STAINLESS, SPLIT_EQUAL, SPLIT_PATH,
+                                   SPLIT_RING, SPLIT_SECTOR, WARNING,
+                                   PipeNetworkConfig)
 from src.core.geometry import (
     CylinderGeometry,
     HeaterConfig,
@@ -30,6 +36,9 @@ class GeometryPanel(QWidget):
     mesh_changed = pyqtSignal()
     auto_mesh_requested = pyqtSignal()
     preview_requested = pyqtSignal()
+    #: the Pipes tab asks the window - which owns the mesh - to build and paint the
+    #: network; the window answers through :meth:`set_pipe_network`
+    pipe_network_requested = pyqtSignal()
 
     HEATER_PATTERNS = (
         ("Uniform zone (volumetric)", HeaterPattern.UNIFORM_ZONE),
@@ -54,6 +63,8 @@ class GeometryPanel(QWidget):
         self._auto_spec: GridSpec | None = None
         self._plan_targets: dict[str, float] = {}
         self._pipe_network = None
+        #: the junction-refinement spin of the Pipes tab; None until that tab is built
+        self.pipe_junction = None
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
         self._build_cylinder_tab()
@@ -165,17 +176,17 @@ class GeometryPanel(QWidget):
         self.tabs.addTab(panel, "Tubes")
 
     def _build_pipes_tab(self) -> None:
-        """Buried pipe network: the layout, how it is collected, and the ducts."""
+        """Buried pipe network: the layout, the tube, the circuit and the paint."""
         panel = FormPanel()
         self.pipe_layout = panel.add("Layout", combo(
-            (("Staggered bundle", "staggered"), ("Square grid", "grid"),
-             ("Concentric rings", "rings"), ("Radial files", "radial")), 2))
+            (("Staggered bundle", LAYOUT_STAGGERED), ("Square grid", LAYOUT_GRID),
+             ("Concentric rings", LAYOUT_RINGS), ("Radial files", LAYOUT_RADIAL),
+             ("Horizontal spiral", LAYOUT_SPIRAL)), 2))
         self.pipe_collection = panel.add("Collection", combo(
-            (("Distributor + collector", "distributor_collector"),
-             ("Reverse return (balanced)", "reverse_return"),
-             ("Central header", "central_header"),
-             ("Two level rings", "two_level_rings")), 1,
-            ))
+            (("Distributor + collector", COLLECTION_DIRECT),
+             ("Reverse return (balanced)", COLLECTION_REVERSE),
+             ("Central header", COLLECTION_CENTRAL),
+             ("Two level rings", COLLECTION_TWO_LEVEL)), 1))
         self.pipe_rings = panel.add("Rings", int_spin(
             3, 1, 12, 1, tooltip="For the ring layouts"))
         self.pipe_files = panel.add("Radial files", int_spin(
@@ -184,49 +195,132 @@ class GeometryPanel(QWidget):
                                        double_spin(0.05, 0.01, 0.3, 0.005, 3,
                                                    tooltip="The pitch follows this "
                                                            "diameter"))
+        self.pipe_wall = panel.add("Wall thickness [mm]", double_spin(
+            2.0, 0.0, 20.0, 0.5, 2,
+            tooltip="The gas flows in the bore d - 2 t: the hydraulics, the film "
+                    "coefficient and the velocity are the bore's, the pitches and the "
+                    "wetted area are the outer diameter's"))
+        self.pipe_material = panel.add("Tube material", combo(
+            (("Stainless steel (drawn)", PIPE_STAINLESS),
+             ("Carbon steel (commercial)", PIPE_CARBON)), 0))
+        self.pipe_material.setToolTip(
+            "The label of the tube and the roughness of its wall: 15 um drawn, "
+            "46 um commercial")
+        self.pipe_roughness = panel.add("Roughness [um]", double_spin(
+            0.0, 0.0, 2000.0, 5.0, 1, special="from the material",
+            tooltip="Absolute wall roughness: leave it at the minimum to take the "
+                    "material's own value"))
         self.pipe_duct = panel.add("Duct d [m]", double_spin(0.15, 0.05, 0.6, 0.05, 3))
+        self.pipe_insulated = panel.add("Insulated headers", check(
+            "lag the distributor and the collector", False,
+            tooltip="A lagged header carries the gas and exchanges nothing with the "
+                    "bed, so the heat transfer surface is the risers alone"))
+        self.pipe_junction = panel.add("Junction refinement [m]", double_spin(
+            0.0, 0.0, 0.5, 0.005, 3, special="off",
+            tooltip="Cell size the mesh band around the two header elevations asks "
+                    "for: the tube-header junction is where the gas turns"))
         self.pipe_azimuth_in = panel.add("Inlet azimuth [deg]",
                                          double_spin(180.0, 0.0, 360.0, 15.0, 0))
         self.pipe_azimuth_out = panel.add("Outlet azimuth [deg]",
                                           double_spin(0.0, 0.0, 360.0, 15.0, 0))
         self.pipe_split = panel.add("Flow split", combo(
-            (("Equal per branch", "equal"), ("From path length", "path_length")), 0))
-        panel.add_row(button("Build network", self.build_pipe_network_clicked))
+            (("Equal per branch", SPLIT_EQUAL), ("From path length", SPLIT_PATH),
+             ("Equal per ring main", SPLIT_RING),
+             ("Equal per sector", SPLIT_SECTOR)), 0))
+        self.pipe_sectors = panel.add("Sectors", int_spin(
+            4, 1, 16, 1, tooltip="For the sector distribution: the flow is divided "
+                                 "between the sectors about the inlet azimuth"))
+        self.pipe_flow = panel.add("Circuit flow [kg/s]", double_spin(
+            0.5, 0.0, 200.0, 0.05, 3,
+            tooltip="Total mass flow of the gas loop the transient marches: the "
+                    "branches split it by the rule above"))
+        self.pipe_h = panel.add("Gas h [W/(m²·K)]", double_spin(
+            500.0, 10.0, 20000.0, 50.0, 0,
+            tooltip="Film the painted pipe cells are given; a loop run replaces it "
+                    "with its own march"))
+        self.pipe_gas_t = panel.add("Gas T [°C]", double_spin(
+            60.0, -20.0, 400.0, 5.0, 1,
+            tooltip="Gas temperature of that film: it is what a steady or losses run "
+                    "sees, while the loop computes its own"))
+        panel.add_row(button("Build network and paint it on the mesh",
+                             self.pipe_network_requested.emit,
+                             "Voxelise the network on the mesh, mark its cells as pipes "
+                             "and write their convective link"))
         self.pipe_info = panel.add("Network", hint("build the mesh, then the network"))
         panel.add_hint("The risers are buried in the sand and the gas goes in from the "
                        "side at the bottom and out from the side at the top: a vessel "
-                       "is not axisymmetric and nothing leaves through the roof.")
+                       "is not axisymmetric and nothing leaves through the roof. "
+                       "Painting the network switches the lumped tube bank of the "
+                       "Tubes tab off: the pipes are where the heat now crosses.")
         self.tabs.addTab(panel, "Pipes")
 
     def pipe_network_config(self) -> PipeNetworkConfig:
-        """The buried-pipe network the panel describes, in the current vessel."""
+        """The buried-pipe network the panel describes, in the current vessel.
+
+        The active band is the *storage* band of the cylinder: the risers span the
+        sand (and not the insulation slabs under and over it), which is what makes the
+        riser length and the bed volume of the module the physical ones.
+        """
         cyl = self.cylinder()
-        base = self.base_z.value()
+        roughness = self.pipe_roughness.value()
         return PipeNetworkConfig(
-            radius=cyl.r_storage, height=cyl.height, base_z=base,
-            band_bottom=base + max(self.offset_bottom.value(), 0.1),
-            band_top=base + cyl.height - 0.4, diameter=self.pipe_diameter.value(),
+            # the wall of the vessel runs from the floor to the cone base, and the
+            # sand from the bottom slab to the top one: the risers span the sand
+            radius=cyl.r_storage, height=cyl.z_cone_base - cyl.base_z, base_z=cyl.base_z,
+            band_bottom=max(cyl.z_storage_start - cyl.base_z, 0.05),
+            band_top=cyl.z_storage_end - cyl.base_z, diameter=self.pipe_diameter.value(),
+            wall_thickness=self.pipe_wall.value() / 1000.0,
+            material=self.pipe_material.currentData(),
+            roughness=None if roughness <= 0.0 else roughness * 1e-6,
             layout=self.pipe_layout.currentData(),
             collection=self.pipe_collection.currentData(),
             n_rings=int(self.pipe_rings.value()), n_files=int(self.pipe_files.value()),
             duct_diameter=self.pipe_duct.value(),
-            azimuth_in=np.deg2rad(self.pipe_azimuth_in.value()),
-            azimuth_out=np.deg2rad(self.pipe_azimuth_out.value()),
-            split_mode=self.pipe_split.currentData())
+            insulated_headers=self.pipe_insulated.isChecked(),
+            junction_refinement=self.pipe_junction.value() or None,
+            azimuth_in=self.pipe_azimuth_in.value(),
+            azimuth_out=self.pipe_azimuth_out.value(),
+            split_mode=self.pipe_split.currentData(),
+            n_sectors=int(self.pipe_sectors.value()))
 
-    def build_pipe_network_clicked(self) -> None:
-        """Build the network on the current mesh and report what it is."""
-        try:
-            mesh = self.build_mesh()
-            config = self.pipe_network_config()
-            network = build_pipe_network(mesh, config)
-        except (ValueError, RuntimeError) as exc:
-            self.pipe_info.setText(f"invalid: {exc}")
-            return
+    def pipe_paint_settings(self) -> dict:
+        """Film coefficient and gas temperature the paint writes on the pipe cells."""
+        from src.units import c_to_k
+
+        return {"h_fluid": self.pipe_h.value(), "t_fluid": c_to_k(self.pipe_gas_t.value())}
+
+    def pipe_mass_flow(self) -> float:
+        """Total mass flow of the gas circuit the transient marches [kg/s]."""
+        return float(self.pipe_flow.value())
+
+    def pipe_network(self):
+        """The network the window built and painted (None until then)."""
+        return self._pipe_network
+
+    def set_pipe_network(self, network, report=None, message: str = "") -> None:
+        """Adopt the network the window built on the mesh it owns and report it."""
         self._pipe_network = network
-        problems = network.validate()
-        note = "" if not problems else "  (check: " + "; ".join(problems) + ")"
-        self.pipe_info.setText(network.summary() + note)
+        if network is None:
+            self.pipe_info.setText(message or "build the mesh, then the network")
+            return
+        problems = [problem for problem in network.config.validate()
+                    if problem.startswith(WARNING)]
+        problems.extend(network.validate())
+        lines = [network.summary()]
+        if report is not None:
+            lines.append(report.summary())
+        if problems:
+            lines.append("check: " + "; ".join(problems))
+        if message:
+            lines.append(message)
+        self.pipe_info.setText("\n".join(lines))
+
+    def disable_lumped_tubes(self) -> bool:
+        """Turn the lumped tube bank off: the network is the heat exchanger now."""
+        if not self.tubes_active.isChecked():
+            return False
+        self.tubes_active.setChecked(False)
+        return True
 
     def _build_mesh_tab(self) -> None:
         panel = FormPanel()
@@ -458,6 +552,17 @@ class GeometryPanel(QWidget):
         self.auto_result.setText(message or ("adopted" if spec else "not run yet"))
         self._update_mesh_summary()
 
+    def pipe_junction_bands(self) -> list[tuple[float, float, float]]:
+        """Bands the Pipes tab asks the mesh to refine, as ``(low, high, target)``.
+
+        The mesh summary runs before the Pipes tab exists, so the widgets are read
+        defensively: no table yet, no band.
+        """
+        panel = self.pipe_junction
+        if panel is None or panel.value() <= 0.0:
+            return []
+        return self.pipe_network_config().junction_bands()
+
     def grid_spec(self) -> GridSpec:
         """Physical refinement targets from the panel and the battery.
 
@@ -489,6 +594,12 @@ class GeometryPanel(QWidget):
              Band(cyl.z_slab_top_start, cyl.z_slab_top_end,
                   self.planned("slab_top", insulation)),
              Band(0.0, lz, far))
+        # the tube-header junctions: the gas turns there and the surface is singular,
+        # so the two header elevations carry the refinement the Pipes tab asks for
+        junction = tuple(Band(low, high, target)
+                         for low, high, target in self.pipe_junction_bands())
+        if junction:
+            z = z + junction
         # radial bands: heater bank (when discrete), storage core, shell ring, far field
         reach = 0.0
         if discrete:

@@ -14,16 +14,19 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from src.core.mesh import Mesh3D
+from src.core.materials import MaterialManager
+from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
                                    COLLECTION_REVERSE, COLLECTION_TWO_LEVEL,
                                    LAYOUT_GRID, LAYOUT_RADIAL, LAYOUT_RINGS,
-                                   LAYOUT_STAGGERED, LAYOUTS, MODULE_HEIGHT_LIMIT,
-                                   SPLIT_EQUAL, SPLIT_PATH, PipeNetwork,
+                                   LAYOUT_SPIRAL, LAYOUT_STAGGERED, LAYOUTS,
+                                   MODULE_HEIGHT_LIMIT, PIPE_CARBON, PIPE_STAINLESS,
+                                   ROUGHNESS_LIMIT, SPLIT_EQUAL, SPLIT_PATH,
+                                   SPLIT_RING, SPLIT_SECTOR, PipeNetwork,
                                    PipeNetworkConfig, build_pipe_network)
 from src.core.pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_TRIANGULAR,
                             rasterize_pipe)
-from src.solver.fluid import FluidLoop
+from src.solver.fluid import Fluid, FluidLoop, pressure_drop
 
 
 def box(spacing: float = 0.5, cells: int = 16) -> Mesh3D:
@@ -367,9 +370,16 @@ def test_a_riser_that_misses_its_collector_is_refused():
     ({"vertical_pitch": 0.01}, "pitch"),
     ({"collection": COLLECTION_TWO_LEVEL}, "layout"),
     ({"layout": LAYOUT_RINGS, "n_rings": 30}, "n_rings"),
-    ({"layout": "spiral"}, "unknown layout"),
+    ({"layout": "elliptical"}, "unknown layout"),
     ({"collection": "thermosiphon"}, "unknown collection"),
     ({"split_mode": "proportional"}, "unknown split mode"),
+    ({"split_mode": SPLIT_RING}, "needs layout"),
+    ({"material": "copper"}, "unknown tube material"),
+    ({"wall_thickness": -0.001}, "wall thickness"),
+    ({"wall_thickness": 0.03}, "no bore"),
+    ({"roughness": -1e-5}, "absolute roughness"),
+    ({"junction_refinement": 0.0}, "junction refinement"),
+    ({"n_sectors": 0}, "n_sectors"),
     ({"band_top": 9.0}, "above the vessel wall"),
     ({"band_bottom": 0.3, "band_top": 0.1}, "no height"),
     ({"radius": 0.05}, "clearance"),
@@ -454,3 +464,284 @@ def test_the_network_drives_the_fluid_loop_with_its_branch_split():
                                                                   rel=1e-9)
     enthalpy = 0.05 * 1005.0 * (result.t_out - result.t_in)
     assert result.power == pytest.approx(-enthalpy, rel=1e-9)
+
+
+# ------------------------------------------------------- the tube and its options
+def test_the_wall_thickness_sets_the_bore_the_gas_flows_through():
+    """The outer diameter is the geometry, the bore is the hydraulics: both reported."""
+    config = vessel(wall_thickness=0.003, duct_diameter=0.1)
+    assert config.inner_diameter == pytest.approx(
+        config.diameter - 2.0 * config.wall_thickness, rel=1e-12)
+    assert config.duct_inner_diameter == pytest.approx(
+        config.duct_d - 2.0 * config.wall_thickness, rel=1e-12)
+    net = network(config)
+    assert net.inner_diameter == pytest.approx(config.inner_diameter, rel=1e-12)
+    data = net.summarize()
+    assert data["inner_diameter"] == pytest.approx(config.inner_diameter, rel=1e-12)
+    assert f"{config.inner_diameter * 1000:.1f} mm" in net.summary()
+    # the geometry keeps the outer diameter: the pitches, the clearance and the area
+    assert net.risers[0].diameter == pytest.approx(config.diameter, rel=1e-12)
+    assert net.total_area == pytest.approx(
+        sum(run.perimeter * run.total_length for run in net.runs), rel=1e-12)
+    # a thicker wall is a smaller bore and a rougher pipe, relative to its own bore
+    thin = vessel(wall_thickness=0.001)
+    thick = vessel(wall_thickness=0.005)
+    assert thick.inner_diameter < thin.inner_diameter
+    assert thick.relative_roughness > thin.relative_roughness
+
+
+def test_the_tube_material_carries_the_label_and_the_roughness():
+    """Stainless or carbon: the same geometry, a different wall and a different eps."""
+    steel = vessel(material=PIPE_STAINLESS)
+    carbon = vessel(material=PIPE_CARBON)
+    assert steel.absolute_roughness < carbon.absolute_roughness
+    assert steel.relative_roughness == pytest.approx(
+        steel.absolute_roughness / steel.inner_diameter, rel=1e-12)
+    text = network(carbon).summary()
+    assert "carbon steel" in text and "relative roughness" in text
+    # an explicit roughness overrides the material, and the material still labels it
+    rough = vessel(material=PIPE_STAINLESS, roughness=2e-3)
+    assert rough.absolute_roughness == pytest.approx(2e-3, rel=1e-12)
+    problems = rough.validate()
+    assert any(problem.startswith("warning:") and "Moody" in problem
+               for problem in problems)
+    assert rough.relative_roughness > ROUGHNESS_LIMIT
+
+
+def test_the_lagged_headers_leave_the_risers_as_the_exchange_surface():
+    """An insulated header carries the gas and nothing else: the tubes do the work."""
+    bare = network(vessel())
+    lagged = network(vessel(insulated_headers=True))
+    assert bare.exchange_area == pytest.approx(bare.total_area, rel=1e-12)
+    assert lagged.total_area == pytest.approx(bare.total_area, rel=1e-12)
+    assert lagged.exchange_area == pytest.approx(
+        lagged.total_area - sum(run.total_area for run in lagged.headers), rel=1e-12)
+    assert lagged.exchange_area < lagged.total_area
+    assert "insulated" in lagged.summary()
+    assert lagged.summarize()["insulated_headers"] is True
+
+
+def test_the_junction_refinement_names_the_band_the_mesh_must_resolve():
+    """The tube-header junction is a surface and a turn: the band around it is refined."""
+    plain = vessel()
+    assert plain.junction_bands() == []
+    config = vessel(junction_refinement=0.02)
+    net = network(config)
+    bands = config.junction_bands()
+    assert len(bands) == 2
+    assert [band[2] for band in bands] == pytest.approx([0.02, 0.02])
+    assert bands[0][0] < config.z_bottom < bands[0][1]
+    assert bands[1][0] < config.z_top < bands[1][1]
+    assert f"{config.junction_refinement * 1000:.1f} mm" in net.summary()
+    # a refinement coarser than the tube it refines cannot resolve the junction
+    coarse = vessel(junction_refinement=3.0 * vessel().diameter)
+    assert any(problem.startswith("warning:") and "coarser" in problem
+               for problem in coarse.validate())
+
+
+# ------------------------------------------------------------- the distributions
+def test_the_sector_split_gives_every_sector_the_same_flow():
+    """A sector valve per quadrant: the flow follows the sector, not the lattice."""
+    config = vessel(n_sectors=4, split_mode=SPLIT_SECTOR)
+    net = network(config)
+    assert config.validate() == []
+    split = net.split()
+    assert float(np.sum(split)) == pytest.approx(1.0, rel=1e-12)
+    x, y = net.plan_xy()
+    sector = np.floor(((np.arctan2(y, x) - np.deg2rad(config.azimuth_in))
+                       % (2.0 * np.pi)) / (2.0 * np.pi / config.n_sectors))
+    for index in range(config.n_sectors):
+        inside = sector == index
+        assert np.count_nonzero(inside) > 0
+        # the whole sector carries 1/n_sectors of the flow, its risers share it
+        assert float(np.sum(split[inside])) == pytest.approx(
+            1.0 / config.n_sectors, rel=1e-12)
+        assert float(np.std(split[inside])) < 1e-12
+    # a sector nobody feeds is refused with the parameter to change
+    empty = vessel(n_sectors=64, split_mode=SPLIT_SECTOR)
+    problems = empty.validate()
+    assert any("hold no riser" in problem and "n_sectors" in problem
+               for problem in problems)
+    with pytest.raises(ValueError):
+        build_pipe_network(box(), empty)
+
+
+def test_the_ring_split_gives_every_ring_main_the_same_flow():
+    """A manifold per ring: the ring main gets its share, its taps divide it."""
+    config = vessel(layout=LAYOUT_RINGS, split_mode=SPLIT_RING)
+    net = network(config)
+    assert config.validate() == []
+    split = net.split()
+    assert float(np.sum(split)) == pytest.approx(1.0, rel=1e-12)
+    rings = np.asarray(net.groups)
+    assert rings.size == net.n_risers
+    counts = {}
+    for ring, share in zip(rings, split, strict=True):
+        counts.setdefault(int(ring), []).append(float(share))
+    assert len(counts) == len(net.distributors)
+    for shares in counts.values():
+        assert float(np.sum(shares)) == pytest.approx(
+            1.0 / len(net.distributors), rel=1e-12)
+    # the inner rings have fewer taps, so each of their tubes carries more
+    inner = min(counts, key=lambda ring: len(counts[ring]))
+    outer = max(counts, key=lambda ring: len(counts[ring]))
+    assert counts[inner][0] > counts[outer][0]
+
+
+# ------------------------------------------------------------ painting the mesh
+def test_the_paint_marks_the_pipes_inside_the_vessel_and_keeps_the_area():
+    """What ``paint`` marks is a pipe cell of the bed, never a cell outside the wall."""
+    mesh = box(spacing=0.25, cells=32)
+    config = vessel(insulated_headers=True)
+    net = build_pipe_network(mesh, config)
+    report = net.paint(mesh, h_fluid=350.0, t_fluid=333.15)
+    tubes = mesh.material_id == int(MaterialID.TUBES)
+    assert report.cells == int(np.count_nonzero(tubes))
+    assert report.cells > 0 and report.riser_cells > 0
+    # every marked cell has its centre inside the vessel
+    centre_z = mesh.Z
+    radius = np.hypot(mesh.X - net.center[0], mesh.Y - net.center[1])
+    low, high = config.base_z - 1e-9, config.roof_z + 1e-9
+    inside = ((radius <= config.radius + 1e-9) & (low <= centre_z)
+              & (centre_z <= high))
+    assert not np.any(tubes & ~inside)
+    # the area is still the geometric one: what was not painted is accounted for
+    assert report.area + report.dropped == pytest.approx(net.total_area, rel=1e-12)
+    assert report.area == pytest.approx(float(np.sum(net.voxelize(mesh)[2])) -
+                                        report.dropped, rel=1e-12)
+    assert net.total_area == pytest.approx(
+        sum(run.perimeter * run.total_length for run in net.runs), rel=1e-12)
+    # the film, the material and the sources
+    assert mesh.bc_h[tubes].max() == pytest.approx(350.0, rel=1e-12)
+    assert np.all(mesh.bc_T_inf[tubes] == pytest.approx(333.15, rel=1e-12))
+    assert mesh.boundary_type[tubes].max() == int(BoundaryType.CONVECTION)
+    assert mesh.rho[tubes].min() == pytest.approx(
+        MaterialManager().get(config.material).rho, rel=1e-12)
+    assert float(np.abs(mesh.Q_source[tubes]).sum()) == 0.0
+    assert not mesh.source_mask[tubes].any()
+    assert report.material == config.material
+
+
+def test_a_lagged_header_is_painted_without_a_gas_film():
+    """The lagging is a fact of the model: a pipe the gas does not heat the sand with."""
+    mesh = box(spacing=0.125, cells=64)
+    config = vessel(radius=1.5, height=5.0, band_bottom=0.4, diameter=0.1,
+                    horizontal_pitch=0.8, vertical_pitch=0.8,
+                    insulated_headers=True)
+    net = build_pipe_network(mesh, config)
+    report = net.paint(mesh)
+    tubes = mesh.material_id == int(MaterialID.TUBES)
+    film = np.zeros_like(mesh.bc_h, dtype=bool)
+    film[tubes] = mesh.bc_h[tubes] > 0.0
+    assert report.riser_cells < report.cells          # the headers have cells of their own
+    assert int(np.count_nonzero(tubes & ~film)) > 0   # and they carry no film
+    assert report.insulated == pytest.approx(
+        net.total_area - net.exchange_area, rel=1e-12)
+    bare = build_pipe_network(mesh, vessel(radius=1.5, height=5.0, band_bottom=0.4,
+                                          diameter=0.1, horizontal_pitch=0.8,
+                                          vertical_pitch=0.8))
+    bare.paint(mesh)
+    assert int(np.count_nonzero(mesh.bc_h[tubes] > 0.0)) == int(tubes.sum())
+
+
+# ------------------------------------------------------- the circuit of the loop
+def test_the_hydraulics_adds_the_riser_to_the_pipes_the_branches_share():
+    """The branch pays for its tube, its header arcs and the two ducts it crosses."""
+    net = network(vessel(duct_diameter=0.1))
+    mass_flow = 0.05
+    circuit = net.hydraulics(mass_flow)
+    assert circuit.branch_drop.size == net.n_risers
+    assert np.all(circuit.riser_drop > 0.0) and np.all(circuit.shared_drop > 0.0)
+    assert circuit.duct_length == pytest.approx(net.inlet.total_length +
+                                                net.outlet.total_length, rel=1e-12)
+    branch = net.branches[0]
+    share = net.split()[0]
+    fluid = Fluid()
+    expected = pressure_drop(mass_flow * share, net.inner_diameter,
+                             branch.riser.total_length, fluid, net.roughness)
+    assert circuit.riser_drop[0] == pytest.approx(expected, rel=1e-12)
+    # the equivalent fittings reproduce the shared drop at the velocity of the bore
+    velocity = mass_flow * share / (fluid.rho * 0.25 * np.pi * net.inner_diameter ** 2)
+    assert circuit.fittings_k * 0.5 * fluid.rho * velocity ** 2 == pytest.approx(
+        float(np.mean(circuit.shared_drop)), rel=1e-9)
+    assert circuit.mean_drop > circuit.riser_drop.mean()
+    assert circuit.spread >= 1.0
+    assert "circuit" in circuit.summary()
+    with pytest.raises(ValueError):
+        net.hydraulics(0.0)
+
+
+def test_the_loop_built_from_the_network_marches_with_its_split_and_keeps_enthalpy():
+    """One run per branch, the network's split, the circuit's pressure drop."""
+    mesh = box(spacing=0.25, cells=32)
+    config = vessel(radius=1.0, height=2.0, band_bottom=0.2, horizontal_pitch=0.3,
+                    vertical_pitch=0.3, duct_diameter=0.1, wall_thickness=0.003,
+                    elevation_out=1.8)
+    net = build_pipe_network(mesh, config)
+    net.paint(mesh)
+    for face in ("x_min", "x_max", "y_min", "y_max", "z_max"):
+        mesh.set_adiabatic(face)
+    mesh.T[:] = 500.0
+    mass_flow = 0.05
+    loop = net.fluid_loop(mass_flow, t_in=300.0)
+    assert loop.runs[0].diameter == pytest.approx(config.inner_diameter, rel=1e-12)
+    assert [run.name for run in loop.runs] == [run.name for run in net.risers]
+    assert loop.split == pytest.approx(list(net.split()), rel=1e-12)
+    result = loop.solve(mesh)
+    assert len(result.runs) == net.n_risers
+    assert [run.mass_flow for run in result.runs] == pytest.approx(
+        list(mass_flow * net.split()), rel=1e-9)
+    enthalpy = mass_flow * loop.fluid.cp * (result.t_out - result.t_in)
+    assert result.power == pytest.approx(-enthalpy, rel=1e-9)
+    # the circuit's pressure drop is the one the hydraulics reports, fittings included
+    assert result.delta_p == pytest.approx(net.hydraulics(mass_flow).mean_drop,
+                                           rel=1e-9)
+    # the exchange lands in the pipe cells the paint marked
+    tubes = (mesh.material_id == int(MaterialID.TUBES)).ravel(order="F")
+    assert result.q_fluid is not None
+    assert np.all(result.q_fluid[~tubes] == 0.0)
+    assert float(np.sum(result.q_fluid[tubes])) != 0.0
+
+
+def test_the_loop_can_be_built_on_the_mesh_the_solve_will_use():
+    """A mesh built after the design re-rasterises the risers, the split does not move."""
+    coarse = box(spacing=0.5)
+    config = vessel(radius=1.0, height=2.0, band_bottom=0.2, horizontal_pitch=0.3,
+                    vertical_pitch=0.3, elevation_out=1.8)
+    net = build_pipe_network(coarse, config)
+    fine = box(spacing=0.25, cells=32)
+    loop = net.fluid_loop(0.05, mesh=fine)
+    assert loop.runs[0].cells.size > net.risers[0].cells.size
+    assert loop.split == pytest.approx(list(net.split()), rel=1e-12)
+    assert loop.runs[0].area.sum() == pytest.approx(
+        net.inner_diameter * np.pi * net.risers[0].total_length, rel=1e-12)
+
+
+# ------------------------------------------------------------------- the spiral
+def test_the_spiral_layout_winds_the_tubes_one_pitch_per_turn():
+    """An Archimedean spiral: the arc steps are horizontal pitches, the turns vertical."""
+    config = vessel(layout=LAYOUT_SPIRAL)
+    net = network(config)
+    assert net.validate() == []
+    assert net.n_risers > 20
+    x, y = net.plan_xy()
+    radii = np.hypot(x, y)
+    assert np.all(np.diff(radii) <= 1e-12)                # the walk winds inwards
+    assert int(np.argmax(radii)) == 0                     # and starts at the wall
+    assert float(radii[0]) == pytest.approx(config.inner_radius, rel=1e-12)
+    assert float(radii[-1]) >= 0.5 * config.pitch_h - 1e-9
+    assert float(radii[0]) - float(radii[-1]) > 2.0 * config.pitch_v   # several turns
+    # the turns are one vertical pitch apart, the steps along the walk one horizontal
+    theta = np.unwrap(np.arctan2(y, x))
+    assert np.all(np.diff(theta) <= 1e-12)                # one way round, no zig-zag
+    assert float(abs(theta[0] - theta[-1])) == pytest.approx(
+        2.0 * np.pi * (float(radii[0]) - float(radii[-1])) / config.pitch_v, rel=1e-9)
+    step = np.hypot(np.diff(x), np.diff(y))
+    assert float(np.max(step)) <= config.pitch_h + 1e-9
+    assert float(np.min(step)) >= 0.5 * config.pitch_h - 1e-9
+    distance = np.hypot(x[:, None] - x[None, :], y[:, None] - y[None, :])
+    np.fill_diagonal(distance, np.inf)
+    assert float(np.min(distance)) >= 0.5 * min(config.pitch_h, config.pitch_v) - 1e-9
+    assert float(np.min(distance)) > config.diameter      # the tubes never touch
+    assert LAYOUT_SPIRAL in LAYOUTS
+    assert "spiral" in net.summary()

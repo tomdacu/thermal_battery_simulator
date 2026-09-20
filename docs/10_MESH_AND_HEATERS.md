@@ -1,13 +1,30 @@
-# 10. Graded mesh and realistic heater elements
+# 10. Graded mesh and heater elements
 
-Design and migration plan.  **Parts 1-3 are implemented and tested** (163 tests);
-part 4 (the optimisation targets) is the next work item.
+Status of this work stream, as of 2026-09-20.  **Parts 1-3 are implemented and
+tested; part 4 (the optimisation measurements) is open.**  The numbers are
+measurements: `python -m pytest tests/ --collect-only -q` for the counts
+([09](09_TESTING.md) records the command and the date next to them), and everything
+quoted as a property is a test in the file named next to it.
+
+| part | state | where |
+|---|---|---|
+| 1. refinement core (targets → graded grid) | implemented | `src/core/refinement.py`, `tests/test_refinement.py` |
+| 2. graded grid inside the solver | implemented | `src/core/mesh.py`, `src/solver/matrix.py`, `tests/test_graded_mesh.py` |
+| 3. hairpin heater bank | implemented | `src/core/heaters.py`, `tests/test_heaters.py` |
+| 4. optimisation measurements | **open** | `scripts/benchmark.py` still measures uniform meshes only |
+
+The design path of the machine itself moved during this work: the reference
+architecture puts the **resistors in the gas circuit** and heats the bed through
+**pipes buried in the granular medium** ([13](13_REDESIGN.md), [15](15_PIPE_NETWORKS.md)).
+The graded mesh and the mesher are what both paths need, so they stay central; the
+hairpin bank stays as a working, validated option for electric heating inside the
+bed, but it is no longer the design this simulator is built around.
 
 ---
 
 ## Part 1 — Mesh refinement core (done)
 
-`src/core/refinement.py`, `tests/test_refinement.py`, `tests/test_graded_mesh.py`.
+`src/core/refinement.py`, `tests/test_refinement.py` (10 collected cases).
 
 The user picks **physical targets**, not a cell count:
 
@@ -35,177 +52,137 @@ How the grid is built:
    the targets are scaled by one common factor (coarse first, then walked back towards
    the request while it still fits) and the finest grid that fits is returned.
 
-Verified properties (`tests/test_refinement.py`): uniform request → exactly uniform
-grid; exact endpoints; boundaries on grid lines; fine band really fine; bounded growth;
-no slivers; budget respected; size lookup for element masks; **symmetric request →
-symmetric grid**.
+Verified properties (`tests/test_refinement.py`): a uniform request → exactly uniform
+grid; exact endpoints; boundaries on grid lines; a fine band really is fine; bounded
+growth; no slivers; the budget is respected by scaling the targets; the size lookup
+used to size element masks answers anywhere; degenerate requests are rejected or
+degraded gracefully; a symmetric request gives a **symmetric grid** (the old
+directional walk refined one side more than the other).
 
-## Part 2 — Graded grid in the solver
+## Part 2 — Graded grid in the solver (done)
 
-### Why
+`Mesh3D` takes either a scalar `spacing` (uniform) or a `GridSpec` (graded):
+`dx/dy/dz` are per-axis arrays, `mesh.V` the cell volumes and `mesh.Ax/Ay/Az` the face
+areas.  On a uniform grid `d`, `V_cell` and `A_cell` still exist and raise on a graded
+mesh, so a caller cannot silently assume equal cells.
 
-The current mesh is uniform: refining near the heaters refines the whole domain,
-and the "cell size" spin box is a blunt instrument (the same mesh is used in the
-sand, in the insulation and in the far field).  A graded grid puts cells where the
-gradients are — heater sheath, insulation thickness, roof — and leaves the far
-field coarse.  That is also what makes realistic heater elements representable at
-all (a 12 mm sheath is invisible in a 200 mm cell).
-
-### What changes
-
-| item | now | after |
-|---|---|---|
-| `Mesh3D.spacing` | scalar | `GridSpec` (bands + growth + budget) or a scalar for the legacy uniform case |
-| `mesh.dx/dy/dz` | scalars | arrays `(Nx,)`, `(Ny,)`, `(Nz,)` |
-| `mesh.x/y/z` | linspace centres | centres of the graded edges (X, Y, Z unchanged in meaning) |
-| `mesh.d` | scalar | removed (call sites use the local size) |
-| `mesh.V_cell` | scalar | array `(Nx,Ny,Nz)` |
-| `mesh.A_cell` | scalar | `mesh.area("x"/"y"/"z")` per-face areas |
-| `mesh.snapped` | Ly/Lz correction | unchanged (the graded grid still ends at the box faces) |
-
-### The discrete coefficients
-
-For cells `P` (size `dx[i]`) and `E` (size `dx[i+1]`) at distance
-`d_centers = (dx[i] + dx[i+1])/2`, the face conductance per unit area is the
-series of the two half cells, and the per-volume coefficient follows from
-`A_x = dy[j]·dz[k]`, `V = dx[i]·dy[j]·dz[k]`:
+The face coefficient is the same per-volume form for both paths, with the geometry
+cached once per mesh in `GridIndex.face_factors` (`= A/(d_centers·V)`):
 
 $$k_{face} = \frac{2\,k_P k_E}{k_P + k_E}, \qquad
-a_E = \frac{k_{face}\,A_x}{d_{centers}\,V}, \qquad d_{centers} = \frac{dx_i + dx_{i+1}}{2}$$
+a_E = k_{face}\,\frac{A_x}{d_{centers}\,V}, \qquad d_{centers} = \frac{dx_i + dx_{i+1}}{2}$$
 
-(``k_face`` is the harmonic mean of the two *conductivities*, so ``k_face A/d`` is the
-conductance of the interface; writing it as ``1/(...)`` — as the first draft of this
-document did — is a resistance per unit area and needs no second division by
-``d_centers``.)
+Each of these is a measured property of the implementation:
 
-For a uniform grid this collapses to `2 k_P k_E/(k_P+k_E)/Δ²` — the current
-formula, so `tests/test_solver.py` must stay green unchanged on uniform meshes.
+| what | checked by |
+|---|---|
+| a uniform `GridSpec` reproduces the legacy uniform mesh | `test_uniform_gridspec_reproduces_the_legacy_uniform_mesh` |
+| a linear profile is exact on a graded grid, and the interface flux matches the series resistance | `test_a_linear_profile_is_exact_on_a_graded_grid`, `test_the_interface_flux_matches_the_series_resistance` |
+| the answer does not move when the grid changes (resolution independence) | `test_a_graded_mesh_reproduces_the_uniform_loss` |
+| the energy balance still closes | `test_the_energy_balance_closes_on_a_graded_mesh` |
+| band boundaries stay on grid lines | `test_graded_edges_keep_every_band_boundary_on_a_grid_line` |
 
-Boundary faces keep their half-cell treatment with the *local* first-cell size
-(`h_eff = 2kh/(2k + h·dx_0)`), Neumann adds `q''/dx_0`, interior tube convection
-uses `h/dx_i`.  Flux integrals use the per-face areas, so the balance closure
-identity is preserved.
+Consequences that are part of the contract:
 
-### Call sites migrated (30)
+* **CG stays available**: per-volume coefficients are `diag(V)^{-1} K` with `K`
+  symmetric, so `solve_linear(..., scale=V)` solves the similar symmetric system.  On a
+  uniform mesh the transformation is a constant and is not applied.
+* **The transient operator** adds the mass diagonal `diag(ρc_p)` *after* the local
+  volumes are gone, so the `1/d³` regression stays fixed on a graded grid too.
+* **Flux integrals, the balance, the geometry masks, the state hash and the 3D view**
+  all use the local sizes (`RectilinearGrid`), so a graded run is reported and saved
+  like any other.
 
-`src/core/mesh.py` (definition), `src/solver/matrix.py` (coefficients, ~6 sites),
-`src/solver/transient.py` (source/sink densities, 3), `src/analysis/fluxes.py`
-(6), `src/analysis/balance.py` (2), `src/analysis/losses.py` (1),
-`src/core/geometry.py` (element masks and power densities, 5), `src/io/state.py`
-(hash: store the spacing arrays), `src/viz/scene.py` (ImageData spacing, 1),
-`gui/main_window.py` (log line, 1).
+## Part 3 — Hairpin heater elements (done, and no longer the design path)
 
-### GUI (done)
+### What the code implements
 
-*Geometry → Mesh* now has a **Refined mesh** switch and the targets below; the legacy
-*Cell size* box stays for the uniform mode and every target is scaled to the cell
-budget.  The realised grid is summarised live (cells per axis, size range, worst
-neighbour ratio, memory, and whether the budget had to coarsen the targets).
-
-The targets are:
-
-* **Refinement targets**: cells across the storage radius, cells across the
-  insulation thickness, cells across the heater sheath (feeds from the heater
-  panel), max cell size in the air/far field, growth ratio, cell budget.
-* A **read-only summary** computed from those targets: cells per axis, total,
-  smallest/largest cell, worst neighbour ratio, estimated memory.
-
-### Tests to add
-
-* uniform `GridSpec` reproduces the current mesh and the analytic results
-  bit-for-bit;
-* a graded 1-D slab reproduces the analytic profile with the same order of
-  accuracy as the uniform grid at the same cell count in the ramp region;
-* global refinement (halving every target) converges to the same answer → the
-  "results must not depend on the resolution" requirement;
-* the balance identity still closes on a graded grid.
-
----
-
-## Part 3 — Realistic heater elements
-
-### What the reference design is
-
-`photo/heating_elements_3D.png` and the literature (KTH/Aalto packed-bed sand
-experiments; NREL's "toaster" concept; commercial sand-battery modules) show the
-same solution: a **flanged immersion heater bank** —
-
-* a **mounting flange** on the roof with PG/gland entries;
-* **U-shaped (hairpin) tubular elements** welded to the flange in rows, hanging
-  down into the sand, supported at their lower end by a **support plate** and
-  **support rods**;
-* sheathed resistance wire inside a metal tube (Incoloy/stainless), typically
-  Ø8–16 mm, with an **active length** in the sand and a cold shank through the
-  insulation and the air gap;
-* power set by the *surface power density* (3–8 W/cm² for sheathed elements in
-  solids), not by an arbitrary volumetric density.
-
-### The model (implemented in `src/core/heaters.py`)
+`src/core/heaters.py`: a **flanged immersion heater bank** of U-shaped (hairpin)
+sheathed elements, the shape the literature and
+`photo/heating_elements_3D.png` describe:
 
 ```
-HairpinElement (implemented)
-  ├─ sheath: outer diameter d_s, wall thickness, material
-  ├─ leg spacing: c/c distance between the two legs
-  ├─ bend radius at the bottom
-  ├─ active length (in the sand) + cold shank length (in the insulation/air)
-  └─ rated power [W], surface power = P / (π d_s L_active) [W/cm²]
+HairpinElement
+  ├─ sheath: outer diameter d_s (default 12 mm), material (stainless steel)
+  ├─ leg spacing: centre-to-centre distance of the two legs
+  ├─ bend radius at the bottom (bend_chords chords in the rasteriser)
+  ├─ active length in the sand + cold shank through the insulation and the air
+  └─ rated power [W]; surface power = P / (π d_s (L_active + bend)) [W/cm²]
 HeaterBank
-  ├─ flange elevation and diameter
-  ├─ rows × columns, pitch row/col (or a ring pattern for a cylindrical unit)
-  ├─ power per element / total
-  └─ support plate elevation
+  ├─ rows × columns (grid) or n_rings (ring layout)
+  ├─ power per element and total power
+  ├─ offset from the bottom/top of the storage band
+  └─ support plate and flange elevations
+HeaterConfig.bank(z_storage_start, z_storage_end)  # the config -> bank conversion
+rasterize(bank, mesh, cx, cy, r_storage, ...)      # -> RasterResult
+validate_bank(bank, mesh, cx, cy, r_storage, ...)  # -> list of problems
 ```
 
 Thermal model per element:
 
-* the cells intersected by the *sheath* take the sheath material (steel) —
-  resolved because the graded mesh targets ~the sheath diameter in the heater
-  region;
-* the **rated power is deposited in those cells** (`Q = P/(n_cells V_cell)`), so
-  the total is exact whatever the discretisation (`source_mask` unchanged);
-* the sheath-to-sand contact resistance is automatic through the half-cell series
-  conductance of the fine cells around it;
-* inside-wire → sheath conduction is lumped (documented), as is the axial
-  conduction along the cold shank.
+* the cells crossed by the *sheath* take the sheath material (steel) - which the
+  graded mesh makes possible, because the heater band targets the sheath diameter;
+* the **rated power is deposited in the active-length cells**
+  (`Q = P/Σ V_active`), so the total is exact on any grid (`source_mask` unchanged);
+* the sheath-to-sand resistance follows from the half-cell series conductance of the
+  fine cells around it;
+* wire → sheath conduction is lumped, and so is the axial conduction along the cold
+  shank: both are stated assumptions, not modelled physics.
 
-Discretisation (`discretize_bank(mesh, bank, geometry)`):
-
-1. compute every hairpin's two legs and bend as segments;
-2. rasterise each segment: walk it in steps of the local cell size
-   (`refinement.size_at`) and mark the containing cells;
-3. reject the configuration when it cannot be represented:
-   * an element covers no cell,
-   * adjacent elements share cells (spacing < sheath size + 2 cells),
-   * the surface power density exceeds the material limit,
-   * a hairpin collides with the storage wall or with a tube;
-4. report per-element power, surface power, cells per element and the minimum
-   cells across the sheath.
+Validations (`validate_bank`): an element covering no cell, legs or elements sharing
+cells, an element reaching outside the storage wall, a collision with a heat-exchanger
+tube, `leg_spacing` not greater than the sheath diameter, offsets that leave no room.
+Warnings (reported, not fatal): legs within one cell, a sheath thinner than a cell,
+and a surface power outside **3-8 W/cm²** (`SURFACE_POWER_MIN_W_CM2`,
+`SURFACE_POWER_LIMIT_W_CM2`).
 
 ### GUI
 
-*Heaters* tab becomes: element type (hairpin / straight rod / coil), sheath
-diameter and material, active length, leg spacing, rows × columns, flange
-elevation, total power with the resulting surface power shown live, plus the
-existing offsets.  The preview draws the hairpins (flange, support plate, legs,
-bends) instead of simple rods, and the element list shows the surface power per
-element with a warning when it exceeds the limit.
+*Geometry → Heaters* exposes the hairpin design: total power (5 kW by default), pattern,
+element count, grid rows/columns, rings, sheath diameter, leg spacing, active length,
+cold shank, support plate, flange, offsets, plus the live **power per element** and
+**surface power** readouts; *Calculate positions* lists the elements with their rated
+power and surface power, and the geometry preview draws the legs, the bends, the
+support plate and the flange.  The live readout rejects nothing by itself - the
+*warning* appears in the list and in `BatteryGeometry.heater_warnings`.
 
-### Tests
+There is **one** element type: the hairpin.  The "element type (hairpin / straight rod
+/ coil)" selector that an earlier draft of this document promised was never built, and
+the rod-heater path was deleted in the simplification pass
+(`HeaterElement`, `heater_radius`, `heater_length`, `custom_positions` - see
+`CHANGELOG.md`).
 
-* power conservation: Σ Q V equals the rated power for every layout;
-* a hairpin's cells form two legs and a bend, all inside the storage band;
-* minimum spacing and collision validations actually reject bad layouts;
-* the surface power limit is enforced;
-* results are mesh-independent: refining the refinement targets changes the
-  answer by less than the convergence tolerance.
+### Why it is not the design path any more
 
----
+The reference class of machines charges the bed with **hot gas through buried pipes**
+and keeps the resistors in the gas circuit ([13](13_REDESIGN.md) §1-2).  With that
+architecture:
 
-## Part 4 — Optimisation targets after the two parts above
+* the bed is heated by the pipe surface, so the heater bank is not needed for the
+  charge path;
+* the pipe network replaced the "tubes as lumped convective sinks" model and brings its
+  own sizing rules ([15](15_PIPE_NETWORKS.md));
+* what the hairpin bank still needs - a mesh that resolves a 12 mm sheath - is exactly
+  what the graded mesh provides, so the two features remain compatible and tested.
 
-| item | measure |
+The bank is therefore kept, validated and documented, but a study of the default
+machine should use the *uniform zone* pattern (the default) or the pipe network, and
+treat a discrete hairpin bank as an option for directly heated beds.
+
+## Part 4 — Open: the optimisation measurements
+
+| item | state |
 |---|---|
-| graded mesh | same accuracy with fewer cells than a uniform grid (report in `scripts/benchmark.py`: cells vs error on the analytic slab) |
-| assembly | the graded coefficients must not slow the assembly down by more than ~10 % |
-| transient | warm start + cached preconditioner already dominate; keep the operator rebuild tied to a *changed* `dt` only |
-| heater rasterisation | O(cells along the elements), done once per build |
+| graded vs uniform accuracy at equal cost | **not measured**: `scripts/benchmark.py` builds uniform meshes only (`build_model(spacing)`) and prints assembly/solve timings per size |
+| assembly overhead of the graded coefficients on a graded grid vs the uniform fast path | **not measured** (the uniform special case was removed, so there is one path to measure) |
+| transient: warm start + cached preconditioner dominate, and the operator is rebuilt only for a changed `dt` | implemented (`src/solver/transient.py`); no dedicated benchmark |
+| heater rasterisation cost | O(cells along the elements), done once per build; measured only by the test that builds a 20 000-leaf octree in under a second (`tests/test_octree.py`), not for the bank |
+| the adaptive (octree) alternative to grading: balance, conservative faces, a flux-jump indicator and `refine_on_objective` | implemented in `src/core/octree.py` + `src/solver/octree_solver.py`; **not connected** to `Mesh3D`/`SteadyStateSolver`, so it is not an alternative a run can choose today ([13](13_REDESIGN.md) §5) |
+
+Two further items that this document used to promise and that are still open:
+
+* a **sub-grid heater model** (spread the source over the containing cell with a
+  contact resistance) would remove the requirement to resolve the sheath - it is not
+  implemented;
+* `docs/09` and `docs/11` used to quote stale test counts; they now record the command
+  and the date instead ([09](09_TESTING.md) §1).

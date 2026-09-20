@@ -24,6 +24,7 @@ from src.analysis.mesh_plan import plan_regions
 from src.core.geometry import BatteryGeometry, HeaterPattern
 from src.core.materials import MaterialManager
 from src.core.mesh import Mesh3D
+from src.core.pipe_network import build_pipe_network
 from src.io.state import StateError, StateManager
 from src.viz.scene import export_csv, export_vtk
 
@@ -128,6 +129,7 @@ class ThermalBatteryGUI(QMainWindow):
     def _connect(self) -> None:
         self.build_btn.clicked.connect(self.build_mesh)
         self.geometry_panel.auto_mesh_requested.connect(self.find_auto_mesh)
+        self.geometry_panel.pipe_network_requested.connect(self.build_pipe_network)
         self.preview_btn.clicked.connect(self.preview_geometry)
         self.run_btn.clicked.connect(self.run)
         self.cancel_btn.clicked.connect(self.controller.cancel)
@@ -196,9 +198,47 @@ class ThermalBatteryGUI(QMainWindow):
             self.log(f"[mesh] {note}")
         self.log(f"[mesh] {report.n_source_cells} source cells, "
                  f"{report.n_tube_cells} tube cells")
+        if self.geometry_panel.pipe_network() is not None:
+            # the pipes were painted on the old mesh: nothing of them survives a rebuild
+            self.geometry_panel.set_pipe_network(
+                None, "the mesh was rebuilt: build and paint the network again")
+            self.log("[pipes] the mesh was rebuilt, so the painted pipes are gone")
         self._update_mesh_info()
         self.viz.show_mesh(mesh)
         self.statusBar().showMessage("Mesh ready")
+
+    @safe_slot
+    def build_pipe_network(self) -> None:
+        """Build the network of the Pipes tab on this window's mesh and paint it.
+
+        The panel owns the widgets but not the mesh: the cells the paint marks have to
+        be the cells the run will solve, so the build happens here, on ``self.mesh``.
+        """
+        panel = self.geometry_panel
+        if self.controller.running:
+            self.log("[pipes] a simulation is running: the mesh is being read")
+            return
+        if self.mesh is None:
+            QMessageBox.warning(self, "No mesh", "Build the mesh first.")
+            panel.set_pipe_network(None, "no mesh: build the mesh first")
+            return
+        try:
+            network = build_pipe_network(self.mesh, panel.pipe_network_config())
+            report = network.paint(self.mesh, **panel.pipe_paint_settings())
+        except ValueError as exc:
+            panel.set_pipe_network(None, f"invalid: {exc}")
+            self.log(f"[pipes] refused: {exc}")
+            return
+        panel.set_pipe_network(network, report)
+        for note in network.notes:
+            self.log(f"[pipes] {note}")
+        self.log(f"[pipes] {network.n_risers} risers, {network.specific_area:.2f} m2/m3, "
+                 f"painted {report.cells:,} cells ({report.area:.1f} m2)")
+        if panel.disable_lumped_tubes():
+            self.log("[pipes] the lumped tube bank of the Tubes tab is off: the gas "
+                     "loop through the network is the heat transfer path now")
+        self._refresh_results()
+        self.statusBar().showMessage("Pipe network painted")
 
     @safe_slot
     def preview_geometry(self) -> None:
@@ -288,6 +328,8 @@ class ThermalBatteryGUI(QMainWindow):
             power_profile=self.analysis_panel.power_profile(),
             extraction_profile=self.analysis_panel.extraction_profile(),
             start_from_steady=self.analysis_panel.wants_steady_initial_condition(),
+            pipe_network=self.geometry_panel.pipe_network(),
+            pipe_flow=self.geometry_panel.pipe_mass_flow(),
             **self.solver_panel.settings(),
         )
 
