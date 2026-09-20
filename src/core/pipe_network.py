@@ -1205,6 +1205,12 @@ class PipeNetwork:
         Nothing is measured off the mask: the wetted area stays the geometric
         ``pi d L`` of the centrelines, and the report states how much of it fell
         outside the vessel (the nozzle stubs) and how much is left without a film.
+
+        The film is what a *lumped* model needs (a steady or losses run sees the pipes
+        where they are).  A transient driven by a
+        :class:`~src.solver.fluid.FluidLoop` does not use it: the loop marches the gas
+        and deposits its own ``q_fluid`` in these very cells, and the solver rebuilds
+        its operators when the film changes, so the two models never run together.
         """
         cells, _, areas = self.voxelize(mesh)
         riser_cells = self._riser_cells(mesh)
