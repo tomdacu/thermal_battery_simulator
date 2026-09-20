@@ -13,7 +13,18 @@ the solution asks for them, and this module provides the two things that make it
   with opposite signs in the two cells that share it and the discrete balance closes to
   machine precision on *any* combination of levels.
 
-**Status: first draft.**  What works: the leaf algebra, the uniform coverage, the 2:1
+**Status: second pass, still not finished.**  Fixed in this pass: the neighbour search
+now starts at the finest level, so it can see *finer* neighbours (it walked towards the
+coarse levels before and was blind to them), and the leaf list is deduplicated after
+every mutation (the same leaf could appear several times, and every earlier copy looked
+like a leaf with no faces).  With those two fixes a graded tree has 2 lonely leaves
+instead of 16, but the face list still emits roughly five times too many faces - a
+uniform 4x4x4 tree of leaves has 738 face entries where 144 exist - so the deduplication
+inside `faces()` is still wrong and the matrix it produces is not yet usable.  The next
+step is to instrument `faces()` on that small tree: print every emitted entry for one
+leaf and compare against its six neighbours.
+
+**Status note (first draft).**  What works: the leaf algebra, the uniform coverage, the 2:1
 balance on a refined corner, the neighbour count at a face, and the refinement and
 coarsening drives.  What is still failing in `tests/test_octree.py` (skipped, not
 deleted): the Morton round trip for leaves of mixed level, the split semantics check,
@@ -112,6 +123,18 @@ class Octree:
         """Volume in finest-cell units cubed."""
         return float(leaf.size ** 3)
 
+    def _reindex(self, leaves) -> None:
+        """Rebuild the leaf list and the lookup, dropping duplicates.
+
+        Duplicates are not hypothetical: a split that reaches the same leaf twice (two
+        parents asking for it, or a refinement round revisiting it) would put the same
+        leaf in the list several times, ``_index`` would keep only the last position,
+        and every earlier copy would look like a leaf with no faces - which is exactly
+        what made the face list lose faces and the matrix singular.
+        """
+        self.leaves = sorted(set(leaves))
+        self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+
     def split(self, leaf: Leaf) -> list[Leaf]:
         """The eight children of a leaf."""
         if leaf.level >= self.max_level:
@@ -189,8 +212,7 @@ class Octree:
                     splits += 1
                 else:
                     new.append(leaf)
-            self.leaves = sorted(new)
-            self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+            self._reindex(new)
         return splits
 
     # ------------------------------------------------------------ refinement
@@ -206,8 +228,7 @@ class Octree:
             new: list[Leaf] = []
             for leaf in self.leaves:
                 new.extend(self.split(leaf) if leaf in marked_set else [leaf])
-            self.leaves = sorted(new)
-            self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+            self._reindex(new)
             self.balance()
 
     def coarsen(self, indicator: Callable[[Leaf], float], threshold: float) -> None:
@@ -228,8 +249,7 @@ class Octree:
         kept: list[Leaf] = [leaf for leaf in self.leaves
                             if not any(leaf in parents[p] for p in merged)]
         kept.extend(merged)
-        self.leaves = sorted(kept)
-        self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+        self._reindex(kept)
         self.balance()
 
     # ------------------------------------------------------------------ view
