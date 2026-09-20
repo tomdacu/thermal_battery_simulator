@@ -338,11 +338,13 @@ class FluidLoop:
             weighted_out += m_dot * float(a * t_in + b)
             weight += m_dot
 
-        # hydraulics: the pressure drop of the circuit and the blower power
-        delta_p = 0.0
-        for run in self.runs:
-            delta_p += pressure_drop(self.mass_flow, run.diameter, run.total_length,
-                                     fluid, self.roughness, self.fittings_k)
+        # hydraulics: the runs are in *parallel*, so they share the pressure drop and
+        # each one carries only its share of the flow.  Adding the drops of the runs
+        # (as if they were in series) would overstate the blower by orders of magnitude.
+        drops = [pressure_drop(self.mass_flow * fraction, run.diameter, run.total_length,
+                               fluid, self.roughness, self.fittings_k)
+                 for run, fraction in zip(self.runs, split, strict=True)]
+        delta_p = float(np.mean(drops)) if drops else 0.0
         result.delta_p = delta_p
         result.pressure = float(self.pressure)
         result.fan_power = fan_power(self.mass_flow, delta_p, fluid,

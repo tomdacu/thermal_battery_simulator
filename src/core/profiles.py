@@ -15,7 +15,7 @@ from ..units import check_kelvin
 
 POWER_MODES = ("off", "constant", "schedule", "csv")
 EXTRACTION_MODES = ("off", "power", "flow_rate")
-IC_MODES = ("uniform", "by_material", "from_file")
+IC_MODES = ("uniform", "by_material", "from_file", "keep")
 
 
 @dataclass

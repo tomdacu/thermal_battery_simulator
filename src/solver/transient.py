@@ -90,6 +90,10 @@ class TransientSolver:
         self.notes = []
         #: outcome of the last fluid-loop march (None when no loop is configured)
         self.fluid_result = None
+        #: energies carried by the loop over the run [J]: the blower work and what the
+        #: exchanger delivered (the two terms a cycle report needs)
+        self.fluid_fan_energy = 0.0
+        self.fluid_delivered = 0.0
 
     # ------------------------------------------------------------------ setup
     def apply_initial_condition(self) -> None:
@@ -197,7 +201,11 @@ class TransientSolver:
             step_dt = min(dt, cfg.t_final - t)
             power = cfg.power_profile.power_at(t)
             extraction = cfg.extraction_profile.power_request(t)
-            if not self._set_fluid_loop(power, extraction):
+            loop_used = self._set_fluid_loop(power, extraction)
+            if loop_used and self.fluid_result is not None:
+                self.fluid_fan_energy += self.fluid_result.fan_power * step_dt
+                self.fluid_delivered += max(-self.fluid_result.external_power, 0.0) * step_dt
+            if not loop_used:
                 self._set_power(power)
                 self._set_extraction(t)
 
