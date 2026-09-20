@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.core.mesh import BoundaryType, Mesh3D
+from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.physics import half_cell_h
 from src.core.profiles import InitialCondition, PowerProfile, ExtractionProfile
 from src.solver.linear import LinearConfig, is_symmetric, solve_linear
@@ -355,3 +355,42 @@ def test_transient_with_radiation_stays_finite_and_loses_more(storage_model):
     radiant = radiant_solver.run()
     assert np.all(np.isfinite(mesh.T))
     assert radiant.Q_losses_total[-1] > loss_plain
+
+
+def test_a_loop_that_changes_the_tube_film_rebuilds_the_operator():
+    """Regression: the cached operator used to keep a film the RHS had lost.
+
+    With a fluid loop the transient zeroes the tube film, but the matrix built at the
+    start still carried it: the tube cells were then solved as
+    ``(m/dt + a_p_stale) T = (m/dt) T_prev + b`` and drifted to a nonsense temperature
+    (-89 C in the reported case) while the bed sat at +20 C.  The operator must be
+    rebuilt whenever the film it was built with changes.
+    """
+    from src.core.pipes import rasterize_pipe
+    from src.solver.fluid import FluidLoop
+    from src.solver.transient import TransientConfig, TransientSolver
+
+    mesh = Mesh3D(1.0, 1.0, 1.0, spacing=0.2)
+    mesh.k[:] = 1.0
+    mesh.rho[:] = 1500.0
+    mesh.cp[:] = 800.0
+    mesh.T[:] = 293.15
+    for face in ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max"):
+        mesh.set_adiabatic(face)
+    run = rasterize_pipe(mesh, [(0.5, 0.5, 0.0), (0.5, 0.5, 1.0)], 0.05)
+    tube = np.zeros(mesh.T.shape, dtype=bool)
+    flat = tube.ravel(order="F")
+    flat[run.cells] = True
+    tube = flat.reshape(mesh.T.shape, order="F")
+    mesh.material_id[tube] = int(MaterialID.TUBES)
+    mesh.set_internal_convection(tube, 500.0, 333.15)        # a film before the loop
+    loop = FluidLoop(runs=[run], mass_flow=0.01, h_fluid=500.0, t_in=300.0)
+    config = TransientConfig(t_final=1800.0, dt=300.0,
+                             power_profile=PowerProfile(mode="constant",
+                                                        constant_power=5000.0),
+                             fluid_loop=loop)
+    TransientSolver(mesh, config, SolverConfig(method="cg", tolerance=1e-8)).run()
+    # the field must stay physical: the bed is heated, nothing dives to negative C
+    assert float(mesh.T.min()) > 280.0, float(mesh.T.min())
+    assert float(mesh.T.max()) < 500.0
+    assert np.all(np.isfinite(mesh.T))

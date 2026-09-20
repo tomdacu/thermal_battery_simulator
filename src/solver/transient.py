@@ -101,6 +101,18 @@ class TransientSolver:
         if field is not None:
             self.mesh.T = field
 
+    def _tube_film(self) -> tuple[float, float]:
+        """Signature of the tube film the operator must be built with.
+
+        Sum of the film coefficients on the tube cells and of their ``h * T_fluid``
+        products: cheap, and enough to notice that a fluid loop changed the exchange.
+        """
+        if getattr(self, "_n_tube", 0) == 0:
+            return (0.0, 0.0)
+        h = self.mesh.bc_h[self._tube]
+        t_inf = self.mesh.bc_T_inf[self._tube]
+        return (float(np.sum(h)), float(np.sum(h * t_inf)))
+
     def _source_masks(self) -> None:
         mask = self.mesh.source_mask
         self._n_source = int(np.count_nonzero(mask))
@@ -185,8 +197,14 @@ class TransientSolver:
         stationary_operator = not self.solver_config.radiation
         a = None
         m_diag = None
+        # the assembled operator carries the tube film (``a_p[tube] += h/h_char``) while
+        # the right-hand side is rebuilt every step from the *current* bc_h: if a loop
+        # marches the fluid and changes that film, the cached matrix would keep the old
+        # term with no companion on the right-hand side and the tube cells would be
+        # driven to a nonsense temperature.  Track the film the operator was built with.
         if stationary_operator:
             a, m_diag = build_transient_operators(self.mesh, dt, self.index)
+        film_at_build = self._tube_film()
 
         results = TransientResults()
         t, t_start = 0.0, time.perf_counter()
@@ -209,12 +227,14 @@ class TransientSolver:
                 self._set_power(power)
                 self._set_extraction(t)
 
-            if not stationary_operator or step_dt != dt:
-                # the shortened final step needs operators built for its own dt,
-                # otherwise the matrix and the right-hand side disagree
+            film_now = self._tube_film()
+            if not stationary_operator or step_dt != dt or film_now != film_at_build:
+                # the shortened final step needs operators built for its own dt, and a
+                # film that changed (the loop marched) needs a rebuilt diagonal too
                 a, m_diag = build_transient_operators(
                     self.mesh, step_dt, self.index,
                     radiation=self.solver_config.radiation)
+                film_at_build = film_now
             x = self.mesh.T.ravel(order="F").copy()
             rhs = transient_rhs(self.mesh, m_diag, step_dt, x, index=self.index,
                                 radiation=self.solver_config.radiation)
