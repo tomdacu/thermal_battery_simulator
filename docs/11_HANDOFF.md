@@ -108,3 +108,27 @@ python scripts/benchmark.py --max-cells 60000    # timings
 Off-screen renders for visual checks (used throughout):
 `pyvista.OFF_SCREEN = True` then `src.viz.scene.add_field(...)` /
 `add_geometry_preview(...)` and `plotter.screenshot(path)`; read the PNG back.
+
+## 9. Where the redesign stands (latest pass)
+
+The architecture was rebuilt around a **closed gas loop through pipes buried in the
+granular bed** (see `docs/13_REDESIGN.md`): the resistors heat the gas, the gas heats
+the bed, the same loop discharges to an exchanger, and the air outside the vessel is a
+boundary condition instead of a domain.
+
+| piece | state | where |
+|---|---|---|
+| fluid loop: effectiveness relation, closed loop, pressure, blower, circulation loss | done, 27 tests | `src/solver/fluid.py` |
+| pipe geometry: runs, geometric area per cell, layouts, four collection modes, side ducts | done, verified | `src/core/pipes.py`, `src/core/pipe_network.py` |
+| environment: no air domain, natural + wind film, contact resistance | done, 9 tests | `src/core/environment.py` |
+| adaptive mesh: octree with the 2:1 balance and a conservative face list | done, 14 tests | `src/core/octree.py` |
+| cycle accounting: charge / standby / discharge, efficiency decomposition | work in progress | `src/analysis/cycle.py` |
+| GUI: pipes tab with the layouts, the collection modes, the lateral ducts | done | `gui/views/geometry_panel.py` |
+| figures | reproducible from one script | `scripts/figures.py` |
+
+Open items, in the order they should be taken: (1) the cycle discharge needs a per-step
+stopping criterion (documented in the module); (2) the octree is standalone - it has its
+own matrix and solver but is not yet the mesh of the main solver; (3) the pipe network
+is not yet painted into the mesh material field nor wired to the gas loop from the GUI;
+(4) `docs/09`, `docs/10` and `docs/04` still carry stale numbers and references from
+earlier passes.

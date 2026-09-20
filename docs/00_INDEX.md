@@ -13,6 +13,10 @@
 | 09 | [Testing](09_TESTING.md) | what is verified, by which test, and how to run it |
 | 10 | [Graded mesh and realistic heaters](10_MESH_AND_HEATERS.md) | design and migration plan for the next phase |
 | 11 | [Handoff](11_HANDOFF.md) | state of the work: read this first after a context reset |
+| 12 | [Methods and why](12_METHODS.md) | every numerical and modelling choice, with the alternative that was rejected |
+| 13 | [Redesign](13_REDESIGN.md) | the gas-loop architecture, the migration plan, the open decisions |
+| 14 | [Verification](14_VERIFICATION.md) | the verification campaign: timings and realism checks (agent-produced, not yet re-checked by hand) |
+| 15 | [Pipe networks](15_PIPE_NETWORKS.md) | buried-pipe layouts, collection modes, design rules and the worked examples |
 
 ## How these documents are kept honest
 

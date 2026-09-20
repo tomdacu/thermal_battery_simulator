@@ -12,6 +12,7 @@ from src.core.mesh import Mesh3D
 from src.core.refinement import Band, GridSpec
 from src.core.heaters import (SURFACE_POWER_LIMIT_W_CM2,
                               SURFACE_POWER_MIN_W_CM2)
+from src.core.pipe_network import PipeNetworkConfig, build_pipe_network
 from src.core.geometry import (
     CylinderGeometry,
     HeaterConfig,
@@ -52,6 +53,7 @@ class GeometryPanel(QWidget):
         layout = QVBoxLayout(self)
         self._auto_spec: GridSpec | None = None
         self._plan_targets: dict[str, float] = {}
+        self._pipe_network = None
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
         self._build_cylinder_tab()
@@ -59,6 +61,7 @@ class GeometryPanel(QWidget):
         self._build_heaters_tab()
         self._build_tubes_tab()
         self._build_mesh_tab()
+        self._build_pipes_tab()
 
     # ------------------------------------------------------------------ tabs
     def _build_cylinder_tab(self) -> None:
@@ -160,6 +163,70 @@ class GeometryPanel(QWidget):
         self.tube_positions.setMaximumHeight(120)
         panel.add_row(self.tube_positions)
         self.tabs.addTab(panel, "Tubes")
+
+    def _build_pipes_tab(self) -> None:
+        """Buried pipe network: the layout, how it is collected, and the ducts."""
+        panel = FormPanel()
+        self.pipe_layout = panel.add("Layout", combo(
+            (("Staggered bundle", "staggered"), ("Square grid", "grid"),
+             ("Concentric rings", "rings"), ("Radial files", "radial")), 2))
+        self.pipe_collection = panel.add("Collection", combo(
+            (("Distributor + collector", "distributor_collector"),
+             ("Reverse return (balanced)", "reverse_return"),
+             ("Central header", "central_header"),
+             ("Two level rings", "two_level_rings")), 1,
+            ))
+        self.pipe_rings = panel.add("Rings", int_spin(
+            3, 1, 12, 1, tooltip="For the ring layouts"))
+        self.pipe_files = panel.add("Radial files", int_spin(
+            12, 3, 72, 1, tooltip="For the radial layout"))
+        self.pipe_diameter = panel.add("Pipe outer d [m]",
+                                       double_spin(0.05, 0.01, 0.3, 0.005, 3,
+                                                   tooltip="The pitch follows this "
+                                                           "diameter"))
+        self.pipe_duct = panel.add("Duct d [m]", double_spin(0.15, 0.05, 0.6, 0.05, 3))
+        self.pipe_azimuth_in = panel.add("Inlet azimuth [deg]",
+                                         double_spin(180.0, 0.0, 360.0, 15.0, 0))
+        self.pipe_azimuth_out = panel.add("Outlet azimuth [deg]",
+                                          double_spin(0.0, 0.0, 360.0, 15.0, 0))
+        self.pipe_split = panel.add("Flow split", combo(
+            (("Equal per branch", "equal"), ("From path length", "path_length")), 0))
+        panel.add_row(button("Build network", self.build_pipe_network_clicked))
+        self.pipe_info = panel.add("Network", hint("build the mesh, then the network"))
+        panel.add_hint("The risers are buried in the sand and the gas goes in from the "
+                       "side at the bottom and out from the side at the top: a vessel "
+                       "is not axisymmetric and nothing leaves through the roof.")
+        self.tabs.addTab(panel, "Pipes")
+
+    def pipe_network_config(self) -> PipeNetworkConfig:
+        """The buried-pipe network the panel describes, in the current vessel."""
+        cyl = self.cylinder()
+        base = self.base_z.value()
+        return PipeNetworkConfig(
+            radius=cyl.r_storage, height=cyl.height, base_z=base,
+            band_bottom=base + max(self.offset_bottom.value(), 0.1),
+            band_top=base + cyl.height - 0.4, diameter=self.pipe_diameter.value(),
+            layout=self.pipe_layout.currentData(),
+            collection=self.pipe_collection.currentData(),
+            n_rings=int(self.pipe_rings.value()), n_files=int(self.pipe_files.value()),
+            duct_diameter=self.pipe_duct.value(),
+            azimuth_in=np.deg2rad(self.pipe_azimuth_in.value()),
+            azimuth_out=np.deg2rad(self.pipe_azimuth_out.value()),
+            split_mode=self.pipe_split.currentData())
+
+    def build_pipe_network_clicked(self) -> None:
+        """Build the network on the current mesh and report what it is."""
+        try:
+            mesh = self.build_mesh()
+            config = self.pipe_network_config()
+            network = build_pipe_network(mesh, config)
+        except (ValueError, RuntimeError) as exc:
+            self.pipe_info.setText(f"invalid: {exc}")
+            return
+        self._pipe_network = network
+        problems = network.validate()
+        note = "" if not problems else "  (check: " + "; ".join(problems) + ")"
+        self.pipe_info.setText(network.summary() + note)
 
     def _build_mesh_tab(self) -> None:
         panel = FormPanel()
