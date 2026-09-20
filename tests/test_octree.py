@@ -17,14 +17,16 @@ import pytest
 
 from src.core.octree import FACES, Leaf, refine_by_gradient, uniform_tree
 
-#: SKIPPED, not deleted.  The module is a first draft and its remaining defects are
-#: diagnosed but not fixed: the Morton code does not survive a round trip for leaves of
-#: mixed level, the "count each pair once" rule in `faces()` drops faces, so the matrix
-#: built from that list is singular and the solver test hangs in CG, and the exact face
-#: count of a uniform tree is wrong.  The fix path is written in the module header:
-#: a Morton-sorted leaf array with binary-search neighbours, and a face list that emits
-#: one entry per *existing* sub-face on both sides of the interface.
-pytestmark = pytest.mark.skip(reason="octree draft: see the diagnosis in this file")
+#: SKIPPED, not deleted.  Fixed in this pass: the neighbour search could not see a
+#: finer neighbour (it walked from the caller's level towards the coarse levels), which
+#: is why the face list missed the faces against refined neighbours.  Still open: the
+#: solve tests hang because the matrix built from the face list is still singular or
+#: hopelessly conditioned - the next step is to print, for a small refined tree, which
+#: leaves end up without any face, then fix the emission rule for the coarse/fine
+#: interface (one entry per existing sub-face, from both sides).
+pytestmark = pytest.mark.skip(reason="octree draft: see the note above")
+
+
 
 
 # ------------------------------------------------------------------ structure

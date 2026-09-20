@@ -120,9 +120,15 @@ class Octree:
         return [Leaf(leaf.level + 1, leaf.x + dx, leaf.y + dy, leaf.z + dz)
                 for dx in (0, half) for dy in (0, half) for dz in (0, half)]
 
-    def _find(self, level: int, x: int, y: int, z: int) -> Leaf | None:
-        """The leaf containing a point (in finest-cell units)."""
-        for candidate_level in range(level, -1, -1):
+    def _find(self, x: int, y: int, z: int) -> Leaf | None:
+        """The leaf containing a point (in finest-cell units).
+
+        The search starts at the FINEST level and walks up: a neighbour can be finer
+        than the leaf we started from, and a search that only walked towards the coarse
+        levels could never see it - which is what made the face list miss the faces
+        against refined neighbours, leaving the matrix singular.
+        """
+        for candidate_level in range(self.max_level, -1, -1):
             size = 1 << candidate_level
             if size > self.n:
                 continue
@@ -158,7 +164,7 @@ class Octree:
                 probe = list(point)
                 probe[others[0]] += size // 2
                 probe[others[1]] += size // 2
-                leaf_found = self._find(leaf.level, *probe)
+                leaf_found = self._find(*probe)
                 if leaf_found is not None and leaf_found != leaf and leaf_found not in found:
                     found.append(leaf_found)
         return found
