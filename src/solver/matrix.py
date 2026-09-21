@@ -40,6 +40,7 @@ the mesh resolution.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy import sparse
@@ -48,6 +49,10 @@ from ..constants import EPS
 from ..core.grid import FACE_AXIS, GridIndex, dirichlet_mask
 from ..core.physics import half_cell_h, radiation_h
 from ..core.mesh import FACES, BoundaryType, Mesh3D
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
+
 
 def face_conductance(k_a, k_b, area, distance, *, size_a=None, size_b=None,
                      material_a=None, material_b=None, h_contact: float = 0.0,
@@ -248,9 +253,20 @@ def build_steady_matrix(mesh: Mesh3D, index: GridIndex = None, radiation: bool =
     return a, b
 
 
-def build_transient_operators(mesh: Mesh3D, dt: float, index: GridIndex = None,
+def build_transient_operators(mesh: Mesh3D | AdaptiveMesh, dt: float,
+                              index: GridIndex = None,
                               radiation: bool = False) -> tuple[sparse.csr_matrix, np.ndarray]:
-    """Return ``(A, m_diag)`` for ``(M/dt + L) T = (M/dt) T^n + b``."""
+    """Return ``(A, m_diag)`` for ``(M/dt + L) T = (M/dt) T^n + b``, on either mesh.
+
+    A structured mesh goes through :func:`build_steady_matrix` and the ``GridIndex``
+    tables; a tree assembles and eliminates itself
+    (:meth:`~src.core.adaptive_mesh.AdaptiveMesh.transient_operators`) with the same rule
+    - the film diagonal, the mass matrix ``rho*cp``, the symmetric elimination of
+    :func:`apply_dirichlet` - so a caller that hands either mesh over gets the operator
+    the rest of the transient march assumes.
+    """
+    if not isinstance(mesh, Mesh3D):
+        return mesh.transient_operators(dt, radiation=radiation)
     if dt <= 0:
         raise ValueError(f"dt must be > 0, got {dt}")
     index = index or GridIndex.from_mesh(mesh)
@@ -269,9 +285,17 @@ def steady_rhs(mesh: Mesh3D, index: GridIndex = None, radiation: bool = False) -
     return b
 
 
-def transient_rhs(mesh: Mesh3D, m_diag: np.ndarray, dt: float, T_prev: np.ndarray,
-                  index: GridIndex = None, radiation: bool = False) -> np.ndarray:
-    """RHS of one backward-Euler step for the current sources."""
+def transient_rhs(mesh: Mesh3D | AdaptiveMesh, m_diag: np.ndarray, dt: float,
+                  T_prev: np.ndarray, index: GridIndex = None,
+                  radiation: bool = False) -> np.ndarray:
+    """RHS of one backward-Euler step for the current sources, on either mesh.
+
+    A tree rebuilds its own right-hand side
+    (:meth:`~src.core.adaptive_mesh.AdaptiveMesh.transient_rhs`): the sources and the
+    films of the current state, and the value alone on the rows the elimination pinned.
+    """
+    if not isinstance(mesh, Mesh3D):
+        return mesh.transient_rhs(m_diag, dt, T_prev, radiation=radiation)
     index = index or GridIndex.from_mesh(mesh)
     rhs = (m_diag / dt) * np.asarray(T_prev, dtype=float).ravel(order="F")
     rhs += steady_rhs(mesh, index=index, radiation=radiation)

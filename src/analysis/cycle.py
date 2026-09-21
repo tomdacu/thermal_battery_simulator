@@ -40,11 +40,16 @@ report says why every phase ended.
 Rounding of the phases: the charge runs until the storage mean reaches the target
 temperature, the standby for a prescribed time, the discharge until the gas delivered to
 the user falls below its floor.
+
+The mesh is the transient's: a structured ``Mesh3D`` or an adaptive tree, and the ledger
+below reads only the protocol's per-cell fields and the balance, so the same numbers come
+out of either (the transient march is the only part that knows which one is running).
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -55,6 +60,9 @@ from ..solver.fluid import FluidLoop, FluidResult
 from ..solver.steady import SolverConfig
 from ..solver.transient import TransientConfig, TransientSolver
 from .balance import compute_balance
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 
 @dataclass
@@ -76,7 +84,7 @@ class CycleSettings:
 class StepState:
     """What a stop criterion sees after a step: the field and the loop driving it."""
 
-    mesh: Mesh3D
+    mesh: Mesh3D | AdaptiveMesh
     seconds: float          # [s] elapsed inside the phase
     t_mean: float           # [K] volume-averaged storage temperature
     t_min: float            # [K] coldest cell of the field
@@ -231,7 +239,7 @@ class CycleReport:
         return "\n".join(lines)
 
 
-def _storage_mean(mesh: Mesh3D) -> float:
+def _storage_mean(mesh: Mesh3D | AdaptiveMesh) -> float:
     """Volume-averaged temperature of the storage material [K]."""
     mask = mesh.material_id == int(MaterialID.SAND)
     if not mask.any():
@@ -239,7 +247,7 @@ def _storage_mean(mesh: Mesh3D) -> float:
     return float(np.mean(mesh.T[mask]))
 
 
-def _step_state(mesh: Mesh3D, seconds: float,
+def _step_state(mesh: Mesh3D | AdaptiveMesh, seconds: float,
                 loop_result: FluidResult | None) -> StepState:
     """The state a criterion judges: the field and the loop that is driving it."""
     return StepState(
@@ -320,7 +328,7 @@ class _Ledger:
     loop_result: FluidResult | None = None
 
 
-def _phase_chunk(mesh: Mesh3D, loop: FluidLoop, solver_config: SolverConfig,
+def _phase_chunk(mesh: Mesh3D | AdaptiveMesh, loop: FluidLoop, solver_config: SolverConfig,
                  power: float, extraction: float, seconds: float, dt: float,
                  progress=None, stop_when: StopWhen | None = None,
                  elapsed: float = 0.0,
@@ -396,7 +404,7 @@ def _phase_chunk(mesh: Mesh3D, loop: FluidLoop, solver_config: SolverConfig,
     return ledger
 
 
-def run_cycle(mesh: Mesh3D, loop: FluidLoop, settings: CycleSettings = None,
+def run_cycle(mesh: Mesh3D | AdaptiveMesh, loop: FluidLoop, settings: CycleSettings = None,
               solver_config: SolverConfig = None,
               progress=None) -> CycleReport:
     """Charge to the target, let the store sit, discharge to the delivery floor.

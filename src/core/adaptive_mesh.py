@@ -38,7 +38,12 @@ Sameness, in the form the tests check it:
   ``t_ambient`` exactly as ``src/solver/matrix.py`` holds them;
 * the balance closes the way the structured one does: ``p_source + p_sink`` equals the
   heat leaving through the fixed (Dirichlet) leaves plus the films, at the round-off of
-  the per-leaf closure ``div + film - Q V``.
+  the per-leaf closure ``div + film - Q V``;
+* the transient is the same assembly: :meth:`AdaptiveMesh.transient_operators` adds the
+  mass matrix ``rho*cp`` to the steady operator and eliminates the same pinned leaves, and
+  :meth:`AdaptiveMesh.transient_rhs` rebuilds the right-hand side of the current state -
+  so the backward-Euler march of :mod:`src.solver.transient` runs on a tree without
+  knowing it is not on a ``Mesh3D``.
 """
 from __future__ import annotations
 
@@ -469,6 +474,20 @@ class AdaptiveMesh:
         mask[list(self.fixed_leaves())] = True
         return mask
 
+    def _fixed_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(mask, values)`` of the pinned leaves, in the form the elimination takes.
+
+        :meth:`fixed_leaves` as the two per-leaf arrays
+        :func:`src.solver.matrix.apply_dirichlet` wants, which is how both assemblies -
+        the steady one and the transient one - pin the same set.
+        """
+        mask = np.zeros(self.tree.n_cells, dtype=bool)
+        values = np.zeros(self.tree.n_cells)
+        for position, value in self.fixed_leaves().items():
+            mask[position] = True
+            values[position] = value
+        return mask, values
+
     def wall_indices(self, face: str) -> np.ndarray:
         """Positions of the leaves touching a box face, in ``tree.leaves`` order.
 
@@ -750,13 +769,68 @@ class AdaptiveMesh:
                 shape=coo.shape).tocsr()
         if not enforce_dirichlet:
             return a, b
-        fixed = self.fixed_leaves()
-        mask = np.zeros(self.tree.n_cells, dtype=bool)
-        values = np.zeros(self.tree.n_cells)
-        for position, value in fixed.items():
-            mask[position] = True
-            values[position] = value
+        mask, values = self._fixed_arrays()
         return apply_dirichlet(a, b, mask, values), b
+
+    # ---------------------------------------------------------------- transient
+    def volume_scale(self) -> np.ndarray | None:
+        """The per-leaf volumes ``solve_linear`` wants, or ``None`` on a uniform tree.
+
+        The per-volume coefficients are ``diag(V)^-1 K`` with ``K`` symmetric, so on a
+        tree whose leaves are all the same size the operator is symmetric already (the
+        transformation is a constant) and the linear layer is asked for no
+        symmetrisation; on a graded one the leaf volumes are handed over, as the
+        structured solver does with ``mesh.V`` on a graded ``Mesh3D``.
+        """
+        sizes = self.tree.cell_sizes()
+        if float(sizes.min()) == float(sizes.max()):
+            return None
+        return np.asarray(self.V, dtype=float)
+
+    def transient_operators(self, dt: float, radiation: bool = False
+                            ) -> tuple[sparse.csr_matrix, np.ndarray]:
+        """``(A, m_diag)`` for ``(M/dt + L) T = (M/dt) T^n + b``, as the structured builder.
+
+        The operator :meth:`assemble` builds (conduction, film diagonal, impedance of the
+        imposed fluxes) without the elimination, the mass matrix on the diagonal, and then
+        the elimination of the pinned leaves - the tree's counterpart of
+        :func:`src.solver.matrix.build_transient_operators`, built in the same order and
+        for the same reasons:
+
+        * ``M = diag(rho*cp)`` [J/(m^3 K)] and **not** ``rho*cp*V``: ``L`` is already per
+          unit volume, and a volume factor scales every time constant by ``1/d^3``, which
+          makes the answer depend on the mesh resolution;
+        * the mass diagonal is added *before* the elimination, because an identity row
+          scaled by ``M/dt`` would let a fixed leaf decay towards zero instead of holding
+          its temperature.
+        """
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt}")
+        a, _b = self.assemble(enforce_dirichlet=False, radiation=radiation)
+        m_diag = (self.rho * self.cp).astype(float)
+        mask, values = self._fixed_arrays()
+        a = (a + sparse.diags(m_diag / dt)).tocsr()
+        return apply_dirichlet(a, np.zeros(self.tree.n_cells), mask, values), m_diag
+
+    def transient_rhs(self, m_diag: np.ndarray, dt: float, T_prev: np.ndarray,
+                      radiation: bool = False) -> np.ndarray:
+        """``(M/dt) T^n + b`` of one backward-Euler step, the pinned rows at their value.
+
+        The tree's counterpart of :func:`src.solver.matrix.transient_rhs`, term by term:
+        the right-hand side is rebuilt from a full :meth:`assemble` - the sources and the
+        films of the current state are what a step changes, and the known columns the
+        elimination moves to the right-hand side ride with them (the structured builder
+        does exactly the same, through ``build_steady_matrix`` inside its own
+        ``transient_rhs``) - and the rows :meth:`fixed_leaves` pins carry their value
+        alone, written *after* the mass term, because an identity row must see the fixed
+        temperature and not ``M/dt`` riding on it.
+        """
+        rhs = (m_diag / dt) * np.asarray(T_prev, dtype=float)
+        _a, b = self.assemble(enforce_dirichlet=True, radiation=radiation)
+        rhs += b
+        mask, values = self._fixed_arrays()
+        rhs[mask] = values[mask]
+        return rhs
 
     # ------------------------------------------------------------------- solve
     def solve_steady(self, config: LinearConfig | None = None,
@@ -778,11 +852,9 @@ class AdaptiveMesh:
             radiation = bool(getattr(config, "radiation", False))
         start = time.perf_counter()
         a, b = self.assemble(radiation=radiation)
-        sizes = self.tree.cell_sizes()
-        uniform = float(sizes.min()) == float(sizes.max())
         linear: LinearResult = solve_linear(
             a, b, config or LinearConfig(method="direct"), x0=x0,
-            scale=None if uniform else self.V)
+            scale=self.volume_scale())
         self.T = np.asarray(linear.T, dtype=float)
         return AdaptiveSteadyResult(
             T=self.T.copy(), face_flux=self.face_fluxes(self.T),

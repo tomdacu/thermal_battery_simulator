@@ -1,4 +1,4 @@
-"""Transient solver: backward Euler with a per-volume mass matrix.
+"""Transient solver: backward Euler with a per-volume mass matrix, on either mesh.
 
 Key correctness points (each one was wrong in the previous implementation):
 
@@ -12,12 +12,19 @@ Key correctness points (each one was wrong in the previous implementation):
 * The extraction profile is applied to the physics (tube-side convection or a
   capped volumetric sink on the tube cells) and the removed power is measured,
   not assumed.
+* One march, either mesh: the operators and the right-hand side are asked of the
+  mesh (``build_transient_operators``/``transient_rhs`` dispatch to the tree's own
+  assembly), and the driver is left with what the two have in common - the profiles,
+  the fluid loop, the per-step ``should_stop`` hook, the balance and the samples.
+  ``Mesh3D`` keeps its ``GridIndex`` tables and its 3-D field; a tree carries the flat
+  per-leaf vector and no index arithmetic at all.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -31,6 +38,9 @@ from .fluid import FluidLoop
 from .matrix import build_transient_operators, transient_rhs
 from .results import TransientResults
 from .steady import SolverConfig
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 
 @dataclass
@@ -59,7 +69,7 @@ class TransientConfig:
         times = np.arange(steps + 1, dtype=float) * self.dt
         return np.clip(times, 0.0, self.t_final) if self.t_final > 0 else np.array([0.0])
 
-    def validate(self, mesh: Mesh3D = None) -> list[str]:
+    def validate(self, mesh: Mesh3D | AdaptiveMesh = None) -> list[str]:
         problems = []
         if self.t_final <= 0:
             problems.append("t_final must be > 0")
@@ -74,19 +84,36 @@ class TransientConfig:
 
 
 class TransientSolver:
-    """Time integration of the non-linear-free heat equation (Backward Euler)."""
+    """Time integration of the non-linear-free heat equation (Backward Euler).
 
-    def __init__(self, mesh: Mesh3D, config: TransientConfig,
+    Two meshes, one march: a structured :class:`~src.core.mesh.Mesh3D` assembles through
+    the ``GridIndex`` tables and keeps its field in the 3-D array, an adaptive mesh
+    through its own operator and its flat per-leaf vector, and the profile handling, the
+    fluid loop, the ``should_stop`` hook, the balance and the samples below are the same
+    code for both.  The two mesh-specific names are decided once, here: the index tables
+    (a tree has none) and the volume scaling of the linear layer.
+    """
+
+    def __init__(self, mesh: Mesh3D | AdaptiveMesh, config: TransientConfig,
                  solver_config: SolverConfig = None) -> None:
         self.mesh = mesh
         self.config = config
         self.solver_config = solver_config or SolverConfig(method="bicgstab",
                                                            preconditioner="jacobi")
-        self.index = GridIndex.from_mesh(mesh)
+        self.adaptive = not isinstance(mesh, Mesh3D)
+        if self.adaptive and not hasattr(mesh, "transient_operators"):
+            raise TypeError(f"unsupported mesh {type(mesh).__name__}: a Mesh3D or an "
+                            f"adaptive mesh is required")
+        self.index = None if self.adaptive else GridIndex.from_mesh(mesh)
         self._cache = PreconditionerCache()
-        # per-volume coefficients are symmetric only on a uniform grid: hand the
-        # cell volumes to the iterative solver so it can symmetrise (see solve_linear)
-        self._scale = None if self.mesh.uniform else self.mesh.V.ravel(order="F")
+        # per-volume coefficients are symmetric only on a mesh whose cells are all the
+        # same size: hand the cell volumes to the iterative solver so it can symmetrise
+        # (see solve_linear).  A tree answers with its own leaf volumes, or with None.
+        self._scale = None
+        if self.adaptive:
+            self._scale = mesh.volume_scale()
+        elif not mesh.uniform:
+            self._scale = mesh.V.ravel(order="F")
         self.notes = []
         #: outcome of the last fluid-loop march (None when no loop is configured)
         self.fluid_result = None
@@ -185,6 +212,12 @@ class TransientSolver:
     # -------------------------------------------------------------------- run
     def run(self, progress_callback: Callable[[int, str], None] | None = None,
             should_stop: Callable[[], bool] | None = None) -> TransientResults:
+        """March to ``t_final``, or stop early when ``should_stop`` says so.
+
+        ``should_stop`` is asked before every step, on the mesh the previous step left
+        behind, so a caller that watches the field (the cycle's phase criteria) ends the
+        run on the state it judges rather than at a saved sample.
+        """
         problems = self.config.validate(self.mesh)
         if problems:
             raise ValueError("invalid transient configuration: " + "; ".join(problems))
@@ -243,7 +276,8 @@ class TransientSolver:
             if not linear.converged:
                 self.notes.append(f"t={t:.0f}s: linear solve did not converge "
                                   f"(residual {linear.residual:.2e})")
-            self.mesh.T = self.mesh.unflatten_field(linear.T)
+            self.mesh.T = (np.asarray(linear.T, dtype=float) if self.adaptive
+                           else self.mesh.unflatten_field(linear.T))
 
             balance = compute_balance(self.mesh, cfg.t_ambient, self.index,
                                       radiation=self.solver_config.radiation)
@@ -281,10 +315,10 @@ class TransientSolver:
         return results
 
 
-def run_transient_simulation(mesh: Mesh3D, config: TransientConfig,
+def run_transient_simulation(mesh: Mesh3D | AdaptiveMesh, config: TransientConfig,
                              solver_config: SolverConfig = None,
                              progress_callback: Callable[[int, str], None] | None = None,
                              should_stop: Callable[[], bool] | None = None) -> TransientResults:
-    """Convenience wrapper used by the GUI controller."""
+    """Convenience wrapper used by the GUI controller, on either mesh."""
     solver = TransientSolver(mesh, config, solver_config)
     return solver.run(progress_callback=progress_callback, should_stop=should_stop)
