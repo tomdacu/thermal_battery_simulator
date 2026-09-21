@@ -110,9 +110,15 @@ def environment_flux(mesh: Mesh3D, index: GridIndex = None) -> float:
         return 0.0
     index = index or GridIndex.from_mesh(mesh)
     temperature = mesh.T.ravel(order="F")
+    # a cell whose row has been replaced by the Dirichlet elimination does not carry the
+    # film: its temperature is imposed, so counting its exchange here made the reported
+    # environment flux fall short (0.77 W on a 5 kW input on the default vessel).
+    pinned = dirichlet_mask(mesh, index).reshape(mesh.T.shape, order="F").ravel(
+        order="F")
     total = 0.0
     for face_index, nb in enumerate(index.neighbours):
-        mask = ~excluded & excluded[nb] & ~index.on_face[FACES[face_index]]
+        mask = (~excluded & excluded[nb] & ~pinned
+                & ~index.on_face[FACES[face_index]])
         if not mask.any():
             continue
         axis = FACE_AXIS[FACES[face_index]]
