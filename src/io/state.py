@@ -5,6 +5,10 @@ compatible with the current model: the grid, the material map, a content hash of
 the geometry description and the temperature unit.  ``load_state`` refuses a
 file whose geometry hash does not match the mesh it is applied to, instead of
 silently mixing two different models.
+
+Either mesh is stored: a structured :class:`~src.core.mesh.Mesh3D` writes its
+three edge lists, a tree writes the leaf list - the geometry it *is* - and both
+write the same per-cell fields, so a state file says which mesh produced it.
 """
 from __future__ import annotations
 
@@ -13,11 +17,15 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..constants import T0
 from ..core.mesh import FaceBC, Mesh3D
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 try:
     import h5py
@@ -27,7 +35,7 @@ except ImportError:  # pragma: no cover
     h5py = None
     HAS_H5PY = False
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3                     # 3 added the leaf list a tree is stored as
 TEMPERATURE_UNIT = "K"
 
 
@@ -65,19 +73,67 @@ def _canonical(value):
     return str(value)
 
 
-def geometry_hash(mesh: Mesh3D, geometry_params: dict[str, object] | None = None) -> str:
+def _extent(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
+    """Edge lengths of the domain [m]: three of them, on either mesh.
+
+    A tree spans a cube whose edge is ``box_size`` (``physical_size`` times the finest
+    cells a side), which is the ``Lx = Ly = Lz`` a structured mesh reports.
+    """
+    box = getattr(mesh, "box_size", None)
+    if box is not None:
+        return (float(box),) * 3
+    return (float(mesh.Lx), float(mesh.Ly), float(mesh.Lz))
+
+
+def _leaf_list(mesh: Mesh3D | AdaptiveMesh) -> np.ndarray | None:
+    """The tree's geometry as ``(n, 4)`` ``[level, x, y, z]`` rows, ``None`` on a grid.
+
+    The corners are in finest-cell units, exactly as ``Octree.leaves`` writes them, and
+    the rows are in the mesh's own leaf order - the order every per-leaf field is in.
+    """
+    tree = getattr(mesh, "tree", None)
+    if tree is None:
+        return None
+    return np.array([[leaf.level, leaf.x, leaf.y, leaf.z] for leaf in tree.leaves],
+                    dtype=int)
+
+
+def _cell_sizes(mesh: Mesh3D | AdaptiveMesh) -> np.ndarray:
+    """Per-cell edge length ``V**(1/3)`` [m], on either mesh.
+
+    One rule for both: a structured cell's edge is what ``dx`` says and a leaf is a cube,
+    so the cube root of the volume is the same number on either and neither road has to
+    be told which mesh it is holding.
+    """
+    return np.cbrt(np.asarray(mesh.V, dtype=float))
+
+
+def geometry_hash(mesh: Mesh3D | AdaptiveMesh,
+                  geometry_params: dict[str, object] | None = None) -> str:
     """Content hash of everything that changes the physics of a stored field.
 
     Unlike the old ``(shape, sum of material ids)`` digest, this also covers the
     domain size, the cell spacing, the per-material cell counts and the geometry
     parameters, so moving a heater or changing a material is detected.  Parameter
     values may be numbers or strings (material names).
+
+    The geometry itself is described in the vocabulary the mesh has: a structured mesh by
+    its shape and its three edge lists, a tree by its leaf list and its leaf count.  The
+    two descriptions are different data with the same meaning, which is all a hash needs:
+    any change of the mesh moves the digest and the stored field is refused.
     """
+    leaves = _leaf_list(mesh)
+    if leaves is None:
+        structure: dict[str, object] = {
+            "shape": [mesh.Nx, mesh.Ny, mesh.Nz],
+            "edges": [[round(float(v), 9) for v in edges]
+                      for edges in (mesh.edges_x, mesh.edges_y, mesh.edges_z)],
+        }
+    else:
+        structure = {"cells": int(mesh.n_cells), "leaves": leaves.tolist()}
     payload = {
-        "shape": [mesh.Nx, mesh.Ny, mesh.Nz],
-        "size": [round(float(mesh.Lx), 6), round(float(mesh.Ly), 6), round(float(mesh.Lz), 6)],
-        "edges": [[round(float(v), 9) for v in edges]
-                  for edges in (mesh.edges_x, mesh.edges_y, mesh.edges_z)],
+        "structure": structure,
+        "size": [round(v, 6) for v in _extent(mesh)],
         "counts": {int(k): int(v) for k, v in
                    zip(*np.unique(mesh.material_id, return_counts=True), strict=True)},
         "source_cells": int(np.count_nonzero(mesh.source_mask)),
@@ -95,7 +151,7 @@ class StateManager:
         self.directory = directory
 
     # ------------------------------------------------------------------ save
-    def save_state(self, mesh: Mesh3D, name: str = "state",
+    def save_state(self, mesh: Mesh3D | AdaptiveMesh, name: str = "state",
                    geometry_params: dict[str, float] | None = None,
                    notes: list[str] | None = None, path: str | None = None) -> str:
         if not HAS_H5PY:
@@ -104,6 +160,9 @@ class StateManager:
         target = path or os.path.join(self.directory, f"{name}.h5")
         os.makedirs(os.path.dirname(os.path.abspath(target)) or ".", exist_ok=True)
         digest = geometry_hash(mesh, geometry_params)
+        lx, ly, lz = _extent(mesh)
+        sizes = _cell_sizes(mesh)
+        leaves = _leaf_list(mesh)
         with h5py.File(target, "w") as f:
             f.attrs["version"] = FORMAT_VERSION
             f.attrs["temperature_unit"] = TEMPERATURE_UNIT
@@ -115,11 +174,15 @@ class StateManager:
             f.create_dataset("T", data=mesh.T, compression="gzip")
             f.create_dataset("Q_source", data=mesh.Q_source, compression="gzip")
             f.create_dataset("grid", data=np.array(
-                [mesh.Lx, mesh.Ly, mesh.Lz,
-                 float(mesh.dx.min()), float(mesh.dx.max())], dtype=float))
-            for axis, edges in zip("xyz", (mesh.edges_x, mesh.edges_y, mesh.edges_z),
-                                   strict=True):
-                f.create_dataset(f"edges_{axis}", data=edges, compression="gzip")
+                [lx, ly, lz,
+                 float(sizes.min()), float(sizes.max())], dtype=float))
+            if leaves is not None:
+                # the geometry of a tree *is* its leaf list: there are no edges to store
+                f.create_dataset("leaves", data=leaves, compression="gzip")
+            else:
+                for axis, edges in zip("xyz", (mesh.edges_x, mesh.edges_y, mesh.edges_z),
+                                       strict=True):
+                    f.create_dataset(f"edges_{axis}", data=edges, compression="gzip")
             f.create_dataset("face_bc", data=np.array(
                 [f"{k}:{mesh.face_bc[k].kind.name}" for k in mesh.face_bc], dtype=h5py.string_dtype()))
         return target
@@ -140,6 +203,8 @@ class StateManager:
                 grid = np.asarray(f["grid"][:], dtype=float) if "grid" in f else np.zeros(4)
                 edges = {axis: np.asarray(f[f"edges_{axis}"][:], dtype=float)
                          for axis in "xyz" if f"edges_{axis}" in f}
+                leaves = (np.asarray(f["leaves"][:], dtype=int)
+                          if "leaves" in f else None)
                 face_bc = {}
                 if "face_bc" in f:
                     for raw in f["face_bc"][:]:
@@ -151,7 +216,7 @@ class StateManager:
                     created=float(f.attrs.get("created", 0.0)),
                     grid={"Lx": grid[0], "Ly": grid[1], "Lz": grid[2], "spacing": grid[3],
                           "cell_size_max": grid[4] if grid.size > 4 else grid[3],
-                          "edges": edges},
+                          "edges": edges, "leaves": leaves},
                     geometry_hash=str(f.attrs.get("geometry_hash", "")),
                     geometry_params=json.loads(f.attrs.get("geometry_params", "{}")),
                     temperature_unit=unit,
@@ -171,9 +236,16 @@ class StateManager:
         return state
 
     # -------------------------------------------------------------- checking
-    def verify(self, mesh: Mesh3D, state: SimulationState,
+    def verify(self, mesh: Mesh3D | AdaptiveMesh, state: SimulationState,
                geometry_params: dict[str, float] | None = None) -> list[str]:
-        """Problems that make ``state`` unusable for ``mesh`` ([] if compatible)."""
+        """Problems that make ``state`` unusable for ``mesh`` ([] if compatible).
+
+        The field shape is the cell count of the mesh the file was written on - a 3-D
+        array on a grid, the flat per-leaf vector on a tree - so a file written on one
+        mesh is refused by the other by shape alone, before the hash says which model it
+        came from.  The hash then covers the mesh *geometry*, which on a tree is the leaf
+        list: a stored field is applied to the tree that produced it, or to nothing.
+        """
         problems = []
         if state.T is None:
             problems.append("state has no temperature field")
@@ -186,7 +258,7 @@ class StateManager:
             problems.append("material map differs from the current geometry")
         return problems
 
-    def apply(self, mesh: Mesh3D, state: SimulationState,
+    def apply(self, mesh: Mesh3D | AdaptiveMesh, state: SimulationState,
               geometry_params: dict[str, float] | None = None) -> list[str]:
         """Restore the field into ``mesh``; raises :class:`StateError` if invalid."""
         problems = self.verify(mesh, state, geometry_params)

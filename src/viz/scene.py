@@ -2,15 +2,24 @@
 
 The GUI and any script build their scene from the same :func:`to_image_data`,
 so a script and the interactive view can never disagree on orientation, units or
-colour mapping.
+colour mapping.  Either mesh renders: a structured grid becomes the ``ImageData`` or
+``RectilinearGrid`` it always was, a tree becomes an ``UnstructuredGrid`` of its leaves,
+and the report vocabulary a tree cannot answer (``grid_summary``, ``size_label``,
+``Nx x Ny x Nz``) is replaced here, once, by :func:`grid_lines` - the presentation side
+of the contract that ``src/core/mesh_api.py`` deliberately leaves out.
 """
 from __future__ import annotations
 
+import os
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..core.geometry import HeaterPattern
 from ..core.mesh import MaterialID, Mesh3D
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 MATERIAL_NAMES: dict[int, str] = {
     int(MaterialID.AIR): "Air",
@@ -40,6 +49,40 @@ FIELD_UNITS = {"Temperature": "°C", "Sources": "W/m³", "Conductivity": "W/(m·
 
 AXIS_INDEX = {"x": (0, (1.0, 0.0, 0.0)), "y": (1, (0.0, 1.0, 0.0)), "z": (2, (0.0, 0.0, 1.0))}
 
+#: the extension PyVista picks the writer from, per grid type it builds here
+GRID_SUFFIX = {"ImageData": ".vti", "RectilinearGrid": ".vtr", "UnstructuredGrid": ".vtu"}
+
+
+def domain_extent(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
+    """Edge lengths of the domain [m], on either mesh.
+
+    A structured mesh has three of them; a tree spans a cube whose edge is ``box_size``
+    (``physical_size`` times the finest cells a side), which is the ``Lx = Ly = Lz`` the
+    view and the clip plane are written against.
+    """
+    box = getattr(mesh, "box_size", None)
+    if box is not None:
+        return (float(box),) * 3
+    return (float(mesh.Lx), float(mesh.Ly), float(mesh.Lz))
+
+
+def grid_lines(mesh: Mesh3D | AdaptiveMesh) -> list[str]:
+    """The mesh block of the reports: one line per fact, in the mesh's own vocabulary.
+
+    A structured mesh answers with the numbers it always reported (cells per axis, the
+    realised cell size, the box); a tree answers with what it has instead - its leaves,
+    its level histogram and its leaf edges, which is ``AdaptiveMesh.summary``.  The
+    report vocabulary is deliberately not part of ``MeshAPI``: the two roads differ here
+    and the difference is stated, not hidden behind a grid that pretends to be uniform.
+    """
+    lx, ly, lz = domain_extent(mesh)
+    report = getattr(mesh, "summary", None)
+    if report is not None:                       # a tree reports itself
+        return [report(), f"domain      {lx:.3f} x {ly:.3f} x {lz:.3f} m"]
+    return [f"grid        {mesh.Nx} x {mesh.Ny} x {mesh.Nz} = {mesh.N_total:,} cells",
+            f"cell size   {mesh.size_label()}",
+            f"domain      {lx:.3f} x {ly:.3f} x {lz:.3f} m"]
+
 
 def material_cmap() -> list:
     """Material colours as hex strings.
@@ -52,22 +95,22 @@ def material_cmap() -> list:
             for index in sorted(MATERIAL_COLORS)]
 
 
-def clip_grid(mesh: Mesh3D, field: str, axis: str = "z", fraction: float = 0.5):
+def clip_grid(mesh: Mesh3D | AdaptiveMesh, field: str, axis: str = "z", fraction: float = 0.5):
     """Grid of ``field`` clipped at ``fraction`` of ``axis`` (or unclipped)."""
     grid = to_image_data(mesh, field)
     if axis is None:
         return grid
     index, normal = AXIS_INDEX[axis]
-    length = (mesh.Lx, mesh.Ly, mesh.Lz)[index]
+    length = domain_extent(mesh)[index]
     position = min(max(fraction, 0.02), 0.98) * length
     origin = [0.0, 0.0, 0.0]
     origin[index] = position
     return grid.clip(normal=normal, origin=origin, invert=False)
 
 
-def add_field(plotter, mesh: Mesh3D, field: str = "Temperature", cmap: str = "coolwarm",
-              opacity: float = 0.8, axis: str = None, fraction: float = 0.5,
-              show_colorbar: bool = True):
+def add_field(plotter, mesh: Mesh3D | AdaptiveMesh, field: str = "Temperature",
+              cmap: str = "coolwarm", opacity: float = 0.8, axis: str = None,
+              fraction: float = 0.5, show_colorbar: bool = True):
     """Add one scalar field to any PyVista plotter; returns the actor, or ``None``.
 
     ``None`` means the clip plane left nothing to draw (for instance the material
@@ -128,7 +171,7 @@ def _disk(plotter, cx, cy, z0, z1, radius, colour, opacity, clip=None, opacity_s
     plotter.add_mesh(dataset, color=colour, opacity=min(opacity * opacity_scale, 1.0))
 
 
-def add_geometry_preview(plotter, battery, mesh: Mesh3D = None, clip=None,
+def add_geometry_preview(plotter, battery, mesh: Mesh3D | AdaptiveMesh = None, clip=None,
                          opacity_scale: float = 1.0):
     """Schematic view of the configured battery, zone by zone.
 
@@ -184,9 +227,10 @@ def add_geometry_preview(plotter, battery, mesh: Mesh3D = None, clip=None,
     if battery.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
         _add_heater_bank(plotter, battery, cyl, clip, scale)
 
-    bounds = (0, mesh.Lx if mesh else cyl.r_shell * 2 + 1,
-              0, mesh.Ly if mesh else cyl.r_shell * 2 + 1,
-              0, mesh.Lz if mesh else cyl.z_cone_apex + 0.5)
+    lx, ly, lz = domain_extent(mesh) if mesh else (cyl.r_shell * 2 + 1,
+                                                   cyl.r_shell * 2 + 1,
+                                                   cyl.z_cone_apex + 0.5)
+    bounds = (0, lx, 0, ly, 0, lz)
     plotter.add_mesh(pv.Box(bounds=bounds), style="wireframe", color="grey")
     return plotter
 
@@ -226,8 +270,12 @@ def _add_heater_bank(plotter, battery, cyl, clip, scale) -> None:
           min(reach * 1.2, cyl.r_storage * 0.9), steel, 0.6, clip, scale)
 
 
-def field_values(mesh: Mesh3D, field: str) -> np.ndarray:
-    """Cell array (Fortran order) for one of the displayable fields."""
+def field_values(mesh: Mesh3D | AdaptiveMesh, field: str) -> np.ndarray:
+    """Cell array, in the mesh's own cell order, for one of the displayable fields.
+
+    ``Mesh3D`` keeps a 3-D array and a tree a flat one; the caller flattens either with
+    the mesh's own order, which is what every per-cell field of the protocol is in.
+    """
     if field == "Temperature":
         return mesh.T - 273.15            # displayed in degC
     if field == "Material":
@@ -239,16 +287,41 @@ def field_values(mesh: Mesh3D, field: str) -> np.ndarray:
     raise ValueError(f"unknown field {field!r}; expected one of {FIELD_ARRAYS}")
 
 
-def to_image_data(mesh: Mesh3D, field: str = "Temperature"):
-    """Build the PyVista grid of the mesh (cell data in Fortran order).
+def _leaf_grid(mesh: AdaptiveMesh, pv):
+    """``UnstructuredGrid`` with one hexahedron per leaf, in leaf order.
 
-    A graded mesh becomes a ``RectilinearGrid`` carrying the per-axis edges; a
+    A leaf is a cube, so its eight corners come from its centre and its volume, and the
+    cell order is the leaf order the per-leaf fields are in: the array handed to VTK is
+    the array the solver wrote, cell for cell.  The corners follow the VTK hexahedron
+    order (the lower face counter-clockwise seen from above, then the upper one).
+    """
+    centres = np.asarray(mesh.centres(), dtype=float)
+    half = np.cbrt(np.asarray(mesh.V, dtype=float)) / 2.0
+    corners = np.array([[-1.0, -1.0, -1.0], [1.0, -1.0, -1.0],
+                        [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
+                        [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0],
+                        [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]])
+    points = (centres[:, None, :] + half[:, None, None] * corners[None, :, :]).reshape(-1, 3)
+    order = np.arange(8 * centres.shape[0], dtype=np.int64).reshape(-1, 8)
+    cells = np.hstack([np.full((centres.shape[0], 1), 8, dtype=np.int64), order]).ravel()
+    types = np.full(centres.shape[0], int(pv.CellType.HEXAHEDRON), dtype=np.uint8)
+    return pv.UnstructuredGrid(cells, types, points)
+
+
+def to_image_data(mesh: Mesh3D | AdaptiveMesh, field: str = "Temperature"):
+    """Build the PyVista grid of the mesh (cell data in the mesh's own cell order).
+
+    A graded mesh becomes a ``RectilinearGrid`` carrying the per-axis edges and a
     uniform mesh stays an ``ImageData`` so the exported file keeps its ``.vti``
-    extension and the two grids describe the same geometry.
+    extension; a tree has no axes to describe it, so it becomes an ``UnstructuredGrid``
+    of its leaves - the leaves *are* the cells, and the step between two levels is drawn
+    as the staircase it is, face against face, never interpolated.
     """
     import pyvista as pv
 
-    if mesh.uniform:
+    if hasattr(mesh, "faces"):                    # a tree: one hexahedron per leaf
+        grid = _leaf_grid(mesh, pv)
+    elif mesh.uniform:
         grid = pv.ImageData(dimensions=(mesh.Nx + 1, mesh.Ny + 1, mesh.Nz + 1),
                             spacing=(float(mesh.dx[0]), float(mesh.dy[0]),
                                      float(mesh.dz[0])), origin=(0.0, 0.0, 0.0))
@@ -258,25 +331,40 @@ def to_image_data(mesh: Mesh3D, field: str = "Temperature"):
     return grid
 
 
-def color_limits(mesh: Mesh3D, field: str = "Temperature") -> tuple[float, float]:
+def color_limits(mesh: Mesh3D | AdaptiveMesh, field: str = "Temperature") -> tuple[float, float]:
     values = field_values(mesh, field)
     low, high = float(np.min(values)), float(np.max(values))
     return (low, high) if high > low else (low, low + 1.0)
 
 
-def cell_centers(mesh: Mesh3D) -> np.ndarray:
+def cell_centers(mesh: Mesh3D | AdaptiveMesh) -> np.ndarray:
     """(N, 3) cell centres in the same order as the flattened fields."""
+    centres = getattr(mesh, "centres", None)
+    if centres is not None:                       # a tree knows where its leaves are
+        return np.asarray(centres(), dtype=float)
     ii, jj, kk = np.meshgrid(mesh.x, mesh.y, mesh.z, indexing="ij")
     return np.column_stack([ii.ravel(order="F"), jj.ravel(order="F"),
                             kk.ravel(order="F")])
 
 
-def export_vtk(mesh: Mesh3D, path: str, field: str = "Temperature") -> str:
-    to_image_data(mesh, field).save(path)
+def export_vtk(mesh: Mesh3D | AdaptiveMesh, path: str, field: str = "Temperature") -> str:
+    """Write the grid of ``mesh``; returns the file that was written.
+
+    PyVista picks the writer from the extension and a grid type has exactly one it can
+    be read back from (``.vti``, ``.vtr``, ``.vtu``), so the extension follows the grid
+    the mesh produces rather than the file dialog: a tree writes an ``.vtu`` even when
+    the caller asked for ``.vti``, instead of failing at the end of a save the user
+    asked for.
+    """
+    grid = to_image_data(mesh, field)
+    suffix = GRID_SUFFIX[type(grid).__name__]
+    if not path.lower().endswith(suffix):
+        path = os.path.splitext(path)[0] + suffix
+    grid.save(path)
     return path
 
 
-def export_csv(path: str, results, mesh: Mesh3D = None) -> str:
+def export_csv(path: str, results, mesh: Mesh3D | AdaptiveMesh = None) -> str:
     """Write either a transient time series or the current mesh fields."""
     if mesh is not None and not hasattr(results, "to_arrays"):
         rows = np.column_stack([mesh.T.ravel(order="F"),

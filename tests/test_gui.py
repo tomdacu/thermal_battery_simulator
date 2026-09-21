@@ -122,3 +122,91 @@ def test_invalid_geometry_is_refused_without_clipping(window):
     window.geometry_panel.domain_lz.setValue(5.6)
     battery = window._battery_from_panels()
     assert battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=5.6, spacing=0.5)) == []
+
+
+def test_the_window_solves_a_steady_case_on_a_tree(window):
+    """The Mesh tab's adaptive mode, end to end through the controller.
+
+    The whole GUI road on a tree, because none of it may assume a grid of cells per axis:
+    the factory of the Mesh tab builds the octree of the same bands, the window paints the
+    battery on it, the controller's worker solves it in the background, and the results
+    panel reports it.  The budget is the smallest the panel offers, so the tree is the
+    coarsest one the GUI can build.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    from src.core.adaptive_mesh import AdaptiveMesh
+
+    panel = window.geometry_panel
+    panel.refined.setChecked(True)
+    panel.adaptive.setChecked(True)
+    panel.max_cells.setValue(10_000)
+    try:
+        window.build_mesh()
+        mesh = window.mesh
+        assert isinstance(mesh, AdaptiveMesh)
+        assert mesh.source_mask.any()
+        assert mesh.T.min() > 100.0                      # Kelvin, not Celsius
+        assert "leaves" in panel.mesh_info.text()
+
+        config = window._run_config()
+        config.analysis = "steady"
+        window.controller.start(config, mesh)
+        assert window.controller.wait(600_000), "the steady run did not finish"
+        QApplication.processEvents()                     # deliver the queued finish
+
+        stats = window.results.stats_text.toPlainText()
+        energy = window.results.energy_text.toPlainText()
+        assert "Temperature" in stats and "degC" in stats
+        assert "leaves" in stats and "domain" in stats
+        assert "losses (envelope)" in energy and "imbalance" in energy
+    finally:
+        panel.adaptive.setChecked(False)
+        panel.refined.setChecked(False)
+        panel.max_cells.setValue(400_000)
+
+
+def test_the_automatic_search_refines_a_tree(window):
+    """The search on the adaptive mode builds and refines trees, and adopts the plan.
+
+    The Mesh tab hands the search an :class:`AdaptivePlan` when it builds a tree (the same
+    bands as boxes of an octree), and the controller's factory has to build the mesh the
+    request describes - a tree, refined one round per level - instead of a ``Mesh3D`` from
+    a grid spec.  The plan here is deliberately coarse and well inside the budget, so the
+    search refines it in the time a test can afford; it is handed over as the mesh request
+    of the run, which is where the window puts the plan when the tab is adaptive.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    from src.analysis.convergence import AdaptivePlan
+    from src.analysis.mesh_plan import refinement_bands
+    from src.core.adaptive_mesh import AdaptiveMesh
+
+    panel = window.geometry_panel
+    lx, ly, lz, _ = panel.domain()
+    plan = AdaptivePlan(n_finest=16, physical_size=0.375,
+                        bands=refinement_bands(panel.grid_spec(), (lx, ly, lz))).scaled(6.0)
+    panel.refined.setChecked(True)
+    panel.adaptive.setChecked(True)
+    try:
+        assert isinstance(window._run_config().mesh_spec, AdaptivePlan)
+        window.battery = window._battery_from_panels()
+        config = window._run_config()
+        config.analysis = "automesh"
+        config.mesh_spec = plan
+        config.convergence = {"delta_temperature": 1e6, "delta_power": 1.0,
+                              "max_levels": 4, "refine": 0.5, "probe_levels": 2,
+                              "max_cells": 10_000}
+        window.controller.start(config, None)
+        assert window.controller.wait(600_000), "the search did not finish"
+        QApplication.processEvents()
+
+        assert "converged" in panel.auto_result.text()
+        assert isinstance(panel.auto_spec(), AdaptivePlan)
+        window.build_mesh()
+        assert isinstance(window.mesh, AdaptiveMesh)
+        assert window.mesh.n_cells > 512, "the rounds must have refined the plan"
+    finally:
+        panel.set_auto_spec(None)
+        panel.adaptive.setChecked(False)
+        panel.refined.setChecked(False)

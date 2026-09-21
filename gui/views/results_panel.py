@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QFileDialog, QTabWidget, QTextEdit, QVBoxLayout, QWi
 from src.analysis.balance import compute_balance
 from src.constants import T_AMBIENT_DEFAULT
 from src.core.materials import MaterialManager
-from src.viz.scene import MATERIAL_NAMES
+from src.viz.scene import MATERIAL_NAMES, grid_lines
 
 from ..units import k_to_c
 from ..widgets import button
@@ -63,9 +63,7 @@ class ResultsPanel(QWidget):
             ]
         lines += [
             "",
-            f"grid        {mesh.Nx} x {mesh.Ny} x {mesh.Nz} = {mesh.N_total:,} cells",
-            f"cell size   {mesh.size_label()}",
-            f"domain      {mesh.Lx:.3f} x {mesh.Ly:.3f} x {mesh.Lz:.3f} m",
+            *grid_lines(mesh),
         ]
         self.stats_text.setPlainText("\n".join(lines))
 
@@ -122,7 +120,7 @@ class ResultsPanel(QWidget):
         manager = MaterialManager()
         counts = dict(zip(*[x.tolist() for x in np.unique(mesh.material_id, return_counts=True)],
          strict=True))
-        total = max(mesh.N_total, 1)
+        total = max(sum(counts.values()), 1)
         lines = ["=== Material map ==="]
         for material_id, count in sorted(counts.items()):
             name = MATERIAL_NAMES.get(int(material_id), f"id {material_id}")

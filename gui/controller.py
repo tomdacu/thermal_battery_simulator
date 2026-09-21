@@ -12,10 +12,11 @@ from collections.abc import Callable
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from src.analysis.balance import compute_balance
-from src.analysis.convergence import ConvergenceTarget, find_mesh
+from src.analysis.convergence import AdaptivePlan, ConvergenceTarget, find_mesh
 from src.analysis.mesh_plan import describe as describe_plan, plan_regions
 from src.core.materials import MaterialManager
 from src.analysis.losses import LossesConfig, solve_losses
+from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import BatteryGeometry
 from src.core.mesh import Mesh3D
 from src.core.pipe_network import PipeNetwork
@@ -101,7 +102,7 @@ class SimulationController(QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._job: SimulationJob | None = None
-        self._mesh: Mesh3D | None = None
+        self._mesh: Mesh3D | AdaptiveMesh | None = None
         self._config: RunConfig | None = None
 
     @property
@@ -109,7 +110,7 @@ class SimulationController(QObject):
         return self._job is not None and self._job.isRunning()
 
     # ------------------------------------------------------------------ api
-    def start(self, config: RunConfig, mesh: Mesh3D) -> None:
+    def start(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh | None) -> None:
         if self.running:
             self.failed.emit("a simulation is already running")
             return
@@ -135,7 +136,7 @@ class SimulationController(QObject):
         return bool(self._job.wait(timeout_ms))
 
     # --------------------------------------------------------------- engine
-    def _make_work(self, config: RunConfig, mesh: Mesh3D) -> Callable:
+    def _make_work(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh) -> Callable:
         solver_config = config.solver_config()
 
         def steady(progress, should_stop):
@@ -168,7 +169,19 @@ class SimulationController(QObject):
                 self.log.emit(f"[plan] {line}")
 
             def build(spec_level):
-                mesh = Mesh3D(Lx=lx, Ly=ly, Lz=lz, grid=spec_level)
+                """One search level, on the mesh its request describes.
+
+                The panel hands the search an ``AdaptivePlan`` when the Mesh tab builds a
+                tree and a ``GridSpec`` when it builds a graded grid: the same physical
+                targets in the vocabulary of their own mesh, so the search refines - and
+                the chosen level rebuilds - the mesh mode that is selected.
+                """
+                if isinstance(spec_level, AdaptivePlan):
+                    mesh = AdaptiveMesh.from_bands(spec_level.n_finest,
+                                                   spec_level.physical_size,
+                                                   spec_level.bands, spec_level.base_level)
+                else:
+                    mesh = Mesh3D(Lx=lx, Ly=ly, Lz=lz, grid=spec_level)
                 config.battery.apply_to_mesh(mesh)
                 return mesh
 
@@ -203,7 +216,7 @@ class SimulationController(QObject):
         return {"steady": steady, "losses": losses, "transient": transient,
                 "automesh": automesh}[config.analysis]
 
-    def _fluid_loop(self, config: RunConfig, mesh: Mesh3D):
+    def _fluid_loop(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh):
         """The gas circuit of a network the Pipes tab built, or None.
 
         With a network the gas *is* the heat transfer path: the loop marches the pipes

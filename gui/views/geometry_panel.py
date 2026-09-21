@@ -64,6 +64,8 @@ class GeometryPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         self._auto_spec: GridSpec | None = None
+        #: the tree plan the search adopted, when it ran on a tree (None: the a priori one)
+        self._auto_plan: AdaptivePlan | None = None
         self._plan_targets: dict[str, float] = {}
         self._pipe_network = None
         #: the tree the last build produced, for the Mesh tab's summary
@@ -540,7 +542,13 @@ class GeometryPanel(QWidget):
         and the two roads start from it.  The box and its resolution come from the cell
         budget (:func:`src.analysis.mesh_plan.tree_resolution`), which is also the floor
         under every leaf the search then refines.
+
+        When the search ran on a tree its own plan is returned unchanged: a tree has no
+        per-axis spec to re-derive the bands from, and the boxes the search measured are
+        the ones that converged.
         """
+        if self._auto_plan is not None:
+            return self._auto_plan
         lx, ly, lz = (self.domain_lx.value(), self.domain_ly.value(),
                       self.domain_lz.value())
         spec = self.grid_spec()
@@ -641,13 +649,26 @@ class GeometryPanel(QWidget):
         target = self._plan_targets.get(name)
         return manual if target is None else min(manual, target)
 
-    def auto_spec(self) -> GridSpec | None:
-        """The spec adopted by the search (None until it converges)."""
-        return self._auto_spec
+    def auto_spec(self) -> GridSpec | AdaptivePlan | None:
+        """The request the search adopted (None until it converges).
 
-    def set_auto_spec(self, spec: GridSpec | None, message: str = "") -> None:
-        """Adopt the mesh chosen by the search (None clears it)."""
-        self._auto_spec = spec
+        A graded search answers with a :class:`GridSpec`, a tree search with an
+        :class:`AdaptivePlan`: both are the same physical targets in the vocabulary of
+        the mesh that was measured.
+        """
+        return self._auto_plan if self._auto_plan is not None else self._auto_spec
+
+    def set_auto_spec(self, spec: GridSpec | AdaptivePlan | None, message: str = "") -> None:
+        """Adopt the mesh chosen by the search (None clears it).
+
+        The plan is kept *as the search left it*: re-deriving it from the spec would put
+        the box and the bands back through the cell budget, and the tree would not be the
+        one whose answer converged.
+        """
+        if isinstance(spec, AdaptivePlan):
+            self._auto_plan, self._auto_spec = spec, None
+        else:
+            self._auto_plan, self._auto_spec = None, spec
         if spec is not None:
             self.refined.setChecked(True)
         self.auto_result.setText(message or ("adopted" if spec else "not run yet"))

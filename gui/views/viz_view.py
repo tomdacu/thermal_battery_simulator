@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from src.viz.scene import (FIELD_ARRAYS, add_field, add_geometry_preview,
-                           add_material_legend)
+                           add_material_legend, domain_extent)
 
 from ..widgets import button, combo
 
@@ -126,9 +126,10 @@ class VizView(QWidget):
         opacity = self.opacity_slider.value() / 100.0
         self.plotter.clear()
         if self._mode == "geometry" and self._battery is not None:
-            length = (mesh.Lx if mesh else self._battery.cylinder.r_shell * 2 + 1,
-                      mesh.Ly if mesh else self._battery.cylinder.r_shell * 2 + 1,
-                      mesh.Lz if mesh else self._battery.cylinder.z_cone_apex + 0.5)
+            length = (domain_extent(mesh) if mesh else
+                      (self._battery.cylinder.r_shell * 2 + 1,
+                       self._battery.cylinder.r_shell * 2 + 1,
+                       self._battery.cylinder.z_cone_apex + 0.5))
             position = fraction * length[_AXES[axis][0]]
             add_geometry_preview(self.plotter, self._battery, mesh,
                                  clip=(axis, position),
@@ -147,7 +148,7 @@ class VizView(QWidget):
             if actor is None:
                 self.plotter.add_text(f"nothing to show for {field} at this cut",
                                       position="upper_left", font_size=9)
-            length = (mesh.Lx, mesh.Ly, mesh.Lz)[_AXES[axis][0]]
+            length = domain_extent(mesh)[_AXES[axis][0]]
             self.plotter.add_text(f"{field}  |  cut {axis} at "
                                   f"{fraction * length:.2f} m",
                                   position="upper_left", font_size=10)
@@ -160,7 +161,7 @@ class VizView(QWidget):
     def _domain_length(self, axis: str) -> float:
         mesh = self._mesh
         if mesh is not None:
-            return (mesh.Lx, mesh.Ly, mesh.Lz)[_AXES[axis][0]]
+            return domain_extent(mesh)[_AXES[axis][0]]
         if self._battery is not None:
             cyl = self._battery.cylinder
             return (cyl.r_shell * 2 + 1, cyl.r_shell * 2 + 1, cyl.z_cone_apex + 0.5

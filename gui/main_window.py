@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
@@ -26,7 +27,7 @@ from src.core.materials import MaterialManager
 from src.core.mesh import Mesh3D
 from src.core.pipe_network import build_pipe_network
 from src.io.state import StateError, StateManager
-from src.viz.scene import export_csv, export_vtk
+from src.viz.scene import export_csv, export_vtk, grid_lines
 
 from .assets import window_icon_path
 from .controller import RunConfig, SimulationController
@@ -37,6 +38,11 @@ from .views.materials_panel import MaterialsPanel
 from .views.results_panel import ResultsPanel
 from .views.solver_panel import SolverPanel
 from .views.viz_view import VizView
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from src.analysis.convergence import AdaptivePlan
+    from src.core.adaptive_mesh import AdaptiveMesh
+    from src.core.refinement import GridSpec
 
 HELP_TEXT = """
 <b>Workflow</b>
@@ -63,7 +69,7 @@ class ThermalBatteryGUI(QMainWindow):
         icon = window_icon_path()
         if icon is not None:
             self.setWindowIcon(QIcon(str(icon)))
-        self.mesh: Mesh3D = None
+        self.mesh: Mesh3D | AdaptiveMesh = None
         self._auto_tried = False          # the search runs once per configuration
         self._build_after_search = False
         self.battery = BatteryGeometry()
@@ -192,8 +198,7 @@ class ThermalBatteryGUI(QMainWindow):
             QMessageBox.critical(self, "Geometry error", str(exc))
             return
         self.battery, self.mesh = battery, mesh
-        self.log(f"[mesh] {mesh.Nx}x{mesh.Ny}x{mesh.Nz} = {mesh.N_total:,} cells "
-                 f"({mesh.size_label()})")
+        self.log("[mesh] " + "; ".join(line.strip() for line in grid_lines(mesh)))
         for note in report.notes:
             self.log(f"[mesh] {note}")
         self.log(f"[mesh] {report.n_source_cells} source cells, "
@@ -310,13 +315,26 @@ class ThermalBatteryGUI(QMainWindow):
         config.analysis = "automesh"
         self.controller.start(config, None)
 
+    def _mesh_request(self) -> GridSpec | AdaptivePlan | None:
+        """The refinement request the automatic search refines, or ``None``.
+
+        The two roads start from the same physical targets in the vocabulary of their own
+        mesh (``docs/16`` step 4): a :class:`~src.analysis.convergence.AdaptivePlan` builds
+        a tree, a ``GridSpec`` a graded grid.  The window hands the search the one the
+        Mesh tab selected, so the controller never has to guess the mesh mode.
+        """
+        panel = self.geometry_panel
+        if not panel.refined.isChecked():
+            return None
+        return (panel.adaptive_plan() if panel.mesh_kind() == "adaptive"
+                else panel.grid_spec())
+
     def _run_config(self) -> RunConfig:
         return RunConfig(
             analysis=self.analysis_panel.analysis_type(),
             battery=self.battery,
             domain=self.geometry_panel.domain(),
-            mesh_spec=self.geometry_panel.grid_spec()
-            if self.geometry_panel.refined.isChecked() else None,
+            mesh_spec=self._mesh_request(),
             convergence=self.geometry_panel.auto_mesh_settings(),
             n_threads=self.solver_panel.threads(),
             losses={"t_target": self.analysis_panel.losses_target_kelvin(),
@@ -498,10 +516,10 @@ class ThermalBatteryGUI(QMainWindow):
         if self.mesh is None:
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export VTK", "results/field.vti",
-                                              "VTK (*.vti)")
+                                              "VTK (*.vti *.vtu *.vtr)")
         if path:
-            export_vtk(self.mesh, path)
-            self.log(f"[export] {path}")
+            written = export_vtk(self.mesh, path)
+            self.log(f"[export] {written}")
 
     @safe_slot
     def export_csv_field(self) -> None:

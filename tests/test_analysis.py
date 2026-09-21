@@ -8,10 +8,17 @@ from src.analysis.balance import compute_balance, storage_capacity, thermal_auto
 from src.analysis.fluxes import domain_fluxes, envelope_fluxes, stored_energy
 from src.analysis.losses import LossesConfig, solve_losses
 from src.constants import T_AMBIENT_DEFAULT
+from src.core.adaptive_mesh import AdaptiveMesh, RefinementBand
 from src.core.geometry import create_small_test_geometry
 from src.core.mesh import Mesh3D
 from src.io.state import FORMAT_VERSION, StateError, StateManager, geometry_hash
 from src.solver.steady import SolverConfig, SteadyStateSolver
+
+#: the box the tree fixtures of the suite paint their models in: an 8 m cube whose finest
+#: cell is 0.5 m, i.e. 16 of them a side (``tests/conftest.py``)
+BOX = 8.0
+FINEST = 16
+SPACING = 0.5
 
 
 # ------------------------------------------------------------------- fluxes
@@ -141,3 +148,36 @@ def test_state_upgrades_a_celsius_file(tmp_path):
     assert state.temperature_unit == "K"
     assert state.T.min() == pytest.approx(mesh.T.min(), abs=1e-6)
     assert any("converted" in note for note in state.notes)
+
+
+# ------------------------------------------------------------------ IO (a tree)
+def test_state_round_trip_keeps_a_tree_field_exact(tree_model):
+    """A tree's state is its leaf list: the field comes back leaf by leaf, exactly."""
+    manager = StateManager(directory="results/states")
+    tree_model.T = tree_model.T + np.linspace(0.0, 40.0, tree_model.n_cells)
+    path = manager.save_state(tree_model, name="pytest_state_tree")
+    state = manager.load_state(path)
+    assert state.grid["leaves"] is not None
+    assert len(state.grid["leaves"]) == tree_model.n_cells
+    assert state.T.shape == tree_model.T.shape
+
+    fresh = AdaptiveMesh.uniform(FINEST, SPACING, level=0)
+    create_small_test_geometry().apply_to_mesh(fresh)
+    manager.apply(fresh, state)
+    assert np.array_equal(fresh.T, tree_model.T)
+
+
+def test_state_refuses_a_tree_that_is_not_the_one_it_stored(tree_model):
+    """Refining the model moves the cell count and the leaf list: the state is refused."""
+    manager = StateManager(directory="results/states")
+    path = manager.save_state(tree_model, name="pytest_state_tree_2")
+    state = manager.load_state(path)
+    refined = AdaptiveMesh.uniform(FINEST, SPACING, level=2)      # 2 m leaves to start from
+    create_small_test_geometry().apply_to_mesh(refined)
+    refined.refine_bands((RefinementBand(low=(0.0, 0.0, 0.0),
+                                         high=(BOX, BOX, BOX / 2.0), size=SPACING),))
+    assert refined.n_cells != tree_model.n_cells
+    problems = manager.verify(refined, state)
+    assert any("hash" in problem or "grid" in problem for problem in problems)
+    with pytest.raises(StateError):
+        manager.apply(refined, state)
