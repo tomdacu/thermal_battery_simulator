@@ -176,7 +176,9 @@ def test_the_geometry_fills_the_excluded_mask_and_the_film():
     geometry.apply_environment(mesh)      # opt-in until the flux report knows
 
     assert mesh.excluded.any(), "the air box must be excluded"
-    assert mesh.h_out > 0.0
+    # the film must be a plausible natural-convection coefficient, not a number that
+    # exists only in the code: evaluating it on the cold initial field gave 0.005
+    assert mesh.h_out > 1.0
     assert mesh.t_ambient == pytest.approx(geometry.t_ambient)
     # nothing inside the envelope may be dropped: the sand, the shell and the concrete
     # of the foundation all stay in the problem

@@ -365,6 +365,15 @@ class AdaptiveMesh:
         return self.tree.n_cells
 
     @property
+    def box_size(self) -> float:
+        """Edge of the (cubic) domain [m].
+
+        ``physical_size`` is the edge of one *finest* cell, so the box is ``n_finest``
+        of them: this is the ``Lx = Ly = Lz`` a structured consumer reads.
+        """
+        return float(self.physical_size) * self.tree.n
+
+    @property
     def h_char(self) -> np.ndarray:
         """Characteristic leaf size ``V^(1/3)`` [m], as on :class:`Mesh3D`."""
         return np.cbrt(self.V)
@@ -403,6 +412,33 @@ class AdaptiveMesh:
     def centres(self) -> np.ndarray:
         """``(n_cells, 3)`` leaf centres in physical coordinates [m]."""
         return self.tree.cell_centres() * self.physical_size
+
+    def locate(self, x: float, y: float, z: float) -> int:
+        """Position of the leaf containing ``(x, y, z)``, clamped to the box.
+
+        The tree's ``Mesh3D.find_cell``, and by the same convention: a leaf owns its
+        lower corner and a point on a leaf face belongs to the leaf *above* it, while a
+        point outside the box belongs to the boundary leaf.  A consumer that measures the
+        local resolution at a coordinate therefore gets the same answer from either mesh.
+        The walk is the octree's own (``Octree._locate``, public at step 6 of the
+        migration); the coordinate is converted to the finest-cell index the leaf list is
+        written in (``physical_size`` is the edge of one finest cell).
+        """
+        n = self.tree.n
+        corner = tuple(int(np.clip(np.floor(value / self.physical_size), 0, n - 1))
+                       for value in (x, y, z))
+        position = self.tree._locate(*corner)
+        if position < 0:                                  # cannot happen on a full box
+            raise ValueError(f"no leaf contains ({x}, {y}, {z}) m")
+        return int(position)
+
+    def cell_size_at(self, x: float, y: float, z: float) -> float:
+        """Characteristic size ``V^(1/3)`` of the leaf containing a point [m].
+
+        The counterpart of :meth:`src.core.mesh.Mesh3D.cell_size_at`, which is how a
+        painter measures a zone against the cells that are actually there.
+        """
+        return float(self.h_char[self.locate(x, y, z)])
 
     def faces(self) -> Sequence[FaceRow]:
         """The conservative face list of :class:`MeshAPI`, straight from the octree."""
@@ -660,6 +696,34 @@ class AdaptiveMesh:
             residual=float(np.abs(closure_error).max()) if closure_error.size else 0.0,
             closure=abs(p_source + p_sink - q_fixed - p_film) / scale,
             cells=self.tree.n_cells)
+
+    # ---------------------------------------------------------- validation
+    def validate(self, check_temperature: bool = True) -> None:
+        """Reject non-physical fields before an expensive solve.
+
+        The same contract :meth:`src.core.mesh.Mesh3D.validate` gives a structured mesh,
+        so a painter that ends its work with ``mesh.validate()`` keeps the guarantee while
+        the two meshes coexist.
+        """
+        for name, values in (("k", self.k), ("rho", self.rho), ("cp", self.cp)):
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{name}: non-finite values")
+            if values.min() <= 0:
+                raise ValueError(f"{name}: values must be > 0, min = {values.min():.3g}")
+        if not np.all(np.isfinite(self.Q_source)) or not np.all(np.isfinite(self.Q_sink)):
+            raise ValueError("Q fields: non-finite values")
+        if np.any(self.Q_source < 0):
+            raise ValueError("Q_source must be >= 0 (use Q_sink for extractions)")
+        if np.any(self.Q_sink > 0):
+            raise ValueError("Q_sink must be <= 0")
+        if check_temperature:
+            check_kelvin(self.T, "mesh.T")
+            for face, bc in self.face_bc.items():
+                if bc.kind in (BoundaryType.DIRICHLET, BoundaryType.CONVECTION):
+                    check_kelvin(bc.value, f"face_bc[{face}].value")
+        for face, bc in self.face_bc.items():
+            if bc.kind == BoundaryType.CONVECTION and bc.h < 0:
+                raise ValueError(f"face_bc[{face}].h must be >= 0")
 
     # -------------------------------------------------------------------- info
     def level_histogram(self) -> dict[int, int]:
