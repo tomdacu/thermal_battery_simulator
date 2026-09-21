@@ -261,13 +261,11 @@ def test_transient_stops_cleanly_on_request(adiabatic_box):
 
 
 #: With the environment active the air box is excluded and the film of the outer
-#: surface replaces the domain-face boundary conditions.  Radiation is still applied on
-#: those faces (``face_bc[face].emissivity``), which now carry no flux, so a test that
-#: compares "with and without radiation" would measure nothing.  The radiative share has
-#: to move into the environment film (the linearised ``radiation_h`` already exists in
-#: ``src/core/physics.py``, and ``apply_environment`` would take the switch from the
-#: solver); until then these two tests are skipped with the reason rather than deleted.
-@pytest.mark.skip(reason='radiation must move into the environment film; see the note above')
+#: surface replaces the domain-face boundary conditions: the radiative share of the
+#: shell has to ride on that film, not on the box faces (which carry no flux once
+#: their cells are excluded).  ``apply_environment`` paints the design-point share and
+#: the assembly re-evaluates it on the field it solves, so the two tests below measure
+#: the radiative loss where it physically happens.
 def test_radiation_increases_the_steady_losses(storage_model):
     mesh = storage_model
     plain = SteadyStateSolver(mesh, SolverConfig(method="direct")).solve()
@@ -353,7 +351,6 @@ def test_flow_rate_extraction_removes_heat_when_the_battery_is_hot(storage_model
     _ = tubes
 
 
-@pytest.mark.skip(reason='radiation must move into the environment film; see the note above')
 def test_transient_with_radiation_stays_finite_and_loses_more(storage_model):
     mesh = storage_model
     config = TransientConfig(

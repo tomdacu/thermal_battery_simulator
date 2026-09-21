@@ -1,14 +1,18 @@
-"""Steady-state heat solver.
+"""Steady-state heat solver, on either mesh.
 
 Optional radiation makes the problem non-linear (the linearised coefficient
 depends on the surface temperature); it is solved by a Picard sweep that rebuilds
-the operators until the field stops moving.
+the operators until the field stops moving.  The outer film of an excluded-air
+model is non-linear in the same way, and for the same reason: its radiative share
+is evaluated on the surface temperature the film itself drives, so every sweep
+re-evaluates it and the field and the film converge together.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -16,6 +20,9 @@ from ..core.mesh import Mesh3D
 from ..units import check_kelvin
 from .linear import LinearConfig, PreconditionerCache, set_num_threads, solve_linear
 from .matrix import GridIndex, build_steady_matrix
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 
 @dataclass
@@ -45,17 +52,34 @@ class SolverResult:
 
 
 class SteadyStateSolver:
-    """Solve ``div(k grad T) + Q = 0`` with Robin/Dirichlet/Neumann faces."""
+    """Solve ``div(k grad T) + Q = 0`` with Robin/Dirichlet/Neumann faces.
 
-    def __init__(self, mesh: Mesh3D, config: SolverConfig = None) -> None:
+    Two meshes, one result: a structured :class:`~src.core.mesh.Mesh3D` is assembled by
+    :func:`src.solver.matrix.build_steady_matrix` and handed to the linear layer, while an
+    adaptive mesh assembles and solves itself (:meth:`AdaptiveMesh.solve_steady`) with the
+    same linear layer underneath.  The driver owns what the two have in common: the
+    radiation Picard loop (the radiative coefficient depends on the field it drives, and
+    so does the outer film it joins), the warm start, the progress callback and the
+    :class:`SolverResult` vocabulary - ``T`` is the field flat in the mesh's own cell
+    order, leaves included.
+    """
+
+    def __init__(self, mesh: Mesh3D | AdaptiveMesh, config: SolverConfig = None) -> None:
         self.mesh = mesh
         self.config = config or SolverConfig()
         self.threads = set_num_threads(self.config.n_threads)
-        self.index = GridIndex.from_mesh(mesh)
+        self.adaptive = not isinstance(mesh, Mesh3D)
+        if self.adaptive and not hasattr(mesh, "solve_steady"):
+            raise TypeError(f"unsupported mesh {type(mesh).__name__}: a Mesh3D or an "
+                            f"adaptive mesh is required")
+        self.index = None if self.adaptive else GridIndex.from_mesh(mesh)
         self._cache = PreconditionerCache()
         # per-volume coefficients are symmetric only on a uniform grid: hand the
-        # cell volumes to the iterative solver so it can symmetrise (see solve_linear)
-        self._scale = None if self.mesh.uniform else self.mesh.V.ravel(order="F")
+        # cell volumes to the iterative solver so it can symmetrise (see solve_linear).
+        # A tree does the same inside solve_steady, where its own cell sizes are read.
+        self._scale = None
+        if not self.adaptive and not mesh.uniform:
+            self._scale = mesh.V.ravel(order="F")
         self._x0: np.ndarray | None = None
 
     def solve(self, rebuild: bool = True) -> SolverResult:
@@ -63,23 +87,17 @@ class SteadyStateSolver:
         self.mesh.validate(check_temperature=not self.config.radiation)
         notes = []
         t_start = time.perf_counter()
-        x = self._x0 if self._x0 is not None else np.full(self.mesh.N_total, 293.15)
+        n_cells = self.mesh.n_cells if self.adaptive else self.mesh.N_total
+        x = self._x0 if self._x0 is not None else np.full(n_cells, 293.15)
         residual, iterations = np.inf, 0
         converged = False
 
         for sweep in range(1, self.config.max_picard + 1):
             iterations = sweep
-            a, b = build_steady_matrix(self.mesh, index=self.index,
-                                       radiation=self.config.radiation)
-            result = solve_linear(a, b, self.config, x0=x, cache=self._cache,
-                                  scale=self._scale)
-            notes.extend(n for n in result.notes if n not in notes)
-            x_new = result.T
-            residual = result.residual
-            converged = result.converged
+            x_new, residual, converged = self._sweep(x, notes)
             change = float(np.max(np.abs(x_new - x))) if x_new.size else 0.0
             x = x_new
-            self.mesh.T = self.mesh.unflatten_field(x)
+            self.mesh.T = x if self.adaptive else self.mesh.unflatten_field(x)
             if self.config.progress_callback:
                 self.config.progress_callback(int(100 * sweep / self.config.max_picard),
                                               f"sweep {sweep}, dT={change:.3g} K")
@@ -96,18 +114,31 @@ class SteadyStateSolver:
             stats=self.temperature_stats(x),
         )
 
+    def _sweep(self, x: np.ndarray, notes: list) -> tuple[np.ndarray, float, bool]:
+        """One assembly + linear solve of the current state, on either mesh."""
+        if self.adaptive:
+            step = self.mesh.solve_steady(self.config, x0=x)
+            notes.extend(n for n in step.notes if n not in notes)
+            return np.asarray(step.T, dtype=float), float(step.residual), bool(step.converged)
+        matrix, rhs = build_steady_matrix(self.mesh, index=self.index,
+                                          radiation=self.config.radiation)
+        result = solve_linear(matrix, rhs, self.config, x0=x, cache=self._cache,
+                              scale=self._scale)
+        notes.extend(n for n in result.notes if n not in notes)
+        return result.T, result.residual, result.converged
+
     def temperature_stats(self, T_flat: np.ndarray = None) -> dict[str, float]:
-        field = self.mesh.T if T_flat is None else self.mesh.unflatten_field(T_flat)
+        values = np.asarray(self.mesh.T if T_flat is None else T_flat, dtype=float)
         return {
-            "T_min": float(field.min()),
-            "T_max": float(field.max()),
-            "T_mean": float(field.mean()),
-            "T_median": float(np.median(field)),
+            "T_min": float(values.min()),
+            "T_max": float(values.max()),
+            "T_mean": float(values.mean()),
+            "T_median": float(np.median(values)),
         }
 
 
-def solve_steady_state(mesh: Mesh3D, method: str = "direct", radiation: bool = False,
-                       verbose: bool = False) -> SolverResult:
+def solve_steady_state(mesh: Mesh3D | AdaptiveMesh, method: str = "direct",
+                       radiation: bool = False, verbose: bool = False) -> SolverResult:
     """One-shot convenience wrapper."""
     cfg = SolverConfig(method=method, radiation=radiation, verbose=verbose)
     return SteadyStateSolver(mesh, cfg).solve()

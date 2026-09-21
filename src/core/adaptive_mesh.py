@@ -53,7 +53,7 @@ from scipy import sparse
 from ..constants import (CP_AIR, EPS, K_AIR, RHO_AIR, T_AMBIENT_DEFAULT,
                          T_GROUND_DEFAULT, T_INITIAL_DEFAULT)
 from ..solver.linear import LinearConfig, LinearResult, solve_linear
-from ..solver.matrix import apply_dirichlet
+from ..solver.matrix import apply_dirichlet, environment_film, face_conductance
 from ..solver.octree_solver import OctreeSteadySolver, wall_cells
 from ..units import check_kelvin
 from .mesh import FACES, BoundaryType, FaceBC
@@ -199,6 +199,13 @@ class AdaptiveMesh:
     h_out: float = 0.0
     t_ambient: float = T_AMBIENT_DEFAULT
     h_contact: float = 0.0
+    #: the convection-only part of ``h_out`` and the emissivity of the outer surface, as
+    #: :meth:`~src.core.geometry.BatteryGeometry.apply_environment` paints them.  ``None``
+    #: means no base was recorded and the film the mesh carries is the convective one; the
+    #: assembly re-evaluates the radiative share of the film at the field it solves
+    #: (see :func:`src.solver.matrix.environment_film`)
+    h_out_conv: float | None = None
+    environment_emissivity: float = 0.0
     face_bc: dict[str, FaceBC] = field(init=False, repr=False, default_factory=dict)
 
     # derived, rebuilt whenever the tree changes
@@ -384,14 +391,16 @@ class AdaptiveMesh:
         The leaves a ``face_bc`` of kind DIRICHLET drives (``wall_cells`` of
         :mod:`src.solver.octree_solver`) plus the excluded leaves held at
         :attr:`t_ambient` - the same set and the same values ``src/solver/matrix.py``
-        builds for a structured mesh.
+        builds for a structured mesh, which applies the ambient *after* the faces: an
+        excluded leaf carries no physics, so where the two rules meet the placeholder
+        wins and both meshes hold the same field.
         """
-        fixed: dict[int, float] = {int(position): float(self.t_ambient)
-                                   for position in np.flatnonzero(self.excluded)}
-        for face, bc in self.face_bc.items():
-            if bc.kind == BoundaryType.DIRICHLET:
-                for position in self.wall_indices(face):
-                    fixed[int(position)] = float(bc.value)
+        fixed = {int(position): float(bc.value)
+                 for face, bc in self.face_bc.items()
+                 if bc.kind == BoundaryType.DIRICHLET
+                 for position in self.wall_indices(face)}
+        fixed.update({int(position): float(self.t_ambient)
+                      for position in np.flatnonzero(self.excluded)})
         return fixed
 
     def wall_indices(self, face: str) -> np.ndarray:
@@ -445,6 +454,37 @@ class AdaptiveMesh:
         return self.tree.faces()
 
     # -------------------------------------------------------------------- films
+    def _environment_surface(self, faces: _FaceTable | None = None
+                             ) -> tuple[np.ndarray, np.ndarray]:
+        """``(positions, areas)`` of the leaves the environment film acts on.
+
+        The active side of every active/excluded face: a leaf facing two excluded
+        neighbours appears twice, once per face and with that face's area, which is
+        exactly how the film is applied and how the flux is reported.
+        """
+        table = self._face_table() if faces is None else faces
+        active_i = ~self.excluded[table.i] & self.excluded[table.j]
+        active_j = ~self.excluded[table.j] & self.excluded[table.i]
+        return (np.concatenate((table.i[active_i], table.j[active_j])),
+                np.concatenate((table.area[active_i], table.area[active_j])))
+
+    def outer_film(self, faces: _FaceTable | None = None,
+                   radiation: bool = False) -> float:
+        """The film coefficient [W/(m^2 K)] the environment film carries right now.
+
+        Zero when the mesh has no environment film (no excluded leaf, or ``h_out``
+        zero).  Otherwise it is :func:`src.solver.matrix.environment_film` evaluated at
+        the surface temperature of the current field, area-weighted over
+        :meth:`_environment_surface` - the fixed point of the film with its own driving
+        temperature, which the assembly re-evaluates once per build.
+        """
+        if self.h_out <= 0.0 or not self.excluded.any():
+            return 0.0
+        positions, areas = self._environment_surface(faces)
+        if positions.size == 0:
+            return 0.0
+        return environment_film(self, positions, areas, radiation)
+
     def _films(self, faces: _FaceTable | None = None
                ) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
         """``(name, positions, coefficient per volume [1/s], reference temperature [K])``.
@@ -455,6 +495,11 @@ class AdaptiveMesh:
         active/excluded face, and a tube cell uses ``bc_h / V^(1/3)``.  A box face takes
         its own fluid temperature, the environment film the ambient, a tube cell the fluid
         temperature of its own ``bc_T_inf``.
+
+        The environment coefficient is ``h_out`` - the film the last assembly applied,
+        radiative share included when the solve had radiation on (:meth:`outer_film`
+        re-evaluates it there) - so the report and the operator it describes carry the
+        same number and the per-leaf closure stays at round-off.
         """
         out: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
         for face, bc in self.face_bc.items():
@@ -469,11 +514,8 @@ class AdaptiveMesh:
 
         if self.h_out > 0.0 and self.excluded.any():
             table = self._face_table() if faces is None else faces
-            active_i = ~self.excluded[table.i] & self.excluded[table.j]
-            active_j = ~self.excluded[table.j] & self.excluded[table.i]
-            positions = np.concatenate((table.i[active_i], table.j[active_j]))
+            positions, areas = self._environment_surface(table)
             if positions.size:
-                areas = np.concatenate((table.area[active_i], table.area[active_j]))
                 out.append(("environment", positions,
                             self.h_out * areas / self.V[positions],
                             np.full(positions.size, float(self.t_ambient))))
@@ -490,30 +532,28 @@ class AdaptiveMesh:
         """The face list with the conductance the physics asks for, per entry.
 
         ``g_base`` is what :meth:`Octree.diffusion_matrix` assembles (the same harmonic
-        mean, the same products, the same order); ``g`` is what the physics asks for: a
-        face touching an excluded leaf carries no conduction at all (the structured
-        assembly zeroes it, ``src/solver/matrix.py:58``), and an interface between two
-        materials carries the contact resistance in series with the two half leaves
-        (``src/solver/matrix.py:66-75``).  Everywhere else ``g == g_base``, which is what
-        keeps this mesh's flux report equal to the octree solver's.
+        mean, the same products, the same order); ``g`` is what the physics asks for, and
+        both come from :func:`src.solver.matrix.face_conductance` - the one rule the
+        structured assembly applies to its own neighbour tables: a face touching an
+        excluded leaf carries no conduction at all, and an interface between two materials
+        carries the contact resistance in series with the two half leaves.  Everywhere
+        else ``g == g_base``, which is what keeps this mesh's flux report equal to the
+        octree solver's.
         """
         faces = np.asarray(self.tree.faces(), dtype=float).reshape(-1, 5)
         i = faces[:, 0].astype(int)
         j = faces[:, 1].astype(int)
         area = faces[:, 3] * self.physical_size ** 2
         distance = faces[:, 4] * self.physical_size
-        k_face = 2.0 * self.k[i] * self.k[j] / (self.k[i] + self.k[j] + EPS)
-        g_base = k_face * area / distance
-        g = g_base
-        if self.h_contact > 0.0:
-            d_i, d_j = self.sizes[i], self.sizes[j]
-            r_series = (0.5 * d_i / (self.k[i] + EPS) + 1.0 / self.h_contact
-                        + 0.5 * d_j / (self.k[j] + EPS))
-            k_eff = 0.5 * (d_i + d_j) / r_series
-            g = np.where(self.material_id[i] != self.material_id[j],
-                         k_eff * area / distance, g)
-        if self.excluded.any():
-            g = np.where(self.excluded[i] | self.excluded[j], 0.0, g)
+        g_base = face_conductance(self.k[i], self.k[j], area, distance,
+                                  size_a=self.sizes[i], size_b=self.sizes[j],
+                                  material_a=self.material_id[i],
+                                  material_b=self.material_id[j])
+        excluded = self.excluded[i] | self.excluded[j] if self.excluded.any() else None
+        g = face_conductance(self.k[i], self.k[j], area, distance,
+                             size_a=self.sizes[i], size_b=self.sizes[j],
+                             material_a=self.material_id[i], material_b=self.material_id[j],
+                             h_contact=self.h_contact, excluded_b=excluded)
         return _FaceTable(i=i, j=j, axis=faces[:, 2].astype(int), area=area,
                           distance=distance, g_base=g_base, g=g)
 
@@ -585,20 +625,27 @@ class AdaptiveMesh:
         vals = np.concatenate((base.data, delta_i, -delta_i, delta_j, -delta_j))
         return sparse.coo_matrix((vals, (rows, cols)), shape=base.shape).tocsr()
 
-    def assemble(self, enforce_dirichlet: bool = True
+    def assemble(self, enforce_dirichlet: bool = True, radiation: bool = False
                  ) -> tuple[sparse.csr_matrix, np.ndarray]:
         """``(A, b)`` of ``div(k grad T) + Q = 0`` per unit volume, Dirichlet applied.
 
         The films go on the diagonal with their reference temperatures on the right-hand
         side, exactly as :mod:`src.solver.matrix` does for a structured mesh; a Neumann
-        face adds ``q/d`` with the local leaf edge ``d``.  The Dirichlet rows are the
-        leaves :meth:`fixed_leaves` names, eliminated symmetrically by
+        face adds ``q/d`` with the local leaf edge ``d``.  With ``radiation`` on, the
+        environment film carries the linearised radiative share of the current field (see
+        :func:`src.solver.matrix.environment_film`).  The Dirichlet rows are the leaves
+        :meth:`fixed_leaves` names, eliminated symmetrically by
         :func:`src.solver.matrix.apply_dirichlet` - the same elimination, so a fixed leaf
         is exact instead of relaxed.
         """
         faces = self._face_table()
         a = self.matrix(faces).tocsr()
         b = (self.Q_source + self.Q_sink).astype(float).copy()
+        # the film the operator carries, written back to the mesh exactly as the
+        # structured assembly does, so ``h_out`` always says what the last solve applied
+        film = self.outer_film(faces, radiation)
+        if film > 0.0:
+            self.h_out = film
         diagonal = np.zeros(self.tree.n_cells)
         for _name, positions, coefficient, reference in self._films(faces):
             np.add.at(diagonal, positions, coefficient)
@@ -630,20 +677,29 @@ class AdaptiveMesh:
         return apply_dirichlet(a, b, mask, values), b
 
     # ------------------------------------------------------------------- solve
-    def solve_steady(self, config: LinearConfig | None = None) -> AdaptiveSteadyResult:
+    def solve_steady(self, config: LinearConfig | None = None,
+                     radiation: bool | None = None,
+                     x0: np.ndarray | None = None) -> AdaptiveSteadyResult:
         """Solve the steady problem and report the field, the fluxes and the balance.
 
         The linear layer is the structured one (:func:`src.solver.linear.solve_linear`), so
         a graded tree is solved with the volume symmetrisation the structured solver uses
         and the method and tolerance are the caller's.  The default is a direct
         factorisation, which is exact enough to compare two meshes.
+
+        ``radiation`` defaults to the flag of ``config`` when it carries one - the
+        structured :class:`~src.solver.steady.SolverConfig` does, the linear layer does not
+        - so a caller that hands the solver's own config over gets the physics it asked
+        for.  ``x0`` is the warm start of an iterative method, in leaf order.
         """
+        if radiation is None:
+            radiation = bool(getattr(config, "radiation", False))
         start = time.perf_counter()
-        a, b = self.assemble()
+        a, b = self.assemble(radiation=radiation)
         sizes = self.tree.cell_sizes()
         uniform = float(sizes.min()) == float(sizes.max())
         linear: LinearResult = solve_linear(
-            a, b, config or LinearConfig(method="direct"),
+            a, b, config or LinearConfig(method="direct"), x0=x0,
             scale=None if uniform else self.V)
         self.T = np.asarray(linear.T, dtype=float)
         return AdaptiveSteadyResult(
@@ -658,10 +714,11 @@ class AdaptiveMesh:
         """Energy balance of the current field, closing at the round-off of the scheme.
 
         Every term is the one the assembly applied: the power of the sources in the free
-        leaves, the conduction leaving them into the fixed ones, and the films.  The
-        identity ``p_source + p_sink == q_fixed + p_film`` holds at the round-off of the
-        per-leaf closure because each term is summed from the same coefficients the
-        operator carries - which is what :attr:`AdaptiveBalance.residual` reports.
+        leaves, the conduction leaving them into the fixed ones, and the films - the
+        environment one with the coefficient the last :meth:`assemble` stored, radiative
+        share included, so the identity ``p_source + p_sink == q_fixed + p_film`` holds at
+        the round-off of the per-leaf closure, which :attr:`AdaptiveBalance.residual`
+        reports.
         """
         faces = self._face_table()
         films = self._films(faces)
@@ -673,8 +730,14 @@ class AdaptiveMesh:
         per_leaf = divergence.copy()
         rates: dict[str, float] = {}
         for name, positions, coefficient, reference in films:
-            rate = coefficient * self.V[positions] * (self.T[positions] - reference)
-            np.add.at(per_leaf, positions, rate)
+            # a leaf the elimination pinned (an excluded one, or one on a Dirichlet face)
+            # carries no film: its row is the identity, so the exchange never enters the
+            # solution and must not be reported either - the rule
+            # ``fluxes.environment_flux`` already follows for a structured mesh
+            acting = free[positions]
+            rate = (coefficient[acting] * self.V[positions[acting]]
+                    * (self.T[positions[acting]] - reference[acting]))
+            np.add.at(per_leaf, positions[acting], rate)
             rates[name] = float(np.sum(rate))
         closure_error = per_leaf[free] - ((self.Q_source + self.Q_sink) * self.V)[free]
 

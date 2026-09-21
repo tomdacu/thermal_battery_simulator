@@ -43,6 +43,7 @@ from .heaters import (DEFAULT_SHEATH_DIAMETER, DEFAULT_SHEATH_MATERIAL,
                        HeaterBank, rasterize, validate_bank)
 from .materials import MaterialManager, ThermalProperties
 from .mesh import MaterialID, Mesh3D
+from .physics import radiation_h
 
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
     from .adaptive_mesh import AdaptiveMesh
@@ -520,26 +521,34 @@ class BatteryGeometry:
         return problems
 
     def apply_environment(self, mesh: Mesh3D | AdaptiveMesh,
-                          wind_speed: float | None = None) -> dict:
+                          wind_speed: float | None = None,
+                          radiation: bool = False) -> dict:
         """Turn the air around the vessel into a boundary condition.
-
-        Called by :meth:`apply_to_mesh`.**  The box-face report has been
-        taught to skip the excluded cells (the spurious 4.9 kW is gone), but
-        ``tests/test_solver.py::test_flow_rate_extraction_removes_heat_when_the_battery_is_hot``
-        still reports a negative extracted power once the air is dropped - a sign
-        question to settle on a test that combines a flow-rate extraction with the
-        environment, before this becomes the default.  The method works and is tested,
-        but wiring it into the default build exposed two defects that need their own
-        fix before it can be automatic: ``fluxes.domain_fluxes`` still reports the
-        convection of the six box faces even where the boundary cell has been excluded
-        (a spurious 4.9 kW on the default vessel, which breaks the reported balance),
-        and one existing extraction test changes sign.  Call it explicitly while that
-        is open.
 
         The exclusion is *geometric*, not by material: a cell is dropped only if it is
         air **and** it lies outside the shell radius or above the roof apex.  The air
         inside an unfilled conical roof, and the concrete of the foundation, stay in the
         problem because they are inside the envelope.
+
+        The film the surface carries is the correlations' convective value (natural +
+        wind); the mesh keeps it as ``h_out_conv``, together with the emissivity of the
+        shell (``environment_emissivity``), because the solver re-evaluates the film at
+        the field it solves.  ``radiation`` mirrors the solver's switch
+        (:attr:`~src.solver.steady.SolverConfig.radiation`): with it on, the film painted
+        here already carries the linearised radiative share ``h_rad`` of the shell,
+        evaluated at the same design-point surface temperature the correlations use.  The
+        share is not frozen there - ``h_rad`` grows as ``T^3``, and the surface
+        temperature is what the film itself determines - so the film is a *fixed point*:
+        the assembly re-evaluates it on the field it assembles for
+        (:func:`src.solver.matrix.environment_film`), and **one re-evaluation after a
+        solve is enough**.
+
+        Surface temperature for the correlations.  The film is a *design point* closure
+        and must not be evaluated on whatever field the mesh happens to hold: right after
+        painting the shell is still at the initial temperature, so the driving jump is
+        zero, the natural convection vanishes and the film comes out as 0.005 W/(m^2 K) -
+        present in the code, absent in the physics.  Use a nominal rise over the ambient
+        (or the shell already being hot, if a solve has run).
         """
         cyl = self.cylinder
         wind = self.wind_speed if wind_speed is None else float(wind_speed)
@@ -551,21 +560,20 @@ class BatteryGeometry:
         air = mesh.material_id == int(MaterialID.AIR)
         mesh.excluded = outside & air
 
-        # Surface temperature for the correlations.  The film is a *design point*
-        # closure and must not be evaluated on whatever field the mesh happens to hold:
-        # right after painting the shell is still at the initial temperature, so the
-        # driving jump is zero, the natural convection vanishes and the film comes out
-        # as 0.005 W/(m^2 K) - present in the code, absent in the physics.  Use a
-        # nominal rise over the ambient (or the shell already being hot, if a solve has
-        # run), and re-evaluate the film after a solve for the rigorous value.
         steel = mesh.material_id == int(MaterialID.STEEL)
         hot = float(np.mean(np.asarray(mesh.T)[steel])) if steel.any() else 0.0
         t_surface = max(hot, self.t_ambient + self.film_delta_t)
         film = h_out(t_surface, self.t_ambient,
                      height=max(cyl.z_cone_apex - cyl.base_z, 0.1),
                      width=max(2.0 * cyl.r_shell, 0.1), wind_speed=wind)
+        emissivity = float(MaterialManager().get(self.shell_material).emissivity)
+        film["radiative"] = (float(radiation_h(t_surface, self.t_ambient, emissivity))
+                             if radiation else 0.0)
+        film["total"] = film["natural"] + film["wind"] + film["radiative"]
         mesh.t_ambient = self.t_ambient
+        mesh.h_out_conv = film["natural"] + film["wind"]
         mesh.h_out = film["total"]
+        mesh.environment_emissivity = emissivity
         self.film = film
         return film
 

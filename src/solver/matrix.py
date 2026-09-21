@@ -24,7 +24,9 @@ Boundary conditions
 * Interior cells with ``boundary_type == CONVECTION`` (heat-exchanger tubes)
   exchange ``h*(T_fluid - T_P)`` with the cell volume -> ``h/d``.
 * Radiation is opt-in and linearised: ``h_r = eps*sigma*(Ts+Tinf)*(Ts^2+Tinf^2)``,
-  added to the convective coefficient of the exposed face.
+  added to the convective coefficient of the exposed face, and to the environment film
+  of an excluded-air model (:func:`environment_film`), whose surface temperature the
+  coefficient itself drives.
 
 TRANSIENT
 ---------
@@ -47,40 +49,103 @@ from ..core.grid import FACE_AXIS, GridIndex, dirichlet_mask
 from ..core.physics import half_cell_h, radiation_h
 from ..core.mesh import FACES, BoundaryType, Mesh3D
 
+def face_conductance(k_a, k_b, area, distance, *, size_a=None, size_b=None,
+                     material_a=None, material_b=None, h_contact: float = 0.0,
+                     excluded_b=None) -> np.ndarray:
+    """The conductance ``g`` [W/K] of one interface: the one rule both meshes assemble.
+
+    ``g = k_face A / d_centers`` with ``k_face`` the harmonic mean of the two
+    conductivities - the series conductance of the two half cells, which is what makes a
+    two-layer wall exact when its interface sits on a face.  Two corrections ride on the
+    same face: a finite contact conductance in series with the two half cells where the
+    two sides are *different materials*, and no conduction at all into an excluded side
+    (its exchange with the domain is the environment film of :func:`build_steady_matrix`).
+
+    The callers are :func:`face_coefficients` (the six structured neighbour tables of
+    :class:`GridIndex`) and :meth:`AdaptiveMesh._face_table` (the index-free face list of
+    an octree), so the coefficient the grid assembles and the one the tree assembles
+    cannot drift apart.  ``excluded_b`` is the side the flux would flow *into*: the tree
+    passes the union of the two sides (its face list holds one entry per pair), the
+    structured adapter the destination alone, because the row of an excluded node is
+    pinned by the Dirichlet elimination of :func:`build_steady_matrix`.
+
+    ``size_a``/``size_b``/``material_a``/``material_b`` are the two leaf edges and the two
+    material ids: the contact correction needs them, a caller that asks for no contact
+    resistance (``h_contact=0``, the default) does not.
+    """
+    k_a = np.asarray(k_a, dtype=float)
+    k_b = np.asarray(k_b, dtype=float)
+    geometry = np.asarray(area, dtype=float) / np.asarray(distance, dtype=float)
+    g = 2.0 * k_a * k_b / (k_a + k_b + EPS) * geometry
+    if h_contact > 0.0:
+        if size_a is None or size_b is None or material_a is None or material_b is None:
+            raise ValueError("a contact conductance needs the two leaf sizes and materials")
+        r_series = (0.5 * np.asarray(size_a, dtype=float) / (k_a + EPS) + 1.0 / h_contact
+                    + 0.5 * np.asarray(size_b, dtype=float) / (k_b + EPS))
+        k_eff = 0.5 * (np.asarray(size_a, dtype=float)
+                       + np.asarray(size_b, dtype=float)) / r_series
+        g = np.where(np.asarray(material_a) != np.asarray(material_b), k_eff * geometry, g)
+    if excluded_b is not None:
+        g = np.where(np.asarray(excluded_b, dtype=bool), 0.0, g)
+    return g
+
+
 def face_coefficients(mesh: Mesh3D, index: GridIndex) -> np.ndarray:
     """(6, N) face conductances per unit volume, zeroed on the box faces.
 
-    ``a = k_face A / (d_centers V)``: ``k_face`` is the harmonic mean of the two
-    conductivities (uniform mesh: the classic ``k_eff/d^2``), ``A`` the face area and
-    ``d_centers`` the centre-to-centre distance of the two cells.
+    The structured *adapter* of the shared rule: :class:`GridIndex` supplies the two
+    sides of each of the six directions (neighbour index, face area, centre-to-centre
+    distance, leaf size, material), :func:`face_conductance` turns them into a
+    conductance [W/K], and the cell volume turns that into the per-unit-volume
+    coefficient ``a = g / V`` the assembly wants.  The box faces carry no conductance -
+    their exchange is the ``face_bc`` film - and an excluded destination carries none
+    either.
     """
     k = mesh.k.ravel(order="F")
     excluded = mesh.excluded.ravel(order="F")
     material = mesh.material_id.ravel(order="F")
     out = np.zeros((6, k.size))
     for face_index, nb in enumerate(index.neighbours):
-        k_e = k[nb]
-        # harmonic mean of the two conductivities = conductivity of the interface
-        k_face = 2.0 * k * k_e / (k + k_e + EPS)
-        coeff = k_face * index.face_factors[face_index]
-        if mesh.h_contact > 0.0:
-            # a real interface between two materials is not perfect: the contact
-            # resistance sits in series with the two half cells
-            axis = FACE_AXIS[FACES[face_index]]
-            d_self = index.sizes[axis]
-            d_nb = d_self[nb]
-            r_series = (0.5 * d_self / (k + EPS) + 1.0 / mesh.h_contact
-                        + 0.5 * d_nb / (k_e + EPS))
-            k_eff = 0.5 * (d_self + d_nb) / r_series
-            coeff = np.where(material != material[nb], k_eff * index.face_factors[face_index],
-                             coeff)
+        axis = FACE_AXIS[FACES[face_index]]
+        size = index.sizes[axis]
+        coeff = face_conductance(
+            k, k[nb], index.areas[axis], 0.5 * (size + size[nb]),
+            size_a=size, size_b=size[nb], material_a=material, material_b=material[nb],
+            h_contact=mesh.h_contact,
+            excluded_b=excluded[nb] if excluded.any() else None) / index.volume
         coeff[index.on_face[FACES[face_index]]] = 0.0
-        if excluded.any():
-            # the excluded cells are not part of the problem: no conduction into them,
-            # their interface is a film (added in build_steady_matrix)
-            coeff = np.where(excluded[nb], 0.0, coeff)
         out[face_index] = coeff
     return out
+
+
+def environment_film(mesh, positions: np.ndarray, areas: np.ndarray,
+                     radiation: bool = False) -> float:
+    """The film coefficient [W/(m^2 K)] of the outer surface at the current field.
+
+    The convective film is ``mesh.h_out_conv`` when the painter recorded it (the
+    correlations alone) and ``mesh.h_out`` otherwise, so the *switch* decides whether the
+    surface radiates at all: with ``radiation`` off the film is the convective one even
+    where :meth:`~src.core.geometry.BatteryGeometry.apply_environment` painted the
+    design-point radiative share into ``h_out``.  With it on, the share is re-evaluated
+    here at the surface temperature of the current field, area-weighted over the very
+    faces the film acts on: ``h_rad = eps sigma (Ts + T_amb)(Ts^2 + T_amb^2)`` grows as
+    ``T^3``, so the film depends on the surface temperature the film itself drives and is
+    a *fixed point*.  One re-evaluation per assembly is enough to close it - the steady
+    driver repeats it sweep by sweep, the transient once per step - and evaluating from
+    the recorded base keeps the re-evaluation idempotent.
+
+    A mesh that never went through
+    :meth:`~src.core.geometry.BatteryGeometry.apply_environment` has no emissivity
+    recorded and keeps the film it carries.
+    """
+    base = getattr(mesh, "h_out_conv", None)
+    h = float(mesh.h_out if base is None else base)
+    emissivity = float(getattr(mesh, "environment_emissivity", 0.0))
+    if not radiation or emissivity <= 0.0 or positions.size == 0:
+        return h
+    values = np.asarray(mesh.T, dtype=float).ravel(order="F")
+    t_surface = float(np.sum(areas * values[positions]) / np.sum(areas))
+    return h + float(radiation_h(t_surface, mesh.t_ambient, emissivity))
 
 
 def _face_diag_rhs(mesh: Mesh3D, index: GridIndex, face: str, a_p: np.ndarray,
@@ -144,15 +209,25 @@ def build_steady_matrix(mesh: Mesh3D, index: GridIndex = None, radiation: bool =
         # the outer surface: every active cell that faces an excluded one exchanges
         # h_out * A * (T_ambient - T) with the environment.  This replaces the air
         # domain entirely - no conduction through the air, no cells spent on it.
+        surface = []
         for face_index, nb in enumerate(index.neighbours):
             mask = ~excluded & excluded[nb] & ~index.on_face[FACES[face_index]]
             if not mask.any():
                 continue
             axis = FACE_AXIS[FACES[face_index]]
-            area_over_v = index.areas[axis][mask] / index.volume[mask]
-            a_conv = mesh.h_out * area_over_v
-            a_p[mask] += a_conv
-            b[mask] += a_conv * mesh.t_ambient
+            surface.append((mask, index.areas[axis][mask], index.volume[mask]))
+        if surface:
+            film = environment_film(
+                mesh, np.concatenate([np.flatnonzero(mask) for mask, _a, _v in surface]),
+                np.concatenate([area for _m, area, _v in surface]), radiation)
+            # the film the operator carries, written back to the mesh: the report
+            # (``fluxes.environment_flux``) reads ``h_out``, so the two must be the
+            # same number, and the re-evaluation above is idempotent in it
+            mesh.h_out = film
+            for mask, area, volume in surface:
+                a_conv = film * (area / volume)
+                a_p[mask] += a_conv
+                b[mask] += a_conv * mesh.t_ambient
 
     tube = index.interior_tube
     if tube.any():
