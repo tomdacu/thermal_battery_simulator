@@ -1,10 +1,11 @@
 # 16 - The adaptive mesh: the interface, the equivalence, and the way off `Mesh3D`
 
-Status: **the foundation is in place, the consumers are not ported yet.** This document is
-the census of what the consumers actually read from a mesh, the contract that grew out of
-it (`src/core/mesh_api.py`, `src/core/adaptive_mesh.py`) and the ordered plan that moves
-the application onto a tree. Line numbers are those of the census, taken on the commit
-before the port starts (`grep -n` over `src/`, `gui/`, `tests/`, `scripts/`).
+Status: **steps 1-7 are done, step 8's criterion is evaluated and `Mesh3D` stays** (section
+7). This document is the census of what the consumers actually read from a mesh, the
+contract that grew out of it (`src/core/mesh_api.py`, `src/core/adaptive_mesh.py`) and the
+ordered plan that moves the application onto a tree. Line numbers are those of the census,
+taken on the commit before the port starts (`grep -n` over `src/`, `gui/`, `tests/`,
+`scripts/`).
 
 Who reads what, in one line: the solver assembles `k A / (d V)` from a face list and
 per-cell fields, the balance reads the same fields back, the geometry/heaters/pipes
@@ -383,7 +384,8 @@ test above, and deleting it early would delete the only oracle the port has.
   adaptive assembly applies the plain film. A radiative film is a Picard sweep over the
   linearised coefficient, and it belongs with the port of `SteadyStateSolver` (step 2).
 * **The GUI and the view.** Nothing in `gui/` and `src/viz/` is wired to a tree yet: they
-  are step 7.
+  are step 7 (done - section 7 below, and `gui/`, `src/viz/scene.py` and `src/io/state.py`
+  take either mesh).
 * **`h_char` and the uniform shortcuts** are deliberately absent from the protocol; a
   consumer that needs `V**(1/3)` computes it, and the uniform-only shortcuts (`d`, `V_cell`,
   `A_cell`) are marked for deletion in section 1.5.
@@ -393,3 +395,45 @@ test above, and deleting it early would delete the only oracle the port has.
   refinement of Afivo, not a bigger Python loop.
 * **The octree remains the only adaptive structure**: this change adds no new mesh type,
   and `Octree` itself was not modified.
+
+---
+
+## 7. Where the migration stands: step 8, evaluated
+
+Steps 1-7 are done: the Mesh tab builds the tree, the window paints it, the controller
+solves it, the view renders it and the state file stores it.  Step 8 is the criterion
+above, evaluated here point by point on that tree.  **`Mesh3D` stays**: points 1 and 5 do
+not hold, and both of them are the structured road itself, which is still selectable and
+is the oracle every equivalence test below is written against.
+
+| # | point | holds | evidence |
+|---|---|---|---|
+| 1 | no module outside `src/core/mesh.py`, `src/core/grid.py` and their tests names the structured vocabulary | **no** | 26 files under `src/`, `gui/`, `scripts/` still do.  Step 7 removed two of them (`gui/views/results_panel.py`, `scripts/benchmark.py`); the rest are the structured road and its branches (see the list below). |
+| 2 | every consumer that receives a mesh passes `missing_members(mesh) == []` | **partly** | `missing_members(AdaptiveMesh.uniform(16, 0.5, 0)) == []`, and every ported consumer runs on a tree (the `*_on_tree` suites, `tests/test_scene.py`, `tests/test_analysis.py`, `tests/test_gui.py`: 117 tree tests, exit 0).  `Mesh3D` itself answers `['n_cells', 'faces']`, so *as written* the point holds only once the class is gone. |
+| 3 | the equivalence suites pass and the GUI run reproduces the structured numbers | **yes** | 394 tests, exit 0.  The GUI's own tree (30 920 leaves, the Mesh tab's smallest budget) against the structured road at the same 0.1875 m cell: `dT_mean = 2.6e-7 K` (5.6e-10 relative), `dT_max = 5.8e-7 K`, `dQ = 6.0e-5 W` (1.5e-8 relative) - the solver tolerance is 1e-8. |
+| 4 | the octree's documented limits are answered | **yes** | Second order across a size jump: `test_the_graded_film_uses_the_local_leaf_size`, `test_the_adapted_tree_beats_a_graded_mesh_on_cells` (both in `tests/test_adaptive_mesh.py`).  The rounds stop on the objective (`AdaptiveMesh.refine_round` is `refine_on_objective`'s rule with a budget check: `test_the_refinement_leaves_a_flat_field_alone`) and on the budget (`test_the_cycle_stops_at_the_cell_budget`, `test_the_cell_budget_stops_the_tree_and_says_so`).  Features a leaf can hide are caught by the painters (`test_the_network_paints_a_refined_tree_and_keeps_its_area`, `test_the_bank_paints_a_refined_tree_and_deposits_its_power`, `test_the_tubes_land_on_the_same_cells_on_a_tree`).  The face list runs at 2.5e5 faces/s on the GUI's tree (90 600 faces in 0.36 s) against the ~1e5/s measured for `octree_solver.py`. |
+| 5 | `refinement.py` ported to the bands, or `GridSpec.edges` no longer feeding a `Mesh3D` | **no** | `GridSpec.edges` still feeds one: `gui/views/geometry_panel.py` (`Mesh3D(..., grid=self.grid_spec())`), `gui/controller.py` (`Mesh3D(..., grid=spec_level)`), `src/core/mesh.py` (`_build_graded`), and `gui/views/geometry_panel.py` reads it for the live summary.  The tree's bands live in `AdaptiveMesh`/`RefinementBand`, with `src/analysis/mesh_plan.refinement_bands` as the adapter: `src/core/refinement.py` is neither ported to them nor retired. |
+
+Who still uses `Mesh3D`, and why:
+
+* **builds one**: `gui/views/geometry_panel.py` (the Mesh tab's structured mode),
+  `gui/controller.py` (a `GridSpec` level of the automatic search), `scripts/figures.py`
+  (a figure of the graded road).
+* **dispatches on it**: `src/solver/matrix.py`, `src/solver/steady.py`,
+  `src/solver/transient.py`, `src/analysis/fluxes.py`, `src/analysis/balance.py` - the
+  structured assembly, solve and flux report, selected by `isinstance`/`hasattr`, with
+  `src/core/grid.GridIndex` as their face list.
+* **reads a structured member in a branch**: `src/io/state.py` (`edges_*`: the state file
+  of a grid), `src/viz/scene.py` (`uniform`, `dx`, `edges_*`: the `ImageData` /
+  `RectilinearGrid` road), `src/core/geometry.py`, `src/core/heaters.py`,
+  `src/core/pipes.py` (`find_cell`, `axis_size`, `size_x/y/z` in the painters),
+  `src/analysis/convergence.py` (`getattr(mesh, "grid_summary", None)`).
+* **names it without reading a member**: the annotations of `src/analysis/cycle.py`,
+  `src/analysis/losses.py`, `src/solver/fluid.py`, `src/core/pipe_network.py`,
+  `gui/main_window.py`; the prose of `src/core/adaptive_mesh.py`, `src/core/octree.py`,
+  `src/core/mesh_api.py`, `src/solver/octree_solver.py`; the re-exports of
+  `src/__init__.py`, `src/core/__init__.py`, `src/solver/__init__.py`.
+
+Deleting the class therefore means deleting the Mesh tab's structured mode, the graded
+`GridSpec` search level and the structured branches of those modules - a change of its own,
+with its own equivalence question, and not one this step takes.
