@@ -405,7 +405,7 @@ class BatteryGeometry:
     def apply_environment(self, mesh: Mesh3D, wind_speed: float | None = None) -> dict:
         """Turn the air around the vessel into a boundary condition.
 
-        **Not called by** :meth:`apply_to_mesh` yet.**  The box-face report has been
+        Called by :meth:`apply_to_mesh`.**  The box-face report has been
         taught to skip the excluded cells (the spurious 4.9 kW is gone), but
         ``tests/test_solver.py::test_flow_rate_extraction_removes_heat_when_the_battery_is_hot``
         still reports a negative extracted power once the air is dropped - a sign
@@ -514,6 +514,10 @@ class BatteryGeometry:
         report.n_source_cells = self._paint_heaters(mesh, Z, R, materials)
         report.notes.extend(self.heater_warnings(mesh))
         report.n_tube_cells = self._paint_tubes(mesh, Z, R, materials)
+
+        # the air around the vessel becomes a boundary condition: the cells outside the
+        # envelope leave the problem and the surface carries the film
+        self.apply_environment(mesh)
 
         self.apply_boundary_conditions(mesh, steel_props)
         report.zone_volumes = self.zone_volumes(mesh)

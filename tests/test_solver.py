@@ -323,8 +323,13 @@ def test_flow_rate_extraction_removes_heat_when_the_battery_is_hot(storage_model
     mesh = storage_model
     mesh.T[:] = 500.0
     tubes = mesh.material_id == int(MaterialID.TUBES)
-    mesh.material_id[1:3, 1:3, :6] = int(MaterialID.TUBES)
-    mesh.boundary_type[1:3, 1:3, :6] = 0
+    # inside the vessel, not in the air box: with the environment active the cells
+    # outside the envelope are excluded from the problem and pinned at the ambient, so
+    # a synthetic tube placed at the corner of the domain would be an isothermal block
+    # at 293 K and the extracted power would come out with the wrong sign
+    i, j = mesh.Nx // 2, mesh.Ny // 2
+    mesh.material_id[i - 1:i + 1, j - 1:j + 1, :6] = int(MaterialID.TUBES)
+    mesh.boundary_type[i - 1:i + 1, j - 1:j + 1, :6] = 0
     mesh.set_internal_convection(mesh.material_id == int(MaterialID.TUBES), 500.0, 300.0)
     assert (mesh.material_id == int(MaterialID.TUBES)).any()
 

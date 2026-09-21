@@ -222,7 +222,8 @@ def test_the_excluded_air_changes_the_loss_and_the_balance_still_closes():
     # cooler, so removing it exposes the vessel to the film directly.  The box model
     # therefore understated the envelope loss.
     assert loss_with > loss_without
-    # the reported balance still carries the spurious box-face convection, so the
-    # residual is the size of that term; the flux report must learn about the
-    # excluded cells before this can be tightened
-    assert abs(residual_with) < 0.02 * max(loss_with, 1.0)
+    # the box-face term is gone and the balance closes to 1.5e-4 relative (0.77 W on a
+    # 5 kW input): the residual is the small mismatch between the film as the matrix
+    # applies it (h A/V on the interface faces) and the flux integral of the report.
+    # Worth chasing to machine precision, but it is a thousandth of the loss here.
+    assert abs(residual_with) < 1e-3 * max(loss_with, 1.0)
