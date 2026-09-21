@@ -405,13 +405,18 @@ class BatteryGeometry:
     def apply_environment(self, mesh: Mesh3D, wind_speed: float | None = None) -> dict:
         """Turn the air around the vessel into a boundary condition.
 
-        **Not called by** :meth:`apply_to_mesh` yet.**  The method works and is tested,
+        **Not called by** :meth:`apply_to_mesh` yet.**  The box-face report has been
+        taught to skip the excluded cells (the spurious 4.9 kW is gone), but
+        ``tests/test_solver.py::test_flow_rate_extraction_removes_heat_when_the_battery_is_hot``
+        still reports a negative extracted power once the air is dropped - a sign
+        question to settle on a test that combines a flow-rate extraction with the
+        environment, before this becomes the default.  The method works and is tested,
         but wiring it into the default build exposed two defects that need their own
         fix before it can be automatic: ``fluxes.domain_fluxes`` still reports the
         convection of the six box faces even where the boundary cell has been excluded
         (a spurious 4.9 kW on the default vessel, which breaks the reported balance),
-        and one existing extraction test changes sign.  Call it explicitly when the
-        flux reporting has been taught about the excluded cells.
+        and one existing extraction test changes sign.  Call it explicitly while that
+        is open.
 
         The exclusion is *geometric*, not by material: a cell is dropped only if it is
         air **and** it lies outside the shell radius or above the roof apex.  The air
@@ -422,7 +427,7 @@ class BatteryGeometry:
         wind = self.wind_speed if wind_speed is None else float(wind_speed)
         radius = np.hypot(mesh.X - cyl.center_x, mesh.Y - cyl.center_y)
         beyond_shell = radius > cyl.r_shell + 1e-9
-        above_roof = mesh.Z > cyl.z_cone_apex + 1e-9
+        above_roof = cyl.z_cone_apex + 1e-9 < mesh.Z
         outside = beyond_shell | above_roof
         air = mesh.material_id == int(MaterialID.AIR)
         mesh.excluded = outside & air

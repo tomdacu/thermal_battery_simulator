@@ -52,8 +52,13 @@ def domain_face_flux(mesh: Mesh3D, face: str, radiation: bool = False,
     # nodes pinned by another Dirichlet face: their row is the identity, so this
     # face's exchange never reaches the solution
     pinned = dirichlet_mask(mesh, index).reshape(mesh.T.shape, order="F")
-    free = ~pinned[sl]                 # boundary cells that are not pinned elsewhere
-    free_inner = ~pinned[inner]        # ... and the same for the cell behind the face
+    # a cell outside the envelope leaves the problem too: it is pinned at the ambient
+    # and its exchange is the environment film, counted by ``environment_flux``.  Not
+    # skipping it here reported the convection of the box faces as if it happened and
+    # broke the balance by kilowatts on the default vessel.
+    excluded = mesh.excluded.reshape(mesh.T.shape, order="F")
+    free = ~pinned[sl] & ~excluded[sl]
+    free_inner = ~pinned[inner] & ~excluded[inner]
     if bc.kind == BoundaryType.DIRICHLET:
         k_self = mesh.k[inner]
         k_nb = mesh.k[sl]
