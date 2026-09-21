@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..constants import PACKING_FRACTION_DEFAULT, T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
+from .environment import h_out
 from .heaters import (DEFAULT_SHEATH_DIAMETER, DEFAULT_SHEATH_MATERIAL,
                        HeaterBank, rasterize, validate_bank)
 from .materials import MaterialManager, ThermalProperties
@@ -364,9 +365,12 @@ class BatteryGeometry:
     insulation_material: str = "rock_wool"
     shell_material: str = "carbon_steel"
     packing_fraction: float = PACKING_FRACTION_DEFAULT
-    h_top: float = 10.0                     # [W/(m^2*K)]
-    h_lateral: float = 5.0                  # [W/(m^2*K)]
-    t_ambient: float = T_AMBIENT_DEFAULT    # [K]
+    h_top: float = 10.0                     # [W/(m^2*K)]  used at the domain box faces,
+    h_lateral: float = 5.0                  # [W/(m^2*K)]  unless the environment below
+    t_ambient: float = T_AMBIENT_DEFAULT    # [K]          replaces them with a film
+    #: wind speed at the vessel [m/s]: with the film below, the outside becomes a
+    #: boundary condition instead of a domain (see ``apply_environment``)
+    wind_speed: float = 0.0
     t_ground: float = T_GROUND_DEFAULT      # [K]
 
     # ------------------------------------------------------------- validation
@@ -397,6 +401,41 @@ class BatteryGeometry:
                                 if not p.startswith("warning: "))
             problems.extend(self.tube_problems(mesh))
         return problems
+
+    def apply_environment(self, mesh: Mesh3D, wind_speed: float | None = None) -> dict:
+        """Turn the air around the vessel into a boundary condition.
+
+        The capability is one thing, using it is another: this is what fills
+        ``mesh.excluded`` and sets the film, so a normal run stops conducting through
+        the air box and the losses are computed on the vessel surface instead of on the
+        six faces of the domain.
+
+        The exclusion is *geometric*, not by material: a cell is dropped only if it is
+        air **and** it lies outside the shell radius or above the roof apex.  The air
+        inside an unfilled conical roof, and the concrete of the foundation, stay in the
+        problem because they are inside the envelope.
+        """
+        cyl = self.cylinder
+        wind = self.wind_speed if wind_speed is None else float(wind_speed)
+        radius = np.hypot(mesh.X - cyl.center_x, mesh.Y - cyl.center_y)
+        beyond_shell = radius > cyl.r_shell + 1e-9
+        above_roof = mesh.Z > cyl.z_cone_apex + 1e-9
+        outside = beyond_shell | above_roof
+        air = mesh.material_id == int(MaterialID.AIR)
+        mesh.excluded = outside & air
+
+        # surface temperature for the correlations: the mean of the shell if it is
+        # painted, otherwise a nominal rise over the ambient
+        steel = mesh.material_id == int(MaterialID.STEEL)
+        t_surface = (float(np.mean(mesh.T[steel])) if steel.any()
+                     else self.t_ambient + 30.0)
+        film = h_out(t_surface, self.t_ambient,
+                     height=max(cyl.z_cone_apex - cyl.base_z, 0.1),
+                     width=max(2.0 * cyl.r_shell, 0.1), wind_speed=wind)
+        mesh.t_ambient = self.t_ambient
+        mesh.h_out = film["total"]
+        self.film = film
+        return film
 
     def tube_problems(self, mesh: Mesh3D) -> list[str]:
         """Tubes whose effective radius leaves the storage would heat the air."""
@@ -467,6 +506,10 @@ class BatteryGeometry:
         report.n_source_cells = self._paint_heaters(mesh, Z, R, materials)
         report.notes.extend(self.heater_warnings(mesh))
         report.n_tube_cells = self._paint_tubes(mesh, Z, R, materials)
+
+        # the air around the vessel becomes a boundary condition: the cells outside
+        # the envelope leave the problem and the surface carries the film
+        self.apply_environment(mesh)
 
         self.apply_boundary_conditions(mesh, steel_props)
         report.zone_volumes = self.zone_volumes(mesh)

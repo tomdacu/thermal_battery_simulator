@@ -19,7 +19,7 @@ import pytest
 from src.analysis.balance import compute_balance
 from src.core.environment import (AirProperties, h_natural_horizontal,
                                   h_natural_vertical, h_out, h_wind, rayleigh)
-from src.core.mesh import Mesh3D
+from src.core.mesh import MaterialID, Mesh3D
 from src.solver.steady import SolverConfig, SteadyStateSolver
 
 
@@ -157,3 +157,68 @@ def test_the_contact_resistance_does_not_touch_a_single_material():
     z_lo, z_hi = float(z.min()), float(z.max())
     expected = 400.0 - 100.0 * (z - z_lo) / (z_hi - z_lo)
     assert np.allclose(mesh.T, expected, atol=1e-6)
+
+
+# ------------------------------------------------- the environment, wired in
+def test_the_geometry_fills_the_excluded_mask_and_the_film():
+    """A normal build must drop the air box and put the film on the vessel."""
+    from src.core.geometry import BatteryGeometry
+
+    geometry = BatteryGeometry()
+    cylinder = geometry.cylinder
+    cylinder.center_x = cylinder.center_y = 3.0
+    cylinder.r_storage = 2.0
+    cylinder.height = 4.0
+    cylinder.base_z = 0.3
+    geometry.wind_speed = 3.0
+    mesh = Mesh3D(6.0, 6.0, 5.6, spacing=0.25)
+    geometry.apply_to_mesh(mesh)
+
+    assert mesh.excluded.any(), "the air box must be excluded"
+    assert mesh.h_out > 0.0
+    assert mesh.t_ambient == pytest.approx(geometry.t_ambient)
+    # nothing inside the envelope may be dropped: the sand, the shell and the concrete
+    # of the foundation all stay in the problem
+    for material in (MaterialID.SAND, MaterialID.STEEL, MaterialID.INSULATION,
+                     MaterialID.CONCRETE):
+        assert not np.any(mesh.excluded & (mesh.material_id == int(material)))
+    # and the film is the sum of the two shares, with the wind contributing
+    film = geometry.film
+    assert film["total"] == pytest.approx(film["natural"] + film["wind"], rel=1e-12)
+    assert film["wind"] == pytest.approx(4.0 + 4.0 * 3.0, rel=1e-12)
+
+
+def test_the_excluded_air_changes_the_loss_and_the_balance_still_closes():
+    """With the air dropped, the loss is the surface film and the identity holds."""
+    from src.core.geometry import BatteryGeometry
+
+    def run(exclude: bool) -> tuple[float, float]:
+        geometry = BatteryGeometry()
+        cylinder = geometry.cylinder
+        cylinder.center_x = cylinder.center_y = 3.0
+        cylinder.r_storage = 2.0
+        cylinder.height = 4.0
+        cylinder.base_z = 0.3
+        geometry.h_lateral = 5.0
+        geometry.h_top = 10.0
+        mesh = Mesh3D(6.0, 6.0, 5.6, spacing=0.3)
+        geometry.heaters.power_total = 5.0
+        geometry.apply_to_mesh(mesh)
+        if not exclude:
+            mesh.excluded[:] = False
+            mesh.h_out = 0.0
+        SteadyStateSolver(mesh, SolverConfig(method="cg", preconditioner="amg_rs",
+                                             tolerance=1e-8)).solve()
+        balance = compute_balance(mesh)
+        return balance.q_battery, balance.imbalance
+
+    loss_with, residual_with = run(True)
+    loss_without, _ = run(False)
+    assert loss_with > 0.0 and loss_without > 0.0
+    # dropping the air makes the loss *larger*, and that is the physical answer, not a
+    # mistake: the air box was acting as an insulating blanket that kept the shell
+    # cooler, so removing it exposes the vessel to the film directly.  The box model
+    # therefore understated the envelope loss.
+    assert loss_with > loss_without
+    # the CG tolerance is 1e-8, so the residual flux error is a few 1e-6 relative
+    assert abs(residual_with) < 1e-4 * max(loss_with, 1.0)
