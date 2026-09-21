@@ -54,7 +54,8 @@ from ..constants import (CP_AIR, EPS, K_AIR, RHO_AIR, T_AMBIENT_DEFAULT,
                          T_GROUND_DEFAULT, T_INITIAL_DEFAULT)
 from ..solver.linear import LinearConfig, LinearResult, solve_linear
 from ..solver.matrix import apply_dirichlet, environment_film, face_conductance
-from ..solver.octree_solver import OctreeSteadySolver, wall_cells
+from ..solver.octree_solver import (_NOISE_FLOOR, OctreeSteadySolver, _mark,
+                                     wall_cells)
 from ..units import check_kelvin
 from .mesh import FACES, BoundaryType, FaceBC
 from .mesh_api import FaceRow, is_interior_tube
@@ -279,12 +280,19 @@ class AdaptiveMesh:
         return mesh
 
     # ------------------------------------------------------------- refinement
-    def refine_bands(self, bands: Sequence[RefinementBand]) -> None:
+    def refine_bands(self, bands: Sequence[RefinementBand],
+                     max_cells: int | None = None) -> None:
         """Refine to the band sizes, in place (see :meth:`from_bands`).
 
         The rounds run to ``tree.max_level`` at most; the octree stops as soon as no leaf
         is still above its band target, so the cost is the depth actually needed.  The
         per-leaf fields are carried (zeroth order) as in :meth:`refine`.
+
+        ``max_cells`` stops the refinement *between* two rounds, before a round that would
+        not fit: a request scaled past the budget of the caller is not answered with a mesh
+        the caller cannot afford, and the tree is left balanced and whole.  ``from_bands``
+        never passes one - the a priori plan is a request, not a budget - while a search
+        that scales the plan does.
         """
         _check_bands(bands)
 
@@ -293,7 +301,17 @@ class AdaptiveMesh:
                           if band.intersects(leaf, self.physical_size)), default=np.inf)
             return 1.0 if leaf.size * self.physical_size > target else 0.0
 
-        self.refine(indicator, 0.5, levels=self.tree.max_level)
+        if max_cells is None:
+            self.refine(indicator, 0.5, levels=self.tree.max_level)
+            return
+        for _ in range(self.tree.max_level):
+            marked = sum(1 for leaf in self.tree.leaves
+                         if leaf.level > 0 and indicator(leaf) > 0.5)
+            if marked == 0:
+                return                        # every leaf already meets its band
+            if self.n_cells + 7 * marked > max_cells:
+                return                        # the round would not fit: stop here
+            self.refine(indicator, 0.5)
 
     def refine(self, indicator: np.ndarray | Callable[[Leaf], float], threshold: float,
                levels: int = 1) -> None:
@@ -324,6 +342,42 @@ class AdaptiveMesh:
         for name in FIELDS:
             setattr(self, name, previous[name][mapping])
         self._rebuild_caches()
+
+    def refine_round(self, refine_fraction: float = 0.1, floor_ratio: float = 0.05,
+                     max_cells: int | None = None) -> int:
+        """Refine one round on the flux-jump indicator of the current field.
+
+        The rule is the one :func:`src.solver.octree_solver.refine_on_objective` applies,
+        asked of the mesh instead of the tree: the leaves whose jump is above
+        ``floor_ratio`` of the largest - at most ``refine_fraction`` of the tree and never
+        below the round-off level of the fluxes it carries - are split.  ``self.T`` must
+        hold a solved field: the indicator is the curvature of *that* field, and a round
+        drawn from a field that was never solved would refine round-off.
+
+        One round, not a loop: the estimate belongs to the field in hand, so the caller
+        that wants to go deeper has to solve again (which is what the levels of
+        :func:`src.analysis.convergence.find_mesh` do) or ask for a finer *request*
+        instead - the bands of the plan are the cheaper way to say "this region is not
+        resolved yet".
+
+        Returns the number of leaves the round marked, or 0 when nothing was refined -
+        either the field carries no feature above the floor, or the round would not fit
+        the cell budget, in which case the tree is left exactly as it was.
+        """
+        values = np.abs(np.asarray(self.indicator(), dtype=float))
+        flux = np.abs(self.face_fluxes(self.T))
+        threshold, marked = _mark(
+            self.tree, values, refine_fraction, floor_ratio,
+            noise=_NOISE_FLOOR * (float(flux.max()) if flux.size else 0.0))
+        if marked == 0:
+            return 0
+        # the budget is checked before the round: a marked leaf becomes eight leaves, so
+        # the round adds ``7 * marked`` of them (the balance adds a few more along the
+        # boundary of the flagged region, which the budget the caller set still bounds)
+        if max_cells is not None and self.n_cells + 7 * marked > max_cells:
+            return 0
+        self.refine(values, threshold)
+        return marked
 
     # ------------------------------------------------------- boundary conditions
     def set_adiabatic(self, face: str) -> None:

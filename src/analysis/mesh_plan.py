@@ -16,13 +16,23 @@ The plan is a *starting point*, not the answer: :mod:`src.analysis.convergence` 
 measures the real discretisation error with Richardson extrapolation and moves the
 targets until the answer stops moving.  Starting from the plan is what makes the
 search cheap: the first grid it builds is already in the right neighbourhood.
+
+The plan is also the sharing point between the two meshes: :func:`refinement_bands`
+turns the bands a :class:`~src.core.refinement.GridSpec` carries into the boxes an
+octree refines, one box per band and with the same target, and :func:`tree_resolution`
+says what box a tree needs to hold them.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
+from ..core.adaptive_mesh import RefinementBand
 from ..core.geometry import BatteryGeometry
 from ..core.materials import MaterialManager
+from ..core.refinement import GridSpec
 
 #: cells across a solid layer whose temperature drop must be represented
 CELLS_PER_LAYER = 8.0
@@ -119,3 +129,71 @@ def binding_target(geometry: BatteryGeometry, materials: MaterialManager,
 def describe(plans: list[RegionPlan]) -> str:
     """Multi-line summary for the log and the GUI."""
     return "\n".join(str(p) for p in plans)
+
+
+# --------------------------------------------------------------- the tree road
+#: the octree packs 21 bits per coordinate: this is the finest box it can index
+MAX_TREE_LEVEL = 21
+#: below four cells a side the flux-jump estimate has no stencil to look at, so a tree
+#: that coarse could not be refined on the indicator at all (see
+#: :meth:`src.solver.octree_solver.OctreeSteadySolver.indicator`)
+MIN_TREE_LEVEL = 2
+
+
+def refinement_bands(spec: GridSpec, extents: Sequence[float]) -> tuple[RefinementBand, ...]:
+    """The bands of a :class:`GridSpec` as tree boxes: one box per band, same target.
+
+    This is what keeps the two roads starting from the same a priori estimate: the
+    physical targets - ``thickness / N``, ``2 k / h``, the pitch between the tubes - are
+    decided once and land in both vocabularies unchanged, a band of one axis and a box of
+    the octree.  A band is a slice of one axis, so its box spans the other two: a leaf
+    intersects the box of the band that covers its own coordinate, and
+    :meth:`AdaptiveMesh.refine_bands` refines it to the smallest size among the boxes it
+    touches - the lower envelope of the three axes' targets, which is the field
+    :meth:`GridSpec.edges` builds for the structured mesh.
+
+    ``extents`` is ``(Lx, Ly, Lz)`` of the domain the boxes are written in.  Bands that
+    cover nothing are skipped, exactly as :func:`src.core.refinement.partition` skips them.
+    """
+    boxes: list[RefinementBand] = []
+    for axis, bands in enumerate((spec.x, spec.y, spec.z)):
+        for band in bands:
+            if band.length <= 0 or band.target <= 0:
+                continue
+            low = [0.0, 0.0, 0.0]
+            high = [float(extents[0]), float(extents[1]), float(extents[2])]
+            low[axis], high[axis] = float(band.start), float(band.end)
+            boxes.append(RefinementBand(low=(low[0], low[1], low[2]),
+                                        high=(high[0], high[1], high[2]),
+                                        size=float(band.target)))
+    if not boxes:
+        raise ValueError("a grid spec needs at least one refinement band")
+    return tuple(boxes)
+
+
+def tree_resolution(extents: Sequence[float], max_cells: int) -> tuple[int, float]:
+    """``(n_finest, physical_size)`` of the tree a cell budget affords.
+
+    An octree spans a *cube* (the largest extent of the domain) whose leaves are a power of
+    two of its finest cell, and that finest cell is the floor under the whole search: the
+    bands are the a priori plan and a refinement round goes *below* them wherever the field
+    asks for it, so the resolution has to leave room.  The budget sets it - a whole cube
+    refined to ``h`` holds ``box^3 / h^3`` leaves - which is the tree's answer to the
+    scaling :func:`src.core.refinement.graded_edges` gives a graded grid: the *request* is
+    what gets scaled, and this is the floor it may reach down to.
+
+    The level is rounded *up*, because a finer floor costs nothing until a leaf really goes
+    down to it - the refinement is stopped by the budget it is handed
+    (:meth:`AdaptiveMesh.refine_bands`, :meth:`AdaptiveMesh.refine_round`) - and it is
+    clamped at both ends: the octree indexes 21 bits per coordinate, and below four cells a
+    side the flux-jump estimate has no stencil to look at, so such a tree could not be
+    refined at all.
+    """
+    box = float(max(extents))
+    if box <= 0.0:
+        raise ValueError(f"the domain has no extent: {tuple(extents)}")
+    affordable = (box ** 3 / max(int(max_cells), 1)) ** (1.0 / 3.0)
+    level = int(np.ceil(np.log2(box / affordable))) if affordable < box else 0
+    level = int(np.clip(level, MIN_TREE_LEVEL, MAX_TREE_LEVEL))
+    n_finest = 1 << level
+    return n_finest, box / n_finest

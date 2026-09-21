@@ -8,6 +8,9 @@ from PyQt6.QtWidgets import (QLabel, QListWidget, QTabWidget, QVBoxLayout,
 
 import numpy as np
 
+from src.analysis.convergence import AdaptivePlan
+from src.analysis.mesh_plan import refinement_bands, tree_resolution
+from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.mesh import Mesh3D
 from src.core.refinement import Band, GridSpec
 from src.core.heaters import (SURFACE_POWER_LIMIT_W_CM2,
@@ -63,6 +66,8 @@ class GeometryPanel(QWidget):
         self._auto_spec: GridSpec | None = None
         self._plan_targets: dict[str, float] = {}
         self._pipe_network = None
+        #: the tree the last build produced, for the Mesh tab's summary
+        self._adaptive_mesh: AdaptiveMesh | None = None
         #: the junction-refinement spin of the Pipes tab; None until that tab is built
         self.pipe_junction = None
         self.tabs = QTabWidget()
@@ -326,6 +331,11 @@ class GeometryPanel(QWidget):
         panel = FormPanel()
         self.refined = panel.add("Refined mesh", check(
             "cells placed where the gradients are", True, on_toggle=self._mesh_mode))
+        self.adaptive = panel.add("Adaptive mesh", check(
+            "an octree of leaves instead of a graded grid", False, on_toggle=self._mesh_mode,
+            tooltip="The migration target: the same physical targets, refined as boxes of "
+                    "an octree instead of as bands of three axes.  The summary then "
+                    "reports leaves and levels rather than cells per axis."))
         self.spacing = panel.add("Cell size (uniform) [m]",
                                  double_spin(0.2, 0.02, 1.0, 0.05, 3,
                                              on_change=self.mesh_changed.emit))
@@ -392,26 +402,48 @@ class GeometryPanel(QWidget):
         panel.add_hint("The search solves the *steady* case: it picks the mesh, then all "
                        "analyses use it.  If the budget or the minimum cell size stops "
                        "the refinement, it says so instead of pretending.")
+        panel.add_hint("Adaptive mode: the search picks the same cell sizes - the bands "
+                       "of the physics plan - and the mesh is then built as an octree of "
+                       "those boxes, so the automatic mesh is a tree.")
         self._mesh_mode()
         self.tabs.addTab(panel, "Mesh")
 
     def _mesh_mode(self, *_args) -> None:
         """Enable the controls of the selected mesh mode."""
         graded = self.refined.isChecked()
+        adaptive = self.mesh_kind() == "adaptive"
         for widget in (self.cells_storage, self.cells_insulation, self.cells_sheath,
-                       self.far_field, self.growth, self.max_cells, self.min_cell,
-                       self.max_cell):
+                       self.far_field, self.max_cells):
             widget.setEnabled(graded)
+        for widget in (self.growth, self.min_cell, self.max_cell):
+            # a tree has no growth ratio to keep (the octree holds its own 2:1 balance) and
+            # no min/max size rails to sit on (a leaf edge is a power of two of the finest
+            # cell), so the controls that would do nothing are switched off rather than
+            # accepted and ignored
+            widget.setEnabled(graded and not adaptive)
+        self.adaptive.setEnabled(graded)
         self.spacing.setEnabled(not graded)
         self._update_mesh_summary()
+
+    def mesh_kind(self) -> str:
+        """``"adaptive"`` when the panel builds a tree, ``"structured"`` otherwise."""
+        return "adaptive" if self.refined.isChecked() and self.adaptive.isChecked() \
+            else "structured"
 
     def _update_mesh_summary(self) -> None:
         """Live summary of the mesh the current settings would build.
 
         Only the grid *edges* are computed here (a few thousand numbers): building
-        the mesh allocates every field and is reserved for the build button.
+        the mesh allocates every field and is reserved for the build button.  A tree is
+        summarised from the tree the last build produced - its leaf count is the
+        refinement itself, and an estimate of it would be a guess dressed as a
+        measurement - while the *recipe* is always shown, because that is what the
+        settings decide.
         """
         lx, ly, lz, spacing = self.domain()
+        if self.mesh_kind() == "adaptive":
+            self._update_tree_summary(lx, ly, lz)
+            return
         try:
             if self.refined.isChecked():
                 spec = self.grid_spec()
@@ -462,6 +494,60 @@ class GeometryPanel(QWidget):
             f"~{summary['cells'] * 98 / 1e6:.1f} MB of fields "
             f"(max ratio {summary['worst_ratio']:.2f}){note}")
 
+    def _update_tree_summary(self, lx: float, ly: float, lz: float) -> None:
+        """The Mesh tab's summary of an adaptive mesh: leaves, levels and leaf edges.
+
+        A tree has no cells per axis and no growth ratio (the octree keeps its own 2:1
+        balance after every refinement), and the panel does not invent them: it states
+        what the recipe fixes - the box, the resolution floor and the refinement boxes -
+        and, once a tree has been built, what the tree actually is.
+        """
+        try:
+            plan = self.adaptive_plan()
+        except (ValueError, RuntimeError) as exc:
+            self.mesh_info.setText(f"invalid: {exc}")
+            self.memory_info.setText("-")
+            return
+        box = plan.n_finest * plan.physical_size
+        sizes = [band.size for band in plan.bands]
+        lines = [
+            f"adaptive: box {box:.3f} m, finest leaf {plan.physical_size * 1000:.1f} mm",
+            f"{len(plan.bands)} refinement boxes, target "
+            f"{min(sizes) * 1000:.0f}-{max(sizes) * 1000:.0f} mm "
+            f"(domain {lx:.3f} x {ly:.3f} x {lz:.3f} m)"]
+        if min(sizes) < plan.physical_size:
+            lines.append(f"the budget's floor of {plan.physical_size * 1000:.1f} mm is "
+                         f"above the finest target: no leaf goes below it")
+        mesh = self._adaptive_mesh
+        if mesh is None:
+            lines.append("build the mesh to count the leaves")
+            self.memory_info.setText("-")
+        else:
+            levels = ", ".join(f"L{level}: {count:,}"
+                               for level, count in mesh.level_histogram().items())
+            lines.append(f"{mesh.n_cells:,} leaves ({levels})")
+            lines.append(f"leaf edge {mesh.sizes.min() * 1000:.1f}-"
+                         f"{mesh.sizes.max() * 1000:.1f} mm")
+            self.memory_info.setText(f"~{mesh.n_cells * 98 / 1e6:.1f} MB of fields")
+        self.mesh_info.setText("\n".join(lines))
+
+    def adaptive_plan(self) -> AdaptivePlan:
+        """The tree the current targets ask for: the same bands, as boxes of an octree.
+
+        The structured bands and the tree boxes come from the same list through
+        :func:`src.analysis.mesh_plan.refinement_bands`, so the a priori estimate - the
+        storage cells, ``thickness / N``, ``2 k / h``, the tube pitch - is decided once
+        and the two roads start from it.  The box and its resolution come from the cell
+        budget (:func:`src.analysis.mesh_plan.tree_resolution`), which is also the floor
+        under every leaf the search then refines.
+        """
+        lx, ly, lz = (self.domain_lx.value(), self.domain_ly.value(),
+                      self.domain_lz.value())
+        spec = self.grid_spec()
+        n_finest, physical_size = tree_resolution((lx, ly, lz), int(self.max_cells.value()))
+        return AdaptivePlan(n_finest=n_finest, physical_size=physical_size,
+                            bands=refinement_bands(spec, (lx, ly, lz)))
+
     def _limits_note(self, spec, summary: dict) -> str:
         """Say whether the min/max cell rails change anything (usually they do not).
 
@@ -505,9 +591,24 @@ class GeometryPanel(QWidget):
         return (self.domain_lx.value(), self.domain_ly.value(), self.domain_lz.value(),
                 self.spacing.value())
 
-    def build_mesh(self) -> Mesh3D:
-        """Mesh of the current settings: graded or the legacy uniform one."""
+    def build_mesh(self, adaptive: bool | None = None) -> Mesh3D | AdaptiveMesh:
+        """Mesh of the current settings: graded, uniform, or the octree of the same targets.
+
+        ``adaptive`` overrides the checkbox (``None`` follows it).  A tree is built with
+        :meth:`AdaptiveMesh.from_bands` from :meth:`adaptive_plan`, i.e. from the same
+        bands the graded road would use, so switching the mode changes the mesh and not
+        the request.  The tree is kept for the Mesh tab's summary: its leaf count, its
+        levels and its leaf edges are measured, never guessed.
+        """
         lx, ly, lz, spacing = self.domain()
+        if (self.mesh_kind() if adaptive is None else adaptive) == "adaptive":
+            plan = self.adaptive_plan()
+            mesh = AdaptiveMesh.from_bands(plan.n_finest, plan.physical_size, plan.bands,
+                                           plan.base_level)
+            self._adaptive_mesh = mesh
+            self._update_tree_summary(lx, ly, lz)
+            return mesh
+        self._adaptive_mesh = None
         if not self.refined.isChecked():
             return Mesh3D(Lx=lx, Ly=ly, Lz=lz, spacing=spacing)
         return Mesh3D(Lx=lx, Ly=ly, Lz=lz, grid=self.grid_spec())
