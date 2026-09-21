@@ -403,6 +403,18 @@ class AdaptiveMesh:
                       for position in np.flatnonzero(self.excluded)})
         return fixed
 
+    def fixed_mask(self) -> np.ndarray:
+        """``(n_cells,)`` mask of the leaves the Dirichlet elimination pins.
+
+        The boolean view of :meth:`fixed_leaves`, for a consumer that filters a per-leaf
+        array rather than iterating the set: a pinned leaf has an identity row, so an
+        exchange with it - a film on it, a source deposited in it - never reaches the
+        solution and the reports must not count it.
+        """
+        mask = np.zeros(self.tree.n_cells, dtype=bool)
+        mask[list(self.fixed_leaves())] = True
+        return mask
+
     def wall_indices(self, face: str) -> np.ndarray:
         """Positions of the leaves touching a box face, in ``tree.leaves`` order.
 
@@ -452,6 +464,22 @@ class AdaptiveMesh:
     def faces(self) -> Sequence[FaceRow]:
         """The conservative face list of :class:`MeshAPI`, straight from the octree."""
         return self.tree.faces()
+
+    def face_rows(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                 np.ndarray, np.ndarray]:
+        """``faces()`` in metres, with the conductance the assembly applies to each entry.
+
+        ``Octree.faces`` writes its areas and distances in *finest-cell* units (the caller
+        multiplies by :attr:`physical_size`), so the protocol's list cannot be read as a
+        heat rate without scaling it; this is the same list - the same entries, in the
+        same order - with the areas in m^2, the distances in m, and the conductance
+        [W/K] of :meth:`_face_table`, i.e. :func:`src.solver.matrix.face_conductance` with
+        this mesh's contact resistance and its excluded leaves.  ``g (T_i - T_j)`` is then
+        one heat rate per interface, the number the operator carries, which is what the
+        flux report of :mod:`src.analysis.fluxes` integrates.
+        """
+        table = self._face_table()
+        return (table.i, table.j, table.axis, table.area, table.distance, table.g)
 
     # -------------------------------------------------------------------- films
     def _environment_surface(self, faces: _FaceTable | None = None

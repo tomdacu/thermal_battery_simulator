@@ -8,7 +8,9 @@ Definitions used here (documented once, used everywhere):
 * ``p_extracted``  power removed by the heat-transfer fluid [W] (volumetric
                    sinks plus the tube-side convection).
 * ``q_domain``     power leaving through the six box faces [W].  It is computed
-                   with the same discrete conductances as the assembly, so
+                   with the faces and the conductances the assembly used - the mesh's
+                   own face list for a tree, the ``GridIndex`` tables for ``Mesh3D``
+                   (:mod:`src.analysis.fluxes`) - so
                    ``p_input - p_extracted - q_domain - dE/dt`` closes to
                    numerical precision: that identity is the self-check.
 * ``q_battery``    power crossing the battery envelope (sand/insulation/steel/
@@ -16,17 +18,24 @@ Definitions used here (documented once, used everywhere):
                    which does not scale with the size of the air box.
 * ``e_stored``     sensible energy above the ambient [J]; ``ex_stored`` the
                    corresponding exergy.
+
+The same fields are filled from either mesh: only the flux report knows which face list
+it is reading.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ..constants import T_AMBIENT_DEFAULT
 from ..core.mesh import MaterialID, Mesh3D
-from ..core.grid import GridIndex, dirichlet_mask
+from ..core.grid import GridIndex
 from . import fluxes
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from ..core.adaptive_mesh import AdaptiveMesh
 
 
 @dataclass
@@ -83,34 +92,45 @@ class Balance:
         }
 
 
-def _mask_mean(mesh: Mesh3D, mask: np.ndarray) -> float:
+def _mask_mean(mesh: Mesh3D | AdaptiveMesh, mask: np.ndarray) -> float:
     return float(mesh.T[mask].mean()) if mask.any() else float("nan")
 
 
-def compute_balance(mesh: Mesh3D, t_ambient: float = T_AMBIENT_DEFAULT,
+def compute_balance(mesh: Mesh3D | AdaptiveMesh, t_ambient: float = T_AMBIENT_DEFAULT,
                     index: GridIndex = None, dE_dt: float = 0.0,
                     t_source: float | None = None, radiation: bool = False) -> Balance:
     """Evaluate the energy balance of the current mesh state.
 
-    ``dE_dt`` [W] is the rate of change of stored energy; supply it in a
-    transient run so that :attr:`Balance.imbalance` stays meaningful.
-    ``radiation`` must match the setting used by the solver, otherwise the
-    reported surface flux would use coefficients the solve never applied.
+    Either mesh: ``Mesh3D`` reads its ``GridIndex`` tables (the face list its assembly was
+    built from) and an adaptive mesh its own ``faces()``, and the flux report of
+    :mod:`src.analysis.fluxes` dispatches between them - so the fields below have the
+    same meaning on both and the identity ``p_input - p_extracted - q_domain - dE/dt``
+    closes at the round-off of the terms on either.
+
+    ``index`` is the structured index of the caller (``SteadyStateSolver.index``,
+    ``TransientSolver.index``); a tree needs none.  ``dE_dt`` [W] is the rate of change
+    of stored energy; supply it in a transient run so that :attr:`Balance.imbalance`
+    stays meaningful.  ``radiation`` must match the setting used by the solver, otherwise
+    the reported surface flux would use coefficients the solve never applied.
     """
-    index = index or GridIndex.from_mesh(mesh)
-    q_dom = fluxes.domain_fluxes(mesh, radiation=radiation)
+    index = fluxes.structured_index(mesh, index)
+    q_dom = fluxes.domain_fluxes(mesh, radiation=radiation, index=index)
     # the outside film of an excluded-air model is an internal boundary: it belongs to
     # the domain loss, otherwise the balance identity would not close
     environment = fluxes.environment_flux(mesh, index)
     q_dom["total"] += environment
-    q_bat = fluxes.envelope_fluxes(mesh)
+    q_bat = fluxes.envelope_fluxes(mesh, index)
     q_bat["total"] += environment
 
-    # a source inside a pinned (Dirichlet) cell never reaches the solver: counting
-    # it as input made the reported balance miss the energy the identity rows drop
-    free = ~dirichlet_mask(mesh, index).reshape(mesh.T.shape, order="F")
-    p_input = float(np.sum(mesh.Q_source[free] * mesh.V[free]))
-    p_extracted = (float(-np.sum(mesh.Q_sink[free] * mesh.V[free]))
+    # a source (or a sink) inside a cell the elimination pinned never reaches the solver:
+    # counting it as input made the reported balance miss the energy the identity rows
+    # drop.  A Dirichlet face pins its cells, an environment model the excluded ones.
+    free = ~fluxes.pinned_cells(mesh, index)
+    q_source = fluxes.as_flat(mesh.Q_source)
+    q_sink = fluxes.as_flat(mesh.Q_sink)
+    volume = fluxes.as_flat(mesh.V)
+    p_input = float(np.sum(q_source[free] * volume[free]))
+    p_extracted = (float(-np.sum(q_sink[free] * volume[free]))
                    + fluxes.tube_flux(mesh, index))
 
     e_stored = fluxes.stored_energy(mesh, t_ambient)
@@ -145,7 +165,7 @@ def compute_balance(mesh: Mesh3D, t_ambient: float = T_AMBIENT_DEFAULT,
     )
 
 
-def storage_capacity(mesh: Mesh3D, t_max: float, t_ambient: float = T_AMBIENT_DEFAULT) -> float:
+def storage_capacity(mesh: Mesh3D | AdaptiveMesh, t_max: float, t_ambient: float = T_AMBIENT_DEFAULT) -> float:
     """Sensible storage capacity of the sand region between ambient and ``t_max`` [J]."""
     sand = mesh.material_id == int(MaterialID.SAND)
     if not sand.any():
@@ -154,7 +174,7 @@ def storage_capacity(mesh: Mesh3D, t_max: float, t_ambient: float = T_AMBIENT_DE
                  * max(t_max - t_ambient, 0.0))
 
 
-def thermal_autonomy(mesh: Mesh3D, t_ambient: float = T_AMBIENT_DEFAULT,
+def thermal_autonomy(mesh: Mesh3D | AdaptiveMesh, t_ambient: float = T_AMBIENT_DEFAULT,
                      index: GridIndex = None) -> dict[str, float]:
     """Hours the stored energy can cover the current loss rate.
 

@@ -87,6 +87,37 @@ class GridIndex:
             self._cache["face_factors"] = factors
         return factors
 
+    def face_rows(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+                                 np.ndarray]:
+        """The conservative face list of the structured mesh, in the layout of a tree's.
+
+        One entry per *interior* interface: the ``+axis`` neighbour of every cell that
+        has one, with the area [m^2] of that face and the centre-to-centre distance [m]
+        of the pair - exactly what :meth:`src.core.mesh_api.MeshAPI.faces` returns for an
+        adaptive mesh (``Octree.faces``, in the same ``(cell_i, cell_j, axis, area,
+        d_centers)`` layout).  Between the two, a consumer of the flux report can read
+        either mesh's own faces instead of re-deriving them from the index arithmetic.
+
+        The box faces are not in the list: the neighbour tables clip there, and their
+        exchange is the ``face_bc`` film the assembly applies to the wall cells.  Each
+        interface appears once, from its lower cell along the axis, so the heat rate
+        ``k_face A / d (T_i - T_j)`` is the one number both cells share.
+        """
+        cell_i, cell_j, axes, areas, distances = [], [], [], [], []
+        for axis in range(3):
+            nb = self.neighbours[2 * axis + 1]
+            inside = np.flatnonzero(~self.on_face[FACES[2 * axis + 1]])
+            other = nb[inside]
+            size = self.sizes[axis]
+            cell_i.append(inside)
+            cell_j.append(other)
+            axes.append(np.full(inside.size, axis, dtype=int))
+            areas.append(self.areas[axis][inside])
+            distances.append(0.5 * (size[inside] + size[other]))
+        return (np.concatenate(cell_i), np.concatenate(cell_j),
+                np.concatenate(axes), np.concatenate(areas),
+                np.concatenate(distances))
+
     @classmethod
     def from_mesh(cls, mesh: Mesh3D) -> GridIndex:
         nx, ny, nz = mesh.Nx, mesh.Ny, mesh.Nz
