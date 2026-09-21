@@ -48,14 +48,6 @@ from .physics import radiation_h
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
     from .adaptive_mesh import AdaptiveMesh
 
-#: what a discrete heater bank needs and a tree cannot give it yet: the bank is rasterised
-#: by the structured walk of :mod:`src.core.heaters` (``find_cell``, per-axis sizes), which
-#: step 6 of the migration ports.
-DISCRETE_BANK_GAP = ("the discrete heater bank cannot be painted on an adaptive mesh yet: "
-                     "its rasteriser is the structured one "
-                     "(docs/16_ADAPTIVE_MESH_MIGRATION.md, step 6).  Use the uniform "
-                     "heater zone, or paint a Mesh3D")
-
 
 # --------------------------------------------------------- the painter's mesh view
 # The protocol carries the physics per cell and deliberately no index arithmetic and no
@@ -609,15 +601,14 @@ class BatteryGeometry:
                         tubes_problems: bool = True) -> list[str]:
         """Errors and warnings of the discrete heater bank (warnings prefixed).
 
-        The bank is checked by walking the mesh (:func:`src.core.heaters.validate_bank`,
-        which locates cells and reads per-axis sizes): that is the structured rasteriser,
-        so on a tree a discrete pattern reports the gap instead of a number.  The uniform
-        zone is a mask, not a bank, and is checked on both meshes.
+        The bank is checked by walking the cells it lands in
+        (:func:`src.core.heaters.validate_bank`, which locates a point on either mesh and
+        measures the local cell there), so a discrete pattern is checked, and painted, the
+        same way on a structured mesh and on a tree.  The uniform zone is a mask, not a
+        bank, and has nothing to rasterise.
         """
-        if not isinstance(mesh, Mesh3D):
-            if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-                return []                       # the zone is a mask: nothing to rasterise
-            return [DISCRETE_BANK_GAP]
+        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
+            return []                           # the zone is a mask: nothing to rasterise
         cyl, cfg = self.cylinder, self.heaters
         bank = cfg.bank(cyl.z_storage_start, cyl.z_storage_end)
         tubes = None

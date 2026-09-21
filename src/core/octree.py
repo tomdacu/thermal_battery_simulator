@@ -189,6 +189,35 @@ class Octree:
                 return index
         return -1
 
+    def locate(self, x: float, y: float, z: float) -> Leaf | None:
+        """The leaf covering a point given in *finest-cell* units, or ``None`` outside.
+
+        The public face of the walk ``_locate`` does, and the point location the painters
+        of ``docs/16_ADAPTIVE_MESH_MIGRATION.md`` step 6 need: a rasteriser asks the tree
+        what is *there* instead of counting indices.  The coordinate is floored to the
+        finest cell, so a leaf owns its lower corner: a point on a leaf's low face belongs
+        to that leaf and a point on its high face to the neighbour above it.
+        """
+        corner = (int(np.floor(x)), int(np.floor(y)), int(np.floor(z)))
+        if min(corner) < 0 or max(corner) >= self.n:
+            return None
+        index = self._locate(*corner)
+        return None if index < 0 else self.leaves[index]
+
+    def cell_size_at(self, x: float, y: float, z: float,
+                     physical_size: float = 1.0) -> float:
+        """Edge of the leaf covering a point, in finest-cell units times ``physical_size``.
+
+        The tree's ``Mesh3D.cell_size_at``: a leaf is cubic, so its edge *is* the
+        characteristic size ``V**(1/3)``, and the point (not the cell index) is what a
+        rasteriser measures a zone against.  Finest-cell units by default, the convention
+        of :meth:`faces`; ``physical_size`` [m] is the edge of one finest cell.
+        """
+        leaf = self.locate(x, y, z)
+        if leaf is None:
+            raise ValueError(f"no leaf contains the point ({x}, {y}, {z})")
+        return float(leaf.size) * physical_size
+
     def _face_neighbours(self, leaf: Leaf, face: str) -> list[int]:
         """Indices of the leaves sharing this face, in sub-face order.
 

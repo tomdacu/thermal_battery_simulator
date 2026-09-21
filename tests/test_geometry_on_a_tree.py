@@ -19,9 +19,8 @@ import numpy as np
 import pytest
 
 from src.core.adaptive_mesh import AdaptiveMesh
-from src.core.geometry import (BatteryGeometry, CylinderGeometry, DISCRETE_BANK_GAP,
-                               HeaterPattern, TubeConfig, TubePattern,
-                               create_small_test_geometry)
+from src.core.geometry import (BatteryGeometry, CylinderGeometry, HeaterPattern,
+                               TubeConfig, TubePattern, create_small_test_geometry)
 from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 
 #: the per-cell state ``apply_to_mesh`` writes through the protocol
@@ -189,23 +188,6 @@ def test_a_tube_that_leaves_the_storage_is_refused_on_a_tree(tree_model):
     assert problems and "outside the storage radius" in problems[0]
     with pytest.raises(ValueError, match="outside the storage radius"):
         geometry.apply_to_mesh(tree_model)
-
-
-# ------------------------------------------------------- what a tree cannot do yet
-def test_a_discrete_heater_bank_names_the_step_it_needs(paint_pair, tree_model):
-    """The bank's rasteriser is still the structured one: the tree says so, loudly."""
-    geometry = battery_with_heaters(HeaterPattern.GRID_VERTICAL)
-    assert geometry.heater_problems(tree_model) == [DISCRETE_BANK_GAP]
-    before = painted(tree_model)
-    with pytest.raises(ValueError, match="step 6"):
-        geometry.apply_to_mesh(tree_model)
-    after = painted(tree_model)
-    # refused before anything was written: never half painted
-    assert all(np.array_equal(before[name], after[name]) for name in PAINTED)
-
-    # the gap is the tree's, not the geometry's: a structured mesh never meets it
-    _tree, structured = paint_pair()
-    assert DISCRETE_BANK_GAP not in geometry.heater_problems(structured)
 
 
 # --------------------------------------------------------------- the validation

@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import (BatteryGeometry, CylinderGeometry, HeaterConfig, HeaterPattern,
                                TubeConfig)
 from src.core.heaters import (SURFACE_POWER_LIMIT_W_CM2, SURFACE_POWER_MIN_W_CM2,
@@ -135,6 +136,24 @@ def test_the_sheath_resolution_is_measured_on_the_mesh():
     resolved = rasterize(bank(), resolved_mesh, 0.6, 0.6, 0.5, 0.5, 2.5)
     assert resolved.problem is None, resolved.problem
     assert resolved.min_cells_across_sheath >= 2
+
+
+def test_the_power_of_the_bank_is_deposited_exactly_on_a_tree():
+    """Whatever the mesh, ``sum(Q_source V)`` must equal the rated power - a tree too."""
+    mesh = AdaptiveMesh.uniform(32, 0.25, level=0)
+    result = rasterize(bank(), mesh, 3.0, 3.0, 1.8, 0.5, 4.5)
+    assert result.problem is None, result.problem
+    q = np.zeros(mesh.T.shape)
+    q[result.active_mask] = result.power / float(mesh.V[result.active_mask].sum())
+    assert float(np.sum(q * mesh.V)) == pytest.approx(4000.0, rel=1e-12)
+    assert len(result.elements) == 4
+    assert min(result.n_cells_per_element) > 0
+    # the sheath is thinner than a leaf here: the diagnostic says so and the bank is
+    # represented by the cells it crosses rather than vanishing
+    assert result.min_cells_across_sheath == 0
+    assert any("thinner than a cell" in note for note in result.notes)
+    assert int(result.mask.sum()) >= int(result.active_mask.sum()) > 0
+    assert not np.any(result.active_mask & ~result.mask)
 
 
 def test_the_geometry_builds_a_discrete_bank_and_reports_the_surface_power():

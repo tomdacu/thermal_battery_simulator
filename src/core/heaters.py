@@ -12,15 +12,26 @@ supported at the bottom by a plate.  Compared with the old straight rods this mo
 * deposits the power on the cells of the *active* length only: the cold shank
   through the insulation is part of the sheath but not a heat source.
 
-Everything here is pure geometry + numpy: no Qt, no solver.
+Everything here is pure geometry + numpy: no Qt, no solver.  The rasteriser runs on
+either mesh - the structured ``Mesh3D`` and the octree-based ``AdaptiveMesh`` - through
+the mesh view of :mod:`src.core.pipes`, so a bank lands on the same cells and deposits
+the same power on the tree as on the ``Mesh3D`` of the same cells.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from .mesh import Mesh3D
+# the mesh view the rasterisers share (cell centres, cell sizes, point location) lives
+# with the pipe rasteriser, the lowest layer that needs it
+from .pipes import cell_centres, cell_index, cell_sizes, flat_cells
+
+if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+    from .adaptive_mesh import AdaptiveMesh
 
 #: rating range of sheathed elements in solids [W/cm^2]
 SURFACE_POWER_MIN_W_CM2 = 3.0
@@ -209,40 +220,63 @@ def _distance_to_segment(px: np.ndarray, py: np.ndarray, pz: np.ndarray,
                    + (pz - (az + t * abz)) ** 2)
 
 
-def _segment_mask(mesh: Mesh3D, a: tuple[float, float, float],
+def _segment_window(mesh: Mesh3D | AdaptiveMesh, lo: Sequence[float],
+                    hi: Sequence[float],
+                    radius: float) -> tuple[slice, slice, slice] | np.ndarray:
+    """The cells a segment can reach, as an index window or a flat selection.
+
+    Every cell the mask can mark has a centre within ``radius`` of the segment, hence
+    inside the box ``[lo - radius, hi + radius]`` the segment spans, so the cells outside
+    that box can be left out of the distance evaluation without changing the mask.  A
+    ``Mesh3D`` answers with the index block the rasteriser has always used; a tree, which
+    has no index arithmetic, with the leaves whose centres fall in the band.
+    """
+    if isinstance(mesh, Mesh3D):
+        i0, j0, k0 = mesh.find_cell(lo[0] - radius, lo[1] - radius, lo[2] - radius)
+        i1, j1, k1 = mesh.find_cell(hi[0] + radius, hi[1] + radius, hi[2] + radius)
+        return (slice(min(i0, i1), max(i0, i1) + 1),
+                slice(min(j0, j1), max(j0, j1) + 1),
+                slice(min(k0, k1), max(k0, k1) + 1))
+    X, Y, Z = cell_centres(mesh)
+    near = np.ones(X.shape, dtype=bool)
+    for low, high, coordinate in ((lo[0], hi[0], X), (lo[1], hi[1], Y), (lo[2], hi[2], Z)):
+        near &= (low - radius <= coordinate) & (coordinate <= high + radius)
+    return np.flatnonzero(near)
+
+
+def _segment_mask(mesh: Mesh3D | AdaptiveMesh, a: tuple[float, float, float],
                   b: tuple[float, float, float], radius: float) -> np.ndarray:
     """Cells whose centre is within ``radius`` of the segment ``a``-``b``.
 
     The cell size is also honoured: an element thinner than the local cell still
     owns the cells it passes through (``radius`` is widened to half a cell), so a
     12 mm sheath can never vanish from a coarse mesh without being reported.
+
+    The mask is a mask over the cell centres - a 3-D array on ``Mesh3D`` and a flat one on
+    a tree, each shaped like the mesh's own fields - and the cells the axis crosses are
+    added cell by cell on either mesh, through the index a mask takes there.
     """
     lo = [min(a[i], b[i]) for i in range(3)]
     hi = [max(a[i], b[i]) for i in range(3)]
-    i0, j0, k0 = mesh.find_cell(lo[0] - radius, lo[1] - radius, lo[2] - radius)
-    i1, j1, k1 = mesh.find_cell(hi[0] + radius, hi[1] + radius, hi[2] + radius)
-    i0, i1 = min(i0, i1), max(i0, i1)
-    j0, j1 = min(j0, j1), max(j0, j1)
-    k0, k1 = min(k0, k1), max(k0, k1)
-    X = mesh.X[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]
-    Y = mesh.Y[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]
-    Z = mesh.Z[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]
-    distance = _distance_to_segment(X, Y, Z, a, b)
-    local = np.maximum.reduce([mesh.axis_size(0)[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1],
-                               mesh.axis_size(1)[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1],
-                               mesh.axis_size(2)[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]])
-    inside = distance <= np.maximum(radius, 0.5 * local)
-    mask = np.zeros(mesh.T.shape, dtype=bool)
-    mask[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1] = inside
+    window = _segment_window(mesh, lo, hi, radius)
+    X, Y, Z = cell_centres(mesh)
+    local = cell_sizes(mesh)
+    scale = local[window]
+    distance = _distance_to_segment(X[window], Y[window], Z[window], a, b)
+    mask = np.zeros(X.shape, dtype=bool)
+    mask[window] = distance <= np.maximum(radius, 0.5 * scale)
     # the cells the axis itself crosses: an element thinner than a cell must still
     # form an unbroken chain along its length, otherwise the power would be
     # deposited in a dotted line and the temperature field would be spiky
     length = float(np.sqrt(sum((b[i] - a[i]) ** 2 for i in range(3))))
-    step = max(float(min(local.ravel()) if local.size else 0.0), 1e-6)
+    # the step is the smallest cell the segment can reach, so the walk cannot step over a
+    # cell; a band holding no centre at all - a short segment in a coarse mesh - falls back
+    # to the cell that holds the start of the segment
+    step = max(float(scale.min()) if scale.size else mesh.cell_size_at(*a), 1e-6)
     for t in np.linspace(0.0, 1.0, max(int(np.ceil(length / step)) + 1, 2)):
         point = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]),
                  a[2] + t * (b[2] - a[2]))
-        mask[mesh.find_cell(*point)] = True
+        mask[cell_index(mesh, *point)] = True
     return mask
 
 
@@ -258,12 +292,19 @@ def _clip_segment(a: tuple[float, float, float], b: tuple[float, float, float],
     return (a, cut) if a[2] <= b[2] else (cut, b)
 
 
-def rasterize(bank: HeaterBank, mesh: Mesh3D, cx: float, cy: float, r_storage: float,
-              z_storage_start: float, z_storage_end: float) -> RasterResult:
+def rasterize(bank: HeaterBank, mesh: Mesh3D | AdaptiveMesh, cx: float, cy: float,
+              r_storage: float, z_storage_start: float,
+              z_storage_end: float) -> RasterResult:
     """Mark the cells of the bank and prepare the power deposit.
 
     The power of an element is spread over the cells of its *active* length, so
     ``sum(Q_source * V)`` equals the rated power whatever the discretisation.
+
+    The masks are masks over the cell centres and follow the mesh, so the same bank
+    rasterised on a tree and on the ``Mesh3D`` of the same cells marks the same cells and
+    deposits the same power; the fields the caller writes them into are shaped the same
+    way, so ``mesh.Q_source[raster.active_mask] = bank.total_power_w /
+    mesh.V[raster.active_mask].sum()`` is the deposit on either mesh.
     """
     elements = bank.generate_elements(cx, cy, r_storage)
     mask = np.zeros(mesh.T.shape, dtype=bool)
@@ -313,30 +354,37 @@ def rasterize(bank: HeaterBank, mesh: Mesh3D, cx: float, cy: float, r_storage: f
     return result
 
 
-def _min_cells_across_sheath(mesh: Mesh3D, elements: list[HairpinElement],
+def _min_cells_across_sheath(mesh: Mesh3D | AdaptiveMesh, elements: list[HairpinElement],
                              z_bottom: float = 0.0) -> int:
     """Cells the sheath diameter spans across the legs (min over the elements).
 
     The legs are vertical, so what resolves the sheath is the horizontal cell size
-    where the element sits.
+    where the element sits - the two per-axis sizes on ``Mesh3D``, the leaf edge on a
+    tree, which is cubic.
     """
     if not elements:
         return 0
     cells = []
     for element in elements:
-        i, j, _ = mesh.find_cell(element.center_x, element.center_y, z_bottom)
-        cells.append(max(int(np.floor(element.sheath_diameter
-                                      / min(mesh.dx[i], mesh.dy[j]))), 0))
+        if isinstance(mesh, Mesh3D):
+            i, j, _ = mesh.find_cell(element.center_x, element.center_y, z_bottom)
+            local = min(mesh.dx[i], mesh.dy[j])
+        else:
+            local = mesh.cell_size_at(element.center_x, element.center_y, z_bottom)
+        cells.append(max(int(np.floor(element.sheath_diameter / local)), 0))
     return min(cells)
 
 
-def validate_bank(bank: HeaterBank, mesh: Mesh3D, cx: float, cy: float, r_storage: float,
-                  z_storage_start: float, z_storage_end: float,
+def validate_bank(bank: HeaterBank, mesh: Mesh3D | AdaptiveMesh, cx: float, cy: float,
+                  r_storage: float, z_storage_start: float, z_storage_end: float,
                   tubes: list | None = None) -> list[str]:
     """Problems that make the bank unrepresentable or unsafe ([] if fine).
 
     ``tubes`` may be a list of objects with ``x``, ``y`` and ``radius`` attributes.
     Warnings (not errors) are prefixed with ``"warning: "``.
+
+    Every check is a check on the cells the bank lands in, so the report is the same on
+    either mesh wherever the two meshes have the same cells.
     """
     problems: list[str] = []
     if not bank.active:
@@ -400,12 +448,11 @@ def validate_bank(bank: HeaterBank, mesh: Mesh3D, cx: float, cy: float, r_storag
                         f"{SURFACE_POWER_MIN_W_CM2:.0f} W/cm2 working range")
 
     # elements sharing cells: the power would be deposited twice
-    seen: dict[tuple[int, int, int], int] = {}
+    seen: dict[int, int] = {}
     for index, element in enumerate(elements):
-        cells = np.argwhere(_element_cells(mesh, element, z_bottom, z_top))
-        for cell in cells:
-            key = (int(cell[0]), int(cell[1]), int(cell[2]))
-            other = seen.setdefault(key, index)
+        cells = flat_cells(_element_cells(mesh, element, z_bottom, z_top))
+        for cell in np.flatnonzero(cells):
+            other = seen.setdefault(int(cell), index)
             if other != index:
                 problems.append(f"elements {other} and {index} share a mesh cell: "
                                 f"increase the element spacing")
@@ -415,7 +462,7 @@ def validate_bank(bank: HeaterBank, mesh: Mesh3D, cx: float, cy: float, r_storag
     return problems
 
 
-def _element_cells(mesh: Mesh3D, element: HairpinElement, z_bottom: float,
+def _element_cells(mesh: Mesh3D | AdaptiveMesh, element: HairpinElement, z_bottom: float,
                    z_top: float) -> np.ndarray:
     mask = np.zeros(mesh.T.shape, dtype=bool)
     for a, b in element.segments(z_bottom, z_bottom + element.active_length, z_top):

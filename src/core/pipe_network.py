@@ -115,10 +115,12 @@ import numpy as np
 from .materials import MaterialManager
 from .mesh import MaterialID, Mesh3D
 from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULAR,
-                    PITCH_VERTICAL, PipeRun, rasterize_pipe)
+                    PITCH_VERTICAL, PipeRun, box_size, cell_centres, flat_cells,
+                    rasterize_pipe)
 
 if TYPE_CHECKING:                       # the solver layer imports this module's layer
     from ..solver.fluid import Fluid, FluidLoop
+    from .adaptive_mesh import AdaptiveMesh
 
 # ---------------------------------------------------------------------- vocabulary
 LAYOUT_STAGGERED = "staggered"
@@ -1146,8 +1148,8 @@ class PipeNetwork:
         return problems
 
     # ----------------------------------------------------------- voxelisation
-    def voxelize(self, mesh: Mesh3D | None = None) -> tuple[np.ndarray, np.ndarray,
-                                                            np.ndarray]:
+    def voxelize(self, mesh: Mesh3D | AdaptiveMesh | None = None
+                 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Voxelise the network: flat cell indices, length and wetted area per cell.
 
         The same interface as :func:`src.core.pipes.rasterize_pipe` - flat cell indices
@@ -1174,23 +1176,26 @@ class PipeNetwork:
                 np.asarray([areas[cell] for cell in order], dtype=float))
 
     # ---------------------------------------------------------------- the mesh
-    def _vessel_mask(self, mesh: Mesh3D, cells: np.ndarray) -> np.ndarray:
+    def _vessel_mask(self, mesh: Mesh3D | AdaptiveMesh, cells: np.ndarray) -> np.ndarray:
         """Whether each flat cell of ``cells`` has its centre inside the vessel."""
-        x = mesh.X.ravel(order="F")[cells]
-        y = mesh.Y.ravel(order="F")[cells]
-        z = mesh.Z.ravel(order="F")[cells]
+        x, y, z = (flat_cells(values)[cells] for values in cell_centres(mesh))
         radius = np.hypot(x - self.center[0], y - self.center[1])
         return ((radius <= self.config.radius + 1e-9)
                 & (z >= self.config.base_z - 1e-9)
                 & (z <= self.config.roof_z + 1e-9))
 
-    def _cells_3d(self, mesh: Mesh3D, cells: np.ndarray) -> np.ndarray:
-        """Boolean mask of the 3-D grid holding the flat ``cells``."""
-        flat = np.zeros(mesh.N_total, dtype=bool)
+    def _cell_mask(self, mesh: Mesh3D | AdaptiveMesh, cells: np.ndarray) -> np.ndarray:
+        """Boolean mask of the mesh's cells holding the flat ``cells``.
+
+        The mask follows the mesh: a 3-D array on ``Mesh3D`` (the shape its fields have)
+        and a flat one on a tree, which is what ``mesh.material_id[mask]`` and
+        ``mesh.set_internal_convection(mask, ...)`` read on either.
+        """
+        flat = np.zeros(mesh.T.size, dtype=bool)
         flat[cells] = True
         return flat.reshape(mesh.T.shape, order="F")
 
-    def paint(self, mesh: Mesh3D, h_fluid: float = 500.0,
+    def paint(self, mesh: Mesh3D | AdaptiveMesh, h_fluid: float = 500.0,
               t_fluid: float = 300.0) -> PaintReport:
         """Mark the pipes of the network on ``mesh`` and give them a gas film.
 
@@ -1205,6 +1210,9 @@ class PipeNetwork:
         Nothing is measured off the mask: the wetted area stays the geometric
         ``pi d L`` of the centrelines, and the report states how much of it fell
         outside the vessel (the nozzle stubs) and how much is left without a film.
+        Both meshes paint the same model: the mask is the one over the cells the
+        centrelines cross, and the two roads mark the same cells wherever a leaf and a
+        cell are the same one.
 
         The film is what a *lumped* model needs (a steady or losses run sees the pipes
         where they are).  A transient driven by a
@@ -1217,8 +1225,8 @@ class PipeNetwork:
         inside = self._vessel_mask(mesh, cells)
         riser_inside = self._vessel_mask(mesh, riser_cells)
         painted = cells[inside]
-        mask = self._cells_3d(mesh, painted)
-        riser_mask = self._cells_3d(mesh, riser_cells[riser_inside])
+        mask = self._cell_mask(mesh, painted)
+        riser_mask = self._cell_mask(mesh, riser_cells[riser_inside])
         props = MaterialManager().get(self.config.material)
         mesh.material_id[mask] = int(MaterialID.TUBES)
         mesh.k[mask], mesh.rho[mask], mesh.cp[mask] = props.k, props.rho, props.cp
@@ -1245,7 +1253,7 @@ class PipeNetwork:
                 f"carries no gas film: it only conducts in the sand")
         return report
 
-    def _riser_cells(self, mesh: Mesh3D) -> np.ndarray:
+    def _riser_cells(self, mesh: Mesh3D | AdaptiveMesh) -> np.ndarray:
         """Flat indices of the cells the risers cross on ``mesh``."""
         cells: dict[int, float] = {}
         for run in self.risers:
@@ -1304,7 +1312,7 @@ class PipeNetwork:
         from ..solver.fluid import Fluid as FluidType
         return FluidType() if fluid is None else fluid
 
-    def _gas_runs(self, mesh: Mesh3D | None = None) -> list[PipeRun]:
+    def _gas_runs(self, mesh: Mesh3D | AdaptiveMesh | None = None) -> list[PipeRun]:
         """The risers as the *gas* sees them: bore diameter, inner wetted surface.
 
         The design numbers of the network (``total_area``, ``specific_area``) stay the
@@ -1327,7 +1335,7 @@ class PipeNetwork:
                    external_power: float = 0.0, t_in: float | None = None,
                    h_fluid: float | None = None, fittings_k: float = 0.0,
                    fan_efficiency: float = 0.7, pressure: float = 101325.0,
-                   mesh: Mesh3D | None = None) -> FluidLoop:
+                   mesh: Mesh3D | AdaptiveMesh | None = None) -> FluidLoop:
         """Build the gas circuit of the network as the 1-D loop the analyses march.
 
         One run per branch, in branch order, with the branch split of :meth:`split`:
@@ -1487,7 +1495,7 @@ def _wall_point(config: PipeNetworkConfig, center: tuple[float, float],
             elevation)
 
 
-def build_pipe_network(mesh: Mesh3D, config: PipeNetworkConfig,
+def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
                        center: tuple[float, float] | None = None) -> PipeNetwork:
     """Rasterise the configured network on ``mesh``; the centre defaults to the box.
 
@@ -1501,7 +1509,8 @@ def build_pipe_network(mesh: Mesh3D, config: PipeNetworkConfig,
         raise ValueError("the pipe network configuration is not usable: "
                          + "; ".join(errors))
 
-    cx, cy = ((0.5 * mesh.Lx, 0.5 * mesh.Ly) if center is None
+    box = box_size(mesh)
+    cx, cy = ((0.5 * box[0], 0.5 * box[1]) if center is None
               else (float(center[0]), float(center[1])))
     diameter, duct = config.diameter, config.duct_d
     z_bottom, z_top = config.z_bottom, config.z_top
@@ -1671,9 +1680,9 @@ def build_pipe_network(mesh: Mesh3D, config: PipeNetworkConfig,
             f"({100.0 * (network.path_spread() - 1.0):.1f}% spread), so the shortest "
             f"branch takes more flow; the {COLLECTION_REVERSE} collection equalises "
             f"the paths")
-    if config.radius + WALL_STUB > 0.5 * min(mesh.Lx, mesh.Ly):
+    if config.radius + WALL_STUB > 0.5 * min(box[0], box[1]):
         network.notes.append(
             f"the vessel and its nozzle stubs do not fit inside the domain "
-            f"({mesh.Lx:.2f} x {mesh.Ly:.2f} m): what falls outside is dropped from "
+            f"({box[0]:.2f} x {box[1]:.2f} m): what falls outside is dropped from "
             f"the voxelisation")
     return network

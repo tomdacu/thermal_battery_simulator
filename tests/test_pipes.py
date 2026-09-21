@@ -14,6 +14,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.materials import MaterialManager
 from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
@@ -611,6 +612,42 @@ def test_the_paint_marks_the_pipes_inside_the_vessel_and_keeps_the_area():
                                         report.dropped, rel=1e-12)
     assert net.total_area == pytest.approx(
         sum(run.perimeter * run.total_length for run in net.runs), rel=1e-12)
+    # the film, the material and the sources
+    assert mesh.bc_h[tubes].max() == pytest.approx(350.0, rel=1e-12)
+    assert np.all(mesh.bc_T_inf[tubes] == pytest.approx(333.15, rel=1e-12))
+    assert mesh.boundary_type[tubes].max() == int(BoundaryType.CONVECTION)
+    assert mesh.rho[tubes].min() == pytest.approx(
+        MaterialManager().get(config.material).rho, rel=1e-12)
+    assert float(np.abs(mesh.Q_source[tubes]).sum()) == 0.0
+    assert not mesh.source_mask[tubes].any()
+    assert report.material == config.material
+
+
+def test_the_paint_marks_the_pipes_of_a_tree_inside_the_vessel_and_keeps_the_area():
+    """The same paint on the adaptive mesh: the tube cells of the bed, outside the wall no.
+
+    What this pins is what the mesh's own fields end up holding on the mesh the port is
+    for - a pipe material, a gas film, no source - and that the report accounts for the
+    stubs exactly as it does on a grid.  The cells are the leaves, so the mask, the film
+    and the volumes it is written through are the mesh's own.
+    """
+    # the tree of the same 8 m cube the `box()` helper spans: 16 leaves a side at 0.5 m
+    mesh = AdaptiveMesh.uniform(16, 0.5, level=0)
+    config = vessel(insulated_headers=True)
+    net = build_pipe_network(mesh, config)
+    report = net.paint(mesh, h_fluid=350.0, t_fluid=333.15)
+    tubes = mesh.material_id == int(MaterialID.TUBES)
+    assert report.cells == int(np.count_nonzero(tubes))
+    assert report.cells > 0 and report.riser_cells > 0
+    # every marked leaf has its centre inside the vessel
+    centres = mesh.centres()
+    radius = np.hypot(centres[:, 0] - net.center[0], centres[:, 1] - net.center[1])
+    low, high = config.base_z - 1e-9, config.roof_z + 1e-9
+    inside = ((radius <= config.radius + 1e-9) & (low <= centres[:, 2])
+              & (centres[:, 2] <= high))
+    assert not np.any(tubes & ~inside)
+    # the area is still the geometric one: the stubs are accounted for, not invented
+    assert report.area + report.dropped == pytest.approx(net.total_area, rel=1e-12)
     # the film, the material and the sources
     assert mesh.bc_h[tubes].max() == pytest.approx(350.0, rel=1e-12)
     assert np.all(mesh.bc_T_inf[tubes] == pytest.approx(333.15, rel=1e-12))
