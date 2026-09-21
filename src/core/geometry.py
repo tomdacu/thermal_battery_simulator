@@ -405,10 +405,13 @@ class BatteryGeometry:
     def apply_environment(self, mesh: Mesh3D, wind_speed: float | None = None) -> dict:
         """Turn the air around the vessel into a boundary condition.
 
-        The capability is one thing, using it is another: this is what fills
-        ``mesh.excluded`` and sets the film, so a normal run stops conducting through
-        the air box and the losses are computed on the vessel surface instead of on the
-        six faces of the domain.
+        **Not called by** :meth:`apply_to_mesh` yet.**  The method works and is tested,
+        but wiring it into the default build exposed two defects that need their own
+        fix before it can be automatic: ``fluxes.domain_fluxes`` still reports the
+        convection of the six box faces even where the boundary cell has been excluded
+        (a spurious 4.9 kW on the default vessel, which breaks the reported balance),
+        and one existing extraction test changes sign.  Call it explicitly when the
+        flux reporting has been taught about the excluded cells.
 
         The exclusion is *geometric*, not by material: a cell is dropped only if it is
         air **and** it lies outside the shell radius or above the roof apex.  The air
@@ -506,10 +509,6 @@ class BatteryGeometry:
         report.n_source_cells = self._paint_heaters(mesh, Z, R, materials)
         report.notes.extend(self.heater_warnings(mesh))
         report.n_tube_cells = self._paint_tubes(mesh, Z, R, materials)
-
-        # the air around the vessel becomes a boundary condition: the cells outside
-        # the envelope leave the problem and the surface carries the film
-        self.apply_environment(mesh)
 
         self.apply_boundary_conditions(mesh, steel_props)
         report.zone_volumes = self.zone_volumes(mesh)
