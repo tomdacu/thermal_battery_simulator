@@ -334,10 +334,11 @@ class GeometryPanel(QWidget):
         self.refined = panel.add("Refined mesh", check(
             "cells placed where the gradients are", True, on_toggle=self._mesh_mode))
         self.adaptive = panel.add("Adaptive mesh", check(
-            "an octree of leaves instead of a graded grid", False, on_toggle=self._mesh_mode,
-            tooltip="The migration target: the same physical targets, refined as boxes of "
-                    "an octree instead of as bands of three axes.  The summary then "
-                    "reports leaves and levels rather than cells per axis."))
+            "an octree of leaves instead of a graded grid", True, on_toggle=self._mesh_mode,
+            tooltip="Default: the same physical targets, refined as boxes of an octree "
+                    "instead of as bands of three axes.  The summary then reports leaves "
+                    "and levels rather than cells per axis.  Uncheck for the graded grid, "
+                    "which stays as the reference road."))
         self.spacing = panel.add("Cell size (uniform) [m]",
                                  double_spin(0.2, 0.02, 1.0, 0.05, 3,
                                              on_change=self.mesh_changed.emit))
@@ -396,10 +397,12 @@ class GeometryPanel(QWidget):
         self.auto_btn = panel.add_row(button("Find the mesh", self.auto_mesh_requested.emit,
                                             "Run the search on a background thread"))
         self.auto_first = panel.add("Automatic mesh", check(
-            "search before building (recommended)", True,
-            tooltip="Build mesh runs the search first: the physics plan sizes the targets "
-                    "and the convergence search moves them until the steady answer stops "
-                    "moving.  Uncheck to build exactly the grid configured above."))
+            "search before building", False,
+            tooltip="Off by default because the search is expensive: on a tree it builds "
+                    "and solves several grids (the first probe alone can be five times the "
+                    "planned mesh) before it can adopt one.  Build the planned mesh in a "
+                    "few seconds with the button, and press *Find the mesh* when you want "
+                    "the convergence evidence."))
         self.auto_result = panel.add("Search", hint("not run yet"))
         panel.add_hint("The search solves the *steady* case: it picks the mesh, then all "
                        "analyses use it.  If the budget or the minimum cell size stops "

@@ -182,18 +182,22 @@ def tree_resolution(extents: Sequence[float], max_cells: int) -> tuple[int, floa
     scaling :func:`src.core.refinement.graded_edges` gives a graded grid: the *request* is
     what gets scaled, and this is the floor it may reach down to.
 
-    The level is rounded *up*, because a finer floor costs nothing until a leaf really goes
-    down to it - the refinement is stopped by the budget it is handed
-    (:meth:`AdaptiveMesh.refine_bands`, :meth:`AdaptiveMesh.refine_round`) - and it is
-    clamped at both ends: the octree indexes 21 bits per coordinate, and below four cells a
-    side the flux-jump estimate has no stencil to look at, so such a tree could not be
-    refined at all.
+    The level is rounded **down**, and that is not a detail: the a priori plan pushes leaves
+    down to the floor wherever a region asks for a fine target, so the floor *is* the worst
+    case the user pays for.  Rounding up gave a floor whose whole cube holds up to six times
+    the budget (128^3 = 2.1 M leaves for a 400 k budget, measured 670 k leaves on the default
+    vessel, three and a half minutes to paint).  Rounding down keeps the worst case inside
+    the budget, and the price is that a target finer than the floor cannot be reached - the
+    panel reports the targets the tree actually realised, so the gap is visible rather than
+    implied.  The level is also clamped at both ends: the octree indexes 21 bits per
+    coordinate, and below four cells a side the flux-jump estimate has no stencil to look
+    at.
     """
     box = float(max(extents))
     if box <= 0.0:
         raise ValueError(f"the domain has no extent: {tuple(extents)}")
     affordable = (box ** 3 / max(int(max_cells), 1)) ** (1.0 / 3.0)
-    level = int(np.ceil(np.log2(box / affordable))) if affordable < box else 0
+    level = int(np.floor(np.log2(box / affordable))) if affordable < box else 0
     level = int(np.clip(level, MIN_TREE_LEVEL, MAX_TREE_LEVEL))
     n_finest = 1 << level
     return n_finest, box / n_finest
