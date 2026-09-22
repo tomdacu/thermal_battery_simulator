@@ -135,7 +135,7 @@ def test_every_panel_getter_survives_extreme_widget_values(window):
                   window.analysis_panel, window.solver_panel):
         try:
             if panel is window.geometry_panel:
-                panel.domain(), panel.cylinder(), panel.heaters(), panel.tubes()
+                panel.domain(), panel.cylinder(), panel.heaters()
             elif panel is window.materials_panel:
                 (panel.storage_key(), panel.insulation_key(), panel.shell_key(),
                  panel.packing_fraction(), panel.conditions(), panel.radiation_enabled())
@@ -254,8 +254,6 @@ def test_action_buttons_do_not_raise(window):
     window.geometry_panel.auto_first.setChecked(False)
     window.build_mesh()
     window.preview_geometry()
-    window.preview_elements()
-    assert window.geometry_panel.heater_positions.count() > 0
     window._update_mesh_info()
     window.results.update_statistics(window.mesh)
     window.results.update_materials(window.mesh, "steatite", 0.63, "rock_wool")
@@ -264,13 +262,12 @@ def test_action_buttons_do_not_raise(window):
 
 
 def test_the_refined_mesh_mode_builds_a_graded_grid(window):
-    """The panel targets become the grid: fine storage, coarse far field."""
+    """The panel targets become the grid: fine storage, a coarse cap outside."""
     panel = window.geometry_panel
     panel.refined.setChecked(True)
     panel.cells_storage.setValue(6)
     panel.cells_insulation.setValue(2)
     panel.cells_sheath.setValue(1)
-    panel.far_field.setValue(0.6)
     panel.max_cells.setValue(60_000)
     mesh = panel.build_mesh()
     assert not mesh.uniform

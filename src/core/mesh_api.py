@@ -122,8 +122,8 @@ class MeshAPI(Protocol):
 
     #: cells whose ``Q_source`` a power profile drives: written by the transient march
     #: and the geometry (``src/solver/transient.py:160-161``,
-    #: ``src/core/geometry.py``, ``src/core/heaters.py``); it is bookkeeping, not physics,
-    #: which is why it is a mask rather than a value.
+    #: ``src/core/geometry.py``); it is bookkeeping, not physics, which is why it is a
+    #: mask rather than a value.
     source_mask: np.ndarray
 
     #: film coefficient of the outer surface [W/(m^2 K)] and the ambient temperature [K]

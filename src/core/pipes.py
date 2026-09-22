@@ -78,12 +78,11 @@ class PipeRun:
 # ------------------------------------------------------ the rasteriser's mesh view
 # The protocol carries the physics per cell and deliberately no index arithmetic and no
 # per-axis sizes (see the module docstring of ``src/core/mesh_api.py``).  A rasteriser -
-# this module, :mod:`src.core.heaters`, :meth:`src.core.pipe_network.PipeNetwork.paint` -
-# needs exactly the three things that leaves out: *where* the cells are, *how big* they
-# are, and *which* cell holds a point.  On ``Mesh3D`` each helper below is the structured
-# query the rasterisers were written with - so nothing that reads a structured mesh moves
-# by an ulp - and on a tree it is a leaf lookup.  They are the transition, and they go
-# with ``Mesh3D``.
+# this module, :meth:`src.core.pipe_network.PipeNetwork.paint` - needs exactly the three
+# things that leaves out: *where* the cells are, *how big* they are, and *which* cell
+# holds a point.  On ``Mesh3D`` each helper below is the structured query the rasterisers
+# were written with - so nothing that reads a structured mesh moves by an ulp - and on a
+# tree it is a leaf lookup.  They are the transition, and they go with ``Mesh3D``.
 
 
 def cell_centres(mesh: Mesh3D | AdaptiveMesh) -> tuple[np.ndarray, np.ndarray,
@@ -261,6 +260,21 @@ def describe(runs: Iterable[PipeRun]) -> str:
                      f"L {run.total_length:7.2f} m  A {run.total_area:7.3f} m2  "
                      f"d {run.diameter * 1000:.1f} mm")
     return "\n".join(lines)
+
+
+def pipe_surface_power_w_cm2(power_w: float, area_m2: float) -> float:
+    """Power crossing a wetted pipe surface [W/cm^2]: ``P / A`` with A in cm^2.
+
+    The *only* surface that delivers heat to the bed in this plant is the pipes'
+    (``src/core/pipe_network.py``): the resistors heat the gas of the circuit and the
+    gas hands the power over across the tube walls, so the designed power per unit of
+    that surface is a rating of the tube, not of a sheath inside the bed.  ``inf`` when
+    the network offers no surface - a division a report can then refuse to print.
+    """
+    area_cm2 = float(area_m2) * 1.0e4
+    if area_cm2 <= 0.0:
+        return float("inf")
+    return float(power_w) / area_cm2
 
 
 #: pitches published for tube bundles in a granular bed, in multiples of the outer

@@ -24,13 +24,13 @@ says what box a tree needs to hold them.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from ..core.adaptive_mesh import RefinementBand
-from ..core.geometry import BatteryGeometry
+from ..core.geometry import BatteryGeometry, CylinderGeometry
 from ..core.materials import MaterialManager
 from ..core.refinement import GridSpec
 
@@ -129,6 +129,153 @@ def binding_target(geometry: BatteryGeometry, materials: MaterialManager,
 def describe(plans: list[RegionPlan]) -> str:
     """Multi-line summary for the log and the GUI."""
     return "\n".join(str(p) for p in plans)
+
+
+# ------------------------------------------------------- the regions of the model
+@dataclass(frozen=True)
+class MeshRegion:
+    """One box of the *active* model and the cell size it asks for [m].
+
+    The boxes are what an octree refines - a leaf is split while it intersects a box
+    and is still larger than that box's size - so a box is what spends cells.  The
+    regions below are the ones the physics needs: the sand, the insulation (the radial
+    ring and the two slabs), the shell, the casing (the surfaces the ambient film sits
+    on: the roof and the foundation) and the wall of the buried pipes.  The air around
+    the vessel is deliberately **not** one of them: it is excluded from the problem by
+    :meth:`~src.core.geometry.BatteryGeometry.apply_environment` and is held at the
+    ambient temperature, so a leaf refined there would be a leaf spent on a cell that
+    carries no flux.
+    """
+
+    name: str
+    target: float                                  # [m] cell size asked for
+    low: tuple[float, float, float]
+    high: tuple[float, float, float]
+    reason: str = ""
+
+    @property
+    def volume(self) -> float:
+        return float(np.prod([max(h - low, 0.0)
+                              for low, h in zip(self.low, self.high, strict=True)]))
+
+    def __str__(self) -> str:
+        box = " ".join(f"{axis}[{low:.2f}, {high:.2f}]"
+                       for axis, low, high in zip("xyz", self.low, self.high, strict=True))
+        return (f"{self.name:18s} target {self.target * 1000:6.1f} mm  {box}"
+                + (f"  ({self.reason})" if self.reason else ""))
+
+
+def _annulus_boxes(cx: float, cy: float, inner: float, outer: float,
+                   z_low: float, z_high: float
+                   ) -> list[tuple[tuple[float, ...], tuple[float, ...]]]:
+    """The four boxes covering the annulus ``inner <= r <= outer`` over a z band.
+
+    An octree band is an axis-aligned box, so a ring is covered by four of them: the
+    two x-slabs and the two y-slabs that carry its *thickness* - which is what has to be
+    resolved.  Their union is the ring plus its four corner squares (about a seventh of
+    the ring's area), which is the cheapest cover an axis-aligned box can give.
+    """
+    boxes = []
+    for centre, axis in ((cx, 0), (cy, 1)):
+        for sign in (-1.0, 1.0):
+            low = [cx - outer, cy - outer, z_low]
+            high = [cx + outer, cy + outer, z_high]
+            if sign < 0:
+                low[axis], high[axis] = centre - outer, centre - inner
+            else:
+                low[axis], high[axis] = centre + inner, centre + outer
+            boxes.append((tuple(low), tuple(high)))
+    return boxes
+
+
+def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
+                   pipe_box: tuple[Sequence[float], Sequence[float]] | None = None
+                   ) -> list[MeshRegion]:
+    """The boxes of the active model, each with the cell size it asks for [m].
+
+    ``targets`` gives the cell size per region: ``sand``, ``insulation_radial``,
+    ``slab_bottom``, ``slab_top``, ``shell``, ``casing`` and ``pipe_wall`` (the last
+    one only when ``pipe_box`` is given).  A region whose key is missing keeps its own
+    physical length - the sand's radius, the insulation's thickness - so a caller that
+    only wants the boxes can pass an empty mapping.
+
+    The sand and the two slabs get one box each; the insulation ring and the shell are
+    annuli, covered by four boxes each; the **casing** is the pair of boxes whose
+    surfaces carry the ambient film (the conical roof and the foundation under the
+    floor) and it is what keeps a 20 mm shell or a 5 mm plate from being widened into a
+    metre of steel by the voxel painter when the grid is coarse.  The box of the pipes
+    is the caller's: the bundle is the network's business, not the vessel's.
+    """
+    cyl = cylinder
+    cx, cy = cyl.center_x, cyl.center_y
+
+    def target(name: str, length: float) -> float:
+        return float(targets.get(name, length))
+
+    regions: list[MeshRegion] = [
+        MeshRegion("sand", target("sand", cyl.r_storage),
+                   (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_storage_start),
+                   (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_storage_end),
+                   "the storage radius, resolved by the bed's own cell size"),
+    ]
+    if cyl.insulation_slab_bottom > 0:
+        regions.append(MeshRegion(
+            "slab_bottom", target("slab_bottom", cyl.insulation_slab_bottom),
+            (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_slab_bottom_start),
+            (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_storage_start)))
+    if cyl.insulation_slab_top > 0:
+        regions.append(MeshRegion(
+            "slab_top", target("slab_top", cyl.insulation_slab_top),
+            (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_slab_top_start),
+            (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_slab_top_end)))
+    for name, inner, outer in (("insulation_radial", cyl.r_storage, cyl.r_shell),
+                               ("shell", cyl.r_insulation, cyl.r_shell)):
+        if outer - inner <= 0:
+            continue
+        size = target(name, outer - inner)
+        for low, high in _annulus_boxes(cx, cy, inner, outer, cyl.base_z, cyl.z_shell_top):
+            regions.append(MeshRegion(
+                name, size, low, high,
+                f"{1000.0 * (outer - inner):.0f} mm across the "
+                f"{'insulation ring' if name == 'insulation_radial' else 'shell'}"))
+    casing = target("casing", min(targets.values(), default=cyl.r_storage))
+    if cyl.roof_height > 0:
+        regions.append(MeshRegion(
+            "roof", casing,
+            (cx - cyl.r_shell, cy - cyl.r_shell, cyl.z_cone_base),
+            (cx + cyl.r_shell, cy + cyl.r_shell, cyl.z_cone_apex),
+            "the cone roof carries the top film"))
+    if cyl.base_z > 0:
+        reach = cyl.r_shell + max(cyl.foundation_margin, 0.0)
+        regions.append(MeshRegion(
+            "foundation", casing, (cx - reach, cy - reach, 0.0),
+            (cx + reach, cy + reach, cyl.base_z),
+            "the concrete under the floor carries the ground face"))
+    if pipe_box is not None:
+        regions.append(MeshRegion("pipe_wall", target("pipe_wall", 0.05),
+                                  tuple(pipe_box[0]), tuple(pipe_box[1]),
+                                  "the network's tubes are the heat-transfer surface"))
+    return regions
+
+
+def region_bands(regions: Sequence[MeshRegion]) -> tuple[RefinementBand, ...]:
+    """The regions as the boxes an octree refines: one band per region, same target.
+
+    This is the tree's road into the a priori plan: the panel passes the boxes of
+    :func:`active_regions` and the octree refines each of them to its own size, so a
+    leaf in the air around the vessel - where no region is - is left at the level the
+    tree's own balance happens to give it, which is the whole point of planning by
+    region instead of by axis.
+    """
+    bands: list[RefinementBand] = []
+    for region in regions:
+        if region.target <= 0.0 or region.volume <= 0.0:
+            continue
+        bands.append(RefinementBand(low=tuple(region.low), high=tuple(region.high),
+                                    size=float(region.target)))
+    if not bands:
+        raise ValueError("at least one active region is required")
+    return tuple(bands)
 
 
 # --------------------------------------------------------------- the tree road

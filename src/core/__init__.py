@@ -6,10 +6,6 @@ from .geometry import (
     BuildReport,
     CylinderGeometry,
     HeaterConfig,
-    HeaterPattern,
-    TubeConfig,
-    TubeElement,
-    TubePattern,
     create_small_test_geometry,
 )
 from .profiles import ExtractionProfile, InitialCondition, PowerProfile
@@ -18,7 +14,6 @@ __all__ = [
     "MATERIALS", "MaterialManager", "ThermalProperties",
     "BoundaryType", "FaceBC", "MaterialID", "Mesh3D", "NodeProperties",
     "BatteryGeometry", "BuildReport", "CylinderGeometry", "HeaterConfig",
-    "HeaterPattern", "TubeConfig", "TubeElement", "TubePattern",
     "create_small_test_geometry",
     "ExtractionProfile", "InitialCondition", "PowerProfile",
 ]

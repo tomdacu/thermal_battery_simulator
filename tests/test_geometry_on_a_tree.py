@@ -19,9 +19,9 @@ import numpy as np
 import pytest
 
 from src.core.adaptive_mesh import AdaptiveMesh
-from src.core.geometry import (BatteryGeometry, CylinderGeometry, HeaterPattern,
-                               TubeConfig, TubePattern, create_small_test_geometry)
-from src.core.mesh import BoundaryType, MaterialID, Mesh3D
+from src.core.geometry import (BatteryGeometry, CylinderGeometry,
+                               create_small_test_geometry)
+from src.core.mesh import MaterialID, Mesh3D
 
 #: the per-cell state ``apply_to_mesh`` writes through the protocol
 PAINTED = ("material_id", "k", "rho", "cp", "Q_source", "Q_sink", "source_mask", "bc_h",
@@ -56,10 +56,9 @@ def differences(tree: AdaptiveMesh, structured: Mesh3D) -> dict[str, int]:
     return {name: int(np.count_nonzero(on_tree[name] != on_grid[name])) for name in PAINTED}
 
 
-def battery_with_heaters(pattern: str, power_kw: float = 50.0) -> BatteryGeometry:
-    """The shared test geometry with a different heater pattern."""
+def battery_with_power(power_kw: float = 50.0) -> BatteryGeometry:
+    """The shared test geometry with a different plant power."""
     geometry = create_small_test_geometry()
-    geometry.heaters.pattern = pattern
     geometry.heaters.power_total = power_kw
     return geometry
 
@@ -81,10 +80,10 @@ def test_the_painter_writes_the_same_leaves_on_a_tree(paint_pair):
     assert not (tree.excluded & (tree.material_id != int(MaterialID.AIR))).any()
 
 
-def test_the_uniform_heater_zone_carries_the_rated_power_on_a_tree(paint_pair):
-    """The zone is a mask over the storage band: same cells, same volumetric power."""
+def test_the_bed_source_carries_the_rated_power_on_a_tree(paint_pair):
+    """The bed source is a mask over the storage band: same cells, same power density."""
     power_kw = 50.0
-    geometry = battery_with_heaters(HeaterPattern.UNIFORM_ZONE, power_kw)
+    geometry = battery_with_power(power_kw)
     tree, structured = paint_pair(geometry)
 
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
@@ -109,8 +108,6 @@ def test_the_build_report_is_the_same_on_either_mesh(paint_pair):
 
     assert report_tree == report_grid
     assert report_tree.n_source_cells == report_grid.n_source_cells > 0
-    assert report_tree.n_heater_elements == report_grid.n_heater_elements == 0
-    assert report_tree.n_tube_cells == report_grid.n_tube_cells == 0
     assert report_tree.zone_volumes == report_grid.zone_volumes
     assert report_tree.notes == []                    # the cube needs no snapping note
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
@@ -146,48 +143,6 @@ def test_the_air_leaves_the_problem_on_a_tree_and_the_film_is_the_same(paint_pai
     assert film_tree == film_grid
     assert tree.h_out == structured.h_out == film_tree["total"]
     assert film_tree["total"] > film_tree["natural"]
-
-
-# ------------------------------------------------------------------- the tubes
-@pytest.mark.parametrize("tubes", [
-    TubeConfig(n_tubes=1, active=True, diameter=0.6, pattern=TubePattern.SINGLE_CENTRAL),
-    TubeConfig(n_tubes=4, active=True, diameter=0.2),
-    TubeConfig(n_tubes=1, active=True, diameter=0.02, pattern=TubePattern.SINGLE_CENTRAL),
-    TubeConfig(n_tubes=6, active=True, diameter=0.3, h_fluid=800.0, t_fluid=340.0),
-], ids=["resolved", "half-cell", "sub-cell", "six-with-fluid"])
-def test_the_tubes_land_on_the_same_cells_on_a_tree(paint_pair, tubes):
-    """The tube mask is a mask over cells: the same chain, the same fluid, either mesh.
-
-    The three sizes are the three branches of ``_elements_mask``: a tube wider than the
-    cell (the circle decides), one at half a cell (the widened radius decides) and one
-    thinner than a cell (the cells the axis crosses decide, so it cannot vanish).
-    """
-    geometry = create_small_test_geometry()
-    geometry.tubes = tubes
-    tree, structured = paint_pair(geometry)
-
-    assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
-    tube_cells = tree.material_id == int(MaterialID.TUBES)
-    assert tube_cells.any()
-    assert tree.bc_h[tube_cells].min() == pytest.approx(tubes.h_fluid)
-    assert tree.bc_T_inf[tube_cells].min() == pytest.approx(tubes.t_fluid)
-    assert np.all(tree.boundary_type[tube_cells] == BoundaryType.CONVECTION)
-    # a tube is not a heater, and it sits inside the storage band
-    assert not tree.source_mask[tube_cells].any()
-    assert not tree.Q_source[tube_cells].any()
-    z = tree.centres()[tube_cells, 2]
-    cylinder = geometry.cylinder
-    assert z.min() >= cylinder.z_storage_start and z.max() < cylinder.z_storage_end
-
-
-def test_a_tube_that_leaves_the_storage_is_refused_on_a_tree(tree_model):
-    """The geometric tube check measures the local cell on a tree too."""
-    geometry = create_small_test_geometry()
-    geometry.tubes = TubeConfig(n_tubes=8, active=True, diameter=1.2)
-    problems = geometry.tube_problems(tree_model)
-    assert problems and "outside the storage radius" in problems[0]
-    with pytest.raises(ValueError, match="outside the storage radius"):
-        geometry.apply_to_mesh(tree_model)
 
 
 # --------------------------------------------------------------- the validation

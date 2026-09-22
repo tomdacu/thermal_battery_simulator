@@ -21,8 +21,6 @@ from src.viz import scene  # noqa: E402
 def model():
     mesh = Mesh3D(Lx=6.0, Ly=6.0, Lz=5.6, spacing=0.5)
     battery = create_small_test_geometry()
-    battery.tubes.active = True
-    battery.tubes.diameter = 0.3
     battery.apply_to_mesh(mesh)
     return mesh, battery
 
@@ -34,9 +32,7 @@ def tree_model():
     The box is the one ``tests/conftest.py`` paints its models in (an 8 m cube, 0.25 m
     finest cell), and the band refines a 2 m corner down to that floor, so the scene
     carries the step between leaf sizes a real model has - a hanging node - instead of a
-    uniform grid of cubes.  The tubes stay off, as in the geometry fixture: a coarse leaf
-    at the storage wall would put their reach past the storage radius, which is a
-    geometric objection and not a rendering one.
+    uniform grid of cubes.
     """
     mesh = AdaptiveMesh.from_bands(
         32, 0.25, (RefinementBand(low=(0.0, 0.0, 0.0), high=(2.0, 2.0, 2.0), size=0.25),))

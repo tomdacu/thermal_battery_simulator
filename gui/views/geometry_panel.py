@@ -1,20 +1,27 @@
-"""Geometry panel: cylinder, insulation, heaters, tubes and mesh sub-tabs."""
+"""Geometry panel: cylinder, insulation, the gas circuit, the pipes and the mesh.
+
+Two of the sub-tabs are the *plant* rather than the vessel: the **Heaters** tab is the
+gas circuit the electric resistors heat (``src/solver/fluid.py``), and the **Pipes**
+tab is the buried network the gas runs through (``src/core/pipe_network.py``).  They
+are the same circuit seen from its two ends: the resistors put power into the gas, the
+gas carries it to the pipe walls and the sand takes it up; on discharge the same loop
+carries it back out to the exchanger, which sits on the circuit too.  There is no
+heater element inside the bed and no second heat exchanger inside the vessel.
+"""
 from __future__ import annotations
 
 
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (QLabel, QListWidget, QTabWidget, QVBoxLayout,
-                             QWidget)
-
-import numpy as np
+from PyQt6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
 from src.analysis.convergence import AdaptivePlan
-from src.analysis.mesh_plan import refinement_bands, tree_resolution
+from src.analysis.mesh_plan import active_regions, region_bands, tree_resolution
+from src.constants import (PIPE_SURFACE_POWER_LIMIT_W_CM2,
+                           PIPE_SURFACE_POWER_MIN_W_CM2)
 from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.mesh import Mesh3D
+from src.core.pipes import pipe_surface_power_w_cm2
 from src.core.refinement import Band, GridSpec
-from src.core.heaters import (SURFACE_POWER_LIMIT_W_CM2,
-                              SURFACE_POWER_MIN_W_CM2)
 from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
                                    COLLECTION_REVERSE, COLLECTION_TWO_LEVEL,
                                    LAYOUT_GRID, LAYOUT_RADIAL, LAYOUT_RINGS,
@@ -25,10 +32,8 @@ from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
 from src.core.geometry import (
     CylinderGeometry,
     HeaterConfig,
-    HeaterPattern,
-    TubeConfig,
-    TubePattern,
 )
+from src.solver.fluid import Fluid
 
 from ..widgets import FormPanel, button, check, combo, double_spin, hint, int_spin
 
@@ -38,26 +43,19 @@ class GeometryPanel(QWidget):
 
     mesh_changed = pyqtSignal()
     auto_mesh_requested = pyqtSignal()
-    preview_requested = pyqtSignal()
     #: the Pipes tab asks the window - which owns the mesh - to build and paint the
     #: network; the window answers through :meth:`set_pipe_network`
     pipe_network_requested = pyqtSignal()
 
-    HEATER_PATTERNS = (
-        ("Uniform zone (volumetric)", HeaterPattern.UNIFORM_ZONE),
-        ("Vertical grid", HeaterPattern.GRID_VERTICAL),
-        ("Checkerboard", HeaterPattern.CHESS_PATTERN),
-        ("Radial array", HeaterPattern.RADIAL_ARRAY),
-        ("Spiral", HeaterPattern.SPIRAL),
-        ("Concentric rings", HeaterPattern.CONCENTRIC_RINGS),
-    )
-    TUBE_PATTERNS = (
-        ("Central cluster", TubePattern.CENTRAL_CLUSTER),
-        ("Radial array", TubePattern.RADIAL_ARRAY),
-        ("Grid", TubePattern.GRID),
-        ("Hexagonal (dense)", TubePattern.HEXAGONAL),
-        ("Single central", TubePattern.SINGLE_CENTRAL),
-        ("Custom positions", TubePattern.CUSTOM),
+    #: the gases the circuit can be filled with: the loop reads their cp, rho, mu and k
+    #: (``src/solver/fluid.py``), and the pressure is a separate control because it is
+    #: what raises the density and the Reynolds number without raising the velocity
+    FLUIDS = (
+        ("Air", Fluid()),
+        ("Nitrogen", Fluid(name="nitrogen", cp=1040.0, rho=1.12, mu=1.76e-5,
+                           k=0.0255, pr=0.72, molar_mass=0.02801)),
+        ("Steam", Fluid(name="steam", cp=2030.0, rho=0.60, mu=1.3e-5, k=0.025,
+                        pr=0.95, molar_mass=0.01802)),
     )
 
     def __init__(self, parent=None) -> None:
@@ -76,10 +74,9 @@ class GeometryPanel(QWidget):
         layout.addWidget(self.tabs)
         self._build_cylinder_tab()
         self._build_insulation_tab()
-        self._build_heaters_tab()
-        self._build_tubes_tab()
-        self._build_mesh_tab()
+        self._build_circuit_tab()
         self._build_pipes_tab()
+        self._build_mesh_tab()
 
     # ------------------------------------------------------------------ tabs
     def _build_cylinder_tab(self) -> None:
@@ -121,66 +118,69 @@ class GeometryPanel(QWidget):
                                                                "beyond the shell"))
         self.tabs.addTab(panel, "Insulation")
 
-    def _build_heaters_tab(self) -> None:
+    def _build_circuit_tab(self) -> None:
+        """The plant's heat source: the electric resistors and the gas circuit.
+
+        The resistors do not sit in the sand: they heat the gas of a closed loop that
+        runs through the buried pipes (``src/solver/fluid.py``), and the gas hands the
+        power to the bed across the pipe walls.  Everything on this tab is a property
+        of the *circuit* - the power in, the gas in it, the flow it carries, the
+        pressure it runs at, the temperature the gas comes back to the resistors at,
+        the blower and the wall - and the summary below is computed on the network the
+        Pipes tab built, because that is the surface the power crosses.
+        """
         panel = FormPanel()
-        self._heater_panel = panel
-        self.power = panel.add("Total power [kW]", double_spin(5.0, 0.0, 10000.0, 1.0, 1,
-                                                               on_change=self._update_power,
-                                                               tooltip="The storage temperature "
-                                                                       "rise follows the "
-                                                                       "geometry: check it "
-                                                                       "with a steady run"))
-        self.heater_pattern = panel.add("Pattern", combo(self.HEATER_PATTERNS, 0,
-                                                         self._update_power))
-        self.n_heaters = panel.add("Elements", int_spin(12, 1, 500, 1,
-                                                        on_change=self._update_power))
-        self.offset_bottom = panel.add("Offset from bottom [m]",
-                                       double_spin(0.0, 0.0, 2.0, 0.1, 2))
-        self.offset_top = panel.add("Offset from top [m]", double_spin(0.0, 0.0, 2.0, 0.1, 2))
-        self.heater_grid_rows = panel.add("Grid rows", int_spin(4, 1, 20))
-        self.heater_grid_cols = panel.add("Grid columns", int_spin(4, 1, 20))
-        self.sheath_diameter = panel.add("Sheath diameter [m]", double_spin(
-            0.012, 0.006, 0.05, 0.002, 3, on_change=self._update_power,
-            tooltip="Outer diameter of the tubular element (U-shaped, hairpin)"))
-        self.leg_spacing = panel.add("Leg spacing [m]", double_spin(
-            0.08, 0.02, 1.0, 0.01, 3, tooltip="Centre-to-centre distance of the two legs"))
-        self.active_length = panel.add("Active length [m]", double_spin(
-            0.0, 0.0, 30.0, 0.1, 2, tooltip="Heated length inside the sand (0 = whole band)"))
-        self.cold_shank = panel.add("Cold shank [m]", double_spin(
-            0.15, 0.0, 2.0, 0.05, 2, tooltip="Length through the insulation and the air"))
-        self.support_offset = panel.add("Support plate [m]", double_spin(
-            0.05, 0.0, 1.0, 0.01, 2, tooltip="Support plate above the storage floor"))
-        self.flange_offset = panel.add("Flange above roof [m]", double_spin(
-            0.03, 0.0, 1.0, 0.01, 2))
-        self.heater_rings = panel.add("Rings", int_spin(2, 1, 10))
-        self.power_per_heater = panel.add("Power per element [kW]", hint("-"))
-        self.surface_power = panel.add("Surface power [W/cm²]", hint("-"))
-        panel.add_row(button("Calculate positions", self.preview_requested.emit))
-        self.heater_positions = QListWidget()
-        self.heater_positions.setMaximumHeight(120)
-        panel.add_row(self.heater_positions)
-        panel.add_hint("Uniform zone: the power is spread over the whole storage volume. "
-                       "Discrete patterns mark individual cells as heat sources.")
+        panel.add_hint("The electric resistors heat the GAS, in a tank on the circuit; "
+                       "the hot gas enters the distributor, rises through the buried "
+                       "pipes, gives its heat to the sand and leaves from the collector. "
+                       "On discharge the flow reverses: the gas comes back cold from the "
+                       "exchanger, takes the heat from the bed and leaves hot. The bed "
+                       "is heated through the tube walls, never by an element inside it.")
+        self.power = panel.add("Total power [kW]", double_spin(
+            5.0, 0.0, 100000.0, 10.0, 1, on_change=self._update_power,
+            tooltip="Electric power of the plant: the resistors put it into the gas, "
+                    "and the analyses that do not march the loop read it as the bed's "
+                    "own source"))
+        self.fluid = panel.add("Gas", combo(self.FLUIDS, 0, self._update_power))
+        self.offset_bottom = panel.add("Source from bottom [m]", double_spin(
+            0.0, 0.0, 2.0, 0.1, 2,
+            tooltip="Band of the storage the lumped bed source covers: an analysis that "
+                    "does not march the loop deposits the power over the storage volume "
+                    "between these two offsets"))
+        self.offset_top = panel.add("Source from top [m]", double_spin(
+            0.0, 0.0, 2.0, 0.1, 2))
+        self.flow = panel.add("Mass flow [kg/s]", double_spin(
+            0.5, 0.0, 200.0, 0.05, 3, on_change=self._update_power,
+            tooltip="Total mass flow of the gas loop: the network's branches split it "
+                    "by the rule of the Pipes tab"))
+        self.circuit_pressure = panel.add("Circuit pressure [bar]", double_spin(
+            1.01325, 0.1, 100.0, 0.5, 5, special="1 bar",
+            tooltip="Absolute pressure of the loop: at a fixed mass flow the density "
+                    "rises with it, so the film coefficient grows and the pressure "
+                    "drop falls - the cheap design lever of a gas loop"))
+        self.return_t = panel.add("Return to the resistors [°C]", double_spin(
+            0.0, 0.0, 700.0, 5.0, 1, special="auto",
+            tooltip="Temperature the gas enters the loop at: 0 degC is the temperature "
+                    "at which the exchanger returns it on discharge, and 'auto' lets "
+                    "the loop solve its own balance from the power instead (the closed "
+                    "circuit of a charge)"))
+        self.fan_efficiency = panel.add("Fan efficiency [%]", double_spin(
+            70.0, 10.0, 100.0, 5.0, 0,
+            tooltip="Blower efficiency: the electric power of the fan is the shaft "
+                    "power over it"))
+        self.circuit_roughness = panel.add("Wall roughness [um]", double_spin(
+            0.0, 0.0, 2000.0, 5.0, 1, special="from the tube material",
+            tooltip="Absolute roughness of the circuit's walls (tubes, headers and "
+                    "ducts): leave it at the minimum to take the tube material's own "
+                    "value from the Pipes tab"))
+        self.circuit_info = panel.add("Circuit", hint("build the network to size it"))
+        panel.add_hint("The summary is the network's: the wetted surface is the "
+                       "geometric pi d L of its runs, and the surface power is the "
+                       "total power over that surface.  A tube wall is rated by what "
+                       "it delivers per square centimetre, exactly as an immersion "
+                       "element is, and the 3-8 W/cm2 window is the same one.")
         self.tabs.addTab(panel, "Heaters")
 
-    def _build_tubes_tab(self) -> None:
-        panel = FormPanel()
-        self.tubes_active = panel.add("Heat exchanger",
-                                      check("tubes active (discharge)", False))
-        self.tube_t_fluid = panel.add("Fluid inlet [°C]", double_spin(60.0, -20.0, 400.0, 5.0, 1))
-        self.tube_h_fluid = panel.add("Fluid h [W/(m²·K)]", double_spin(500.0, 10.0, 20000.0, 50.0, 0))
-        self.tube_pattern = panel.add("Pattern", combo(self.TUBE_PATTERNS, 1))
-        self.n_tubes = panel.add("Tubes", int_spin(8, 1, 200))
-        self.tube_diameter = panel.add("Diameter [m]", double_spin(0.05, 0.01, 0.5, 0.005, 3))
-        self.tube_grid_rows = panel.add("Grid rows", int_spin(3, 1, 20))
-        self.tube_grid_cols = panel.add("Grid columns", int_spin(3, 1, 20))
-        self.tube_grid_spacing = panel.add("Grid spacing [m]", double_spin(0.2, 0.05, 2.0, 0.05, 2))
-        self.tube_rings = panel.add("Rings", int_spin(2, 1, 10))
-        panel.add_row(button("Calculate positions", self.preview_requested.emit))
-        self.tube_positions = QListWidget()
-        self.tube_positions.setMaximumHeight(120)
-        panel.add_row(self.tube_positions)
-        self.tabs.addTab(panel, "Tubes")
 
     def _build_pipes_tab(self) -> None:
         """Buried pipe network: the layout, the tube, the circuit and the paint."""
@@ -211,12 +211,8 @@ class GeometryPanel(QWidget):
             (("Stainless steel (drawn)", PIPE_STAINLESS),
              ("Carbon steel (commercial)", PIPE_CARBON)), 0))
         self.pipe_material.setToolTip(
-            "The label of the tube and the roughness of its wall: 15 um drawn, "
-            "46 um commercial")
-        self.pipe_roughness = panel.add("Roughness [um]", double_spin(
-            0.0, 0.0, 2000.0, 5.0, 1, special="from the material",
-            tooltip="Absolute wall roughness: leave it at the minimum to take the "
-                    "material's own value"))
+            "The label of the tube and the default roughness of its wall: 15 um drawn, "
+            "46 um commercial.  The circuit tab's wall roughness overrides it")
         self.pipe_duct = panel.add("Duct d [m]", double_spin(0.15, 0.05, 0.6, 0.05, 3))
         self.pipe_insulated = panel.add("Insulated headers", check(
             "lag the distributor and the collector", False,
@@ -237,10 +233,6 @@ class GeometryPanel(QWidget):
         self.pipe_sectors = panel.add("Sectors", int_spin(
             4, 1, 16, 1, tooltip="For the sector distribution: the flow is divided "
                                  "between the sectors about the inlet azimuth"))
-        self.pipe_flow = panel.add("Circuit flow [kg/s]", double_spin(
-            0.5, 0.0, 200.0, 0.05, 3,
-            tooltip="Total mass flow of the gas loop the transient marches: the "
-                    "branches split it by the rule above"))
         self.pipe_h = panel.add("Gas h [W/(m²·K)]", double_spin(
             500.0, 10.0, 20000.0, 50.0, 0,
             tooltip="Film the painted pipe cells are given; a loop run replaces it "
@@ -256,9 +248,14 @@ class GeometryPanel(QWidget):
         self.pipe_info = panel.add("Network", hint("build the mesh, then the network"))
         panel.add_hint("The risers are buried in the sand and the gas goes in from the "
                        "side at the bottom and out from the side at the top: a vessel "
-                       "is not axisymmetric and nothing leaves through the roof. "
-                       "Painting the network switches the lumped tube bank of the "
-                       "Tubes tab off: the pipes are where the heat now crosses.")
+                       "is not axisymmetric and nothing leaves through the roof. The "
+                       "same network is the whole exchange path - the gas charges the "
+                       "bed through it (flow up the risers, hot collection at the top) "
+                       "and discharges it through it (flow reversed, heat out to the "
+                       "exchanger on the circuit) - so there is no second heat "
+                       "exchanger inside the vessel. The mass flow, the pressure, the "
+                       "gas and the return temperature are on the Heaters tab: they "
+                       "are the circuit's.")
         self.tabs.addTab(panel, "Pipes")
 
     def pipe_network_config(self) -> PipeNetworkConfig:
@@ -266,10 +263,11 @@ class GeometryPanel(QWidget):
 
         The active band is the *storage* band of the cylinder: the risers span the
         sand (and not the insulation slabs under and over it), which is what makes the
-        riser length and the bed volume of the module the physical ones.
+        riser length and the bed volume of the module the physical ones.  The wall
+        roughness is the circuit's (Heaters tab), falling back to the tube material's.
         """
         cyl = self.cylinder()
-        roughness = self.pipe_roughness.value()
+        roughness = self.circuit_roughness.value()
         return PipeNetworkConfig(
             # the wall of the vessel runs from the floor to the cone base, and the
             # sand from the bottom slab to the top one: the risers span the sand
@@ -297,18 +295,67 @@ class GeometryPanel(QWidget):
         return {"h_fluid": self.pipe_h.value(), "t_fluid": c_to_k(self.pipe_gas_t.value())}
 
     def pipe_mass_flow(self) -> float:
-        """Total mass flow of the gas circuit the transient marches [kg/s]."""
-        return float(self.pipe_flow.value())
+        """Total mass flow of the gas circuit (Heaters tab) [kg/s]."""
+        return float(self.flow.value())
+
+    def circuit_fluid(self) -> Fluid:
+        """The gas the circuit is filled with [-].
+
+        The pressure is *not* applied here: the loop is handed the gas and the absolute
+        pressure and applies it itself (:meth:`~src.solver.fluid.Fluid.at_pressure`),
+        so there is one place that decides what the density is.
+        """
+        return self.fluid.currentData()
+
+    def return_kelvin(self) -> float:
+        """Temperature the gas comes back to the resistors at [K].
+
+        The minimum of the slider is the special "auto" value: there the *loop* solves
+        the inlet temperature from its own power balance, which is the closed circuit
+        of a charge.
+        """
+        from src.units import c_to_k
+
+        return c_to_k(self.return_t.value())
+
+    def inlet_temperature(self) -> float | None:
+        """The prescribed loop inlet [K], or ``None`` for the loop's own balance."""
+        return None if self.return_t.value() <= 0.0 else self.return_kelvin()
+
+    def circuit_pressure_pa(self) -> float:
+        """Absolute pressure of the loop [Pa]."""
+        return float(self.circuit_pressure.value() * 1e5)
+
+    def fan_efficiency_fraction(self) -> float:
+        """Blower efficiency as a fraction [-].
+
+        Zero on the slider means an ideal blower: the panel writes 100% at the top of
+        the range, so the loop never divides by a zero efficiency.
+        """
+        return max(self.fan_efficiency.value() / 100.0, 1e-3)
 
     def pipe_network(self):
         """The network the window built and painted (None until then)."""
         return self._pipe_network
+
+    def pipe_surface_power(self) -> float:
+        """Power the network's own wetted surface carries at the design power [W/cm²].
+
+        The surface is the geometric ``pi d L`` of the network's runs - the risers *
+        and* the headers, exactly the surface :meth:`PipeNetwork.paint` marks - because
+        that is the surface the gas actually hands the power to the sand across.
+        """
+        network = self._pipe_network
+        if network is None:
+            return float("nan")
+        return pipe_surface_power_w_cm2(self.power.value() * 1000.0, network.total_area)
 
     def set_pipe_network(self, network, report=None, message: str = "") -> None:
         """Adopt the network the window built on the mesh it owns and report it."""
         self._pipe_network = network
         if network is None:
             self.pipe_info.setText(message or "build the mesh, then the network")
+            self.circuit_info.setText(message or "build the network to size it")
             return
         problems = [problem for problem in network.config.validate()
                     if problem.startswith(WARNING)]
@@ -316,18 +363,38 @@ class GeometryPanel(QWidget):
         lines = [network.summary()]
         if report is not None:
             lines.append(report.summary())
+        lines.append(self._circuit_line())
         if problems:
             lines.append("check: " + "; ".join(problems))
         if message:
             lines.append(message)
         self.pipe_info.setText("\n".join(lines))
+        self.circuit_info.setText(self._circuit_summary())
 
-    def disable_lumped_tubes(self) -> bool:
-        """Turn the lumped tube bank off: the network is the heat exchanger now."""
-        if not self.tubes_active.isChecked():
-            return False
-        self.tubes_active.setChecked(False)
-        return True
+    def _circuit_line(self) -> str:
+        """The surface power of the tubes, next to the window it is rated against."""
+        value = self.pipe_surface_power()
+        if value != value:                        # NaN: no network yet
+            return "surface power: no network"
+        state = ("in the 3-8 W/cm2 range"
+                 if PIPE_SURFACE_POWER_MIN_W_CM2 <= value <= PIPE_SURFACE_POWER_LIMIT_W_CM2
+                 else f"outside the {PIPE_SURFACE_POWER_MIN_W_CM2:.0f}-"
+                      f"{PIPE_SURFACE_POWER_LIMIT_W_CM2:.0f} W/cm2 range")
+        return (f"surface power: {value:.2f} W/cm2 of tube wall "
+                f"({state}) at {self.power.value():.1f} kW")
+
+    def _circuit_summary(self) -> str:
+        """The circuit as a whole: the surface power and the power per riser."""
+        network = self._pipe_network
+        if network is None:
+            return "build the network to size it"
+        value = self.pipe_surface_power()
+        per_riser = self.power.value() / max(network.n_risers, 1)
+        return (f"{self.power.value():.1f} kW over {network.total_area:.1f} m2 of tube "
+                f"wall = {value:.2f} W/cm2\n"
+                f"{per_riser:.3f} kW per riser ({network.n_risers} risers), "
+                f"{self.flow.value():.2f} kg/s of {self.fluid.currentText()} at "
+                f"{self.circuit_pressure.value():.2f} bar")
 
     def _build_mesh_tab(self) -> None:
         panel = FormPanel()
@@ -348,12 +415,11 @@ class GeometryPanel(QWidget):
         self.cells_insulation = panel.add("Cells across insulation", int_spin(
             3, 1, 50, 1, on_change=self._mesh_mode,
             tooltip="Cells covering the radial insulation thickness"))
-        self.cells_sheath = panel.add("Cells across sheath", int_spin(
+        self.cells_sheath = panel.add("Cells across the tube wall", int_spin(
             2, 1, 20, 1, on_change=self._mesh_mode,
-            tooltip="Cells covering the heater sheath and tube diameter"))
-        self.far_field = panel.add("Far field [m]", double_spin(
-            0.4, 0.05, 2.0, 0.05, 2, on_change=self._mesh_mode,
-            tooltip="Largest cell allowed in the air around the battery"))
+            tooltip="Cells covering the outer diameter of the buried pipes: the tube "
+                    "wall is the heat-transfer surface now, and a tube thinner than "
+                    "the local cell is painted as one cell whatever its real size"))
         self.growth = panel.add("Growth ratio", double_spin(
             1.3, 1.02, 2.0, 0.05, 2, on_change=self._mesh_mode,
             tooltip="Largest size change between neighbouring cells"))
@@ -364,19 +430,24 @@ class GeometryPanel(QWidget):
                     "count.  'auto' = only the targets decide"))
         self.max_cell = panel.add("Largest cell [m]", double_spin(
             0.0, 0.0, 5.0, 0.05, 2, on_change=self._mesh_mode, special="auto",
-            tooltip="Ceiling on the realised cell size: with a value here no cell is "
-                    "larger than this, so the far field gets subdivided.  "
-                    "'auto' = only the targets decide"))
+            tooltip="Ceiling on the realised cell size.  'auto' = the air outside the "
+                    "vessel takes the coarsest size the active regions ask for, which "
+                    "is the coarsest cell the model needs at all"))
         self.max_cells = panel.add("Cell budget", int_spin(
             400_000, 10_000, 20_000_000, 50_000, tooltip="Every target is scaled up "
             "by a common factor to fit this budget", on_change=self._mesh_mode))
-        self.plan_info = panel.add("Physics plan", hint(
+        self.plan_info = panel.add("Active regions", hint(
             "the materials and the film coefficients decide the targets"))
         self.mesh_info = panel.add("Grid", hint("build the mesh to see the grid"))
         self.memory_info = panel.add("Memory", hint("-"))
-        panel.add_hint("Refined (graded) mesh: the targets above are physical - they do "
-                       "not depend on the domain size.  Uniform mesh: one cell size "
-                       "everywhere, box snapped to a whole number of cells.")
+        panel.add_hint("The refinement covers the *active* model only: the sand, the "
+                       "insulation, the shell and the wall of the pipes.  The air "
+                       "around the vessel is excluded from the problem, so no band is "
+                       "spent on it - the leaves out there stay at the coarse level "
+                       "the octree's own balance gives them.  Refined (graded) mesh: "
+                       "the targets are physical and do not depend on the domain size. "
+                       "Uniform mesh: one cell size everywhere, box snapped to a whole "
+                       "number of cells.")
         separator = QLabel("Automatic mesh: refine until the answer stops moving")
         separator.setToolTip("Runs the same solve on a sequence of finer grids and stops "
                              "when the storage mean temperature and the heat leaving the "
@@ -418,7 +489,7 @@ class GeometryPanel(QWidget):
         graded = self.refined.isChecked()
         adaptive = self.mesh_kind() == "adaptive"
         for widget in (self.cells_storage, self.cells_insulation, self.cells_sheath,
-                       self.far_field, self.max_cells):
+                       self.max_cells):
             widget.setEnabled(graded)
         for widget in (self.growth, self.min_cell, self.max_cell):
             # a tree has no growth ratio to keep (the octree holds its own 2:1 balance) and
@@ -537,27 +608,61 @@ class GeometryPanel(QWidget):
         self.mesh_info.setText("\n".join(lines))
 
     def adaptive_plan(self) -> AdaptivePlan:
-        """The tree the current targets ask for: the same bands, as boxes of an octree.
+        """The tree the current targets ask for: the *regions* as boxes of an octree.
 
-        The structured bands and the tree boxes come from the same list through
-        :func:`src.analysis.mesh_plan.refinement_bands`, so the a priori estimate - the
-        storage cells, ``thickness / N``, ``2 k / h``, the tube pitch - is decided once
-        and the two roads start from it.  The box and its resolution come from the cell
-        budget (:func:`src.analysis.mesh_plan.tree_resolution`), which is also the floor
-        under every leaf the search then refines.
+        The boxes come from :func:`src.analysis.mesh_plan.active_regions` - the sand,
+        the insulation ring and the two slabs, the shell, the casing the ambient film
+        sits on and the box of the buried pipes - so the tree refines the active model
+        and nothing else: a leaf in the air around the vessel would be a cell pinned at
+        the ambient temperature, and the octree leaves it at the coarse level its own
+        2:1 balance gives it.  The box and its resolution come from the cell budget
+        (:func:`src.analysis.mesh_plan.tree_resolution`), which is also the floor under
+        every leaf the search then refines.
 
         When the search ran on a tree its own plan is returned unchanged: a tree has no
-        per-axis spec to re-derive the bands from, and the boxes the search measured are
-        the ones that converged.
+        per-axis spec to re-derive the boxes from, and the boxes the search measured
+        are the ones that converged.
         """
         if self._auto_plan is not None:
             return self._auto_plan
         lx, ly, lz = (self.domain_lx.value(), self.domain_ly.value(),
                       self.domain_lz.value())
-        spec = self.grid_spec()
         n_finest, physical_size = tree_resolution((lx, ly, lz), int(self.max_cells.value()))
         return AdaptivePlan(n_finest=n_finest, physical_size=physical_size,
-                            bands=refinement_bands(spec, (lx, ly, lz)))
+                            bands=region_bands(self.mesh_regions()))
+
+    def mesh_regions(self):
+        """The active regions of the model, each with the cell size the panel asks for.
+
+        The mixture per region is the one the Mesh tab shows: the manual counts, never
+        coarser than the a priori plan of ``src/analysis/mesh_plan.py`` (see
+        :meth:`planned`).  The pipes are the one region the *network* describes - its
+        bundle, its active band and its own diameter - so the box is derived from
+        :meth:`pipe_network_config` and not from the vessel.
+        """
+        cyl = self.cylinder()
+        targets = {
+            "sand": self.planned("storage", cyl.r_storage / max(self.cells_storage.value(), 1)),
+            "insulation_radial": self.planned(
+                "insulation_radial",
+                cyl.insulation_thickness / max(self.cells_insulation.value(), 1)),
+            "slab_bottom": self.planned(
+                "slab_bottom",
+                cyl.insulation_slab_bottom / max(self.cells_insulation.value(), 1)),
+            "slab_top": self.planned(
+                "slab_top",
+                cyl.insulation_slab_top / max(self.cells_insulation.value(), 1)),
+            "shell": self.planned(
+                "shell", cyl.shell_thickness / max(self.cells_insulation.value(), 1)),
+            "pipe_wall": (self.pipe_diameter.value()
+                          / max(self.cells_sheath.value(), 1)),
+        }
+        targets["casing"] = max(targets.values())
+        config = self.pipe_network_config()
+        reach = config.inner_radius
+        pipe_box = ((cyl.center_x - reach, cyl.center_y - reach, config.z_bottom),
+                    (cyl.center_x + reach, cyl.center_y + reach, config.z_top))
+        return active_regions(cyl, targets, pipe_box=pipe_box)
 
     def _limits_note(self, spec, summary: dict) -> str:
         """Say whether the min/max cell rails change anything (usually they do not).
@@ -578,24 +683,8 @@ class GeometryPanel(QWidget):
 
     # -------------------------------------------------------------- accessors
     def _update_power(self) -> None:
-        count = max(self.n_heaters.value(), 1)
-        per_element = self.power.value() / count
-        self.power_per_heater.setText(f"{per_element:.2f} kW")
-        # the rating that matters for a sheathed element: power per heated surface
-        length = self.active_length.value()
-        if length <= 0:
-            length = max(self.height.value() - self.offset_bottom.value()
-                         - self.offset_top.value(), 0.0)
-        diameter = self.sheath_diameter.value()
-        bend = 0.25 * np.pi * self.leg_spacing.value()
-        area = np.pi * diameter * (length + bend)
-        if area > 0:
-            value = per_element * 1000.0 / area / 1e4
-            state = ("in range" if SURFACE_POWER_MIN_W_CM2 <= value <= SURFACE_POWER_LIMIT_W_CM2
-                     else "out of the 3-8 W/cm2 range")
-            self.surface_power.setText(f"{value:.1f} ({state})")
-        else:
-            self.surface_power.setText("-")
+        """Re-size the circuit summary: the network's surface, not a sheath's."""
+        self.circuit_info.setText(self._circuit_summary())
 
     def domain(self) -> tuple[float, float, float, float]:
         """Box and (uniform) cell size; the run config keeps them as provenance."""
@@ -689,12 +778,18 @@ class GeometryPanel(QWidget):
         return self.pipe_network_config().junction_bands()
 
     def grid_spec(self) -> GridSpec:
-        """Physical refinement targets from the panel and the battery.
+        """Physical refinement targets of the *graded* (structured) road.
 
-        Bands: the storage core, the insulation/shell ring, the heater bank (only
-        when the heaters are discrete) and the far field.  The heater band is what
-        makes a 12 mm sheath representable, so it is tied to the sheath diameter and
-        to the element spacing, not to the whole shell ring.
+        The graded grid covers the whole domain - a Cartesian grid has no way to leave
+        a corner out - so its bands are the active model (the storage core, the two
+        insulation slabs, the insulation ring, the shell ring and the pipe-header
+        junctions) plus **one cap band** over each axis.  The cap is not a far field to
+        refine: the air outside the envelope is excluded from the problem, so the cap
+        carries the *coarsest* target the active regions ask for (or the explicit
+        "largest cell" rail) and the cells out there are no finer than the bed's own.
+        The radial bands are per-axis arguments, which is also why this road cannot
+        refine the tube wall the way the tree does: a 25 mm band over the bundle would
+        be paid along the whole axis and the budget would then coarsen the bed itself.
         """
         if self._auto_spec is not None:
             return self._auto_spec
@@ -705,46 +800,39 @@ class GeometryPanel(QWidget):
         insulation = self.planned(
             "insulation_radial",
             cyl.insulation_thickness / max(self.cells_insulation.value(), 1))
-        far = self.far_field.value()
-        heaters = self.heaters()
-        sheath_target = max(
-            min(heaters.sheath_diameter, self.tube_diameter.value())
-            / max(self.cells_sheath.value(), 1), 1e-3)
-        discrete = heaters.pattern != HeaterPattern.UNIFORM_ZONE
+        shell = self.planned("shell",
+                            cyl.shell_thickness / max(self.cells_insulation.value(), 1))
+        cap = self.max_cell.value() or max(fine, insulation, shell)
 
-        # vertical bands: storage + the two insulation slabs, then the far field
+        # vertical bands: storage + the two insulation slabs, then the cap
         z = (Band(cyl.z_slab_bottom_start, cyl.z_storage_start,
                   self.planned("slab_bottom", insulation)),
              Band(cyl.z_storage_start, cyl.z_storage_end, fine),
              Band(cyl.z_slab_top_start, cyl.z_slab_top_end,
                   self.planned("slab_top", insulation)),
-             Band(0.0, lz, far))
+             Band(0.0, lz, cap))
         # the tube-header junctions: the gas turns there and the surface is singular,
         # so the two header elevations carry the refinement the Pipes tab asks for
         junction = tuple(Band(low, high, target)
                          for low, high, target in self.pipe_junction_bands())
         if junction:
             z = z + junction
-        # radial bands: heater bank (when discrete), storage core, shell ring, far field
-        reach = 0.0
-        if discrete:
-            span = max(heaters.grid_cols - 1, 0) * heaters.leg_spacing * 2.0
-            reach = min(0.5 * span + 2.0 * heaters.leg_spacing, cyl.r_storage)
+        # radial bands: the storage core, the insulation ring, the shell ring, the cap
         radial = []
         for center, extent in ((cyl.center_x, lx), (cyl.center_y, ly)):
-            bands = []
-            if reach > 0:
-                bands.append(Band(max(center - reach, 0.0), min(center + reach, extent),
-                                  sheath_target))
-            bands.append(Band(max(center - cyl.r_storage, 0.0),
-                              min(center + cyl.r_storage, extent), fine))
-            # the insulation ring is an *annulus*: a single band across the whole
+            bands = [Band(max(center - cyl.r_storage, 0.0),
+                          min(center + cyl.r_storage, extent), fine)]
+            # the insulation and the shell are *annuli*: a single band across the whole
             # diameter would ask for insulation cells inside the storage as well
-            for low, high in ((center - cyl.r_shell, center - cyl.r_storage),
-                              (center + cyl.r_storage, center + cyl.r_shell)):
+            for low, high in ((center - cyl.r_shell, center - cyl.r_insulation),
+                              (center + cyl.r_insulation, center + cyl.r_shell)):
+                if high - low > 0:
+                    bands.append(Band(max(low, 0.0), min(high, extent), shell))
+            for low, high in ((center - cyl.r_insulation, center - cyl.r_storage),
+                              (center + cyl.r_storage, center + cyl.r_insulation)):
                 if high - low > 0:
                     bands.append(Band(max(low, 0.0), min(high, extent), insulation))
-            bands.append(Band(0.0, extent, far))
+            bands.append(Band(0.0, extent, cap))
             radial.append(tuple(bands))
         return GridSpec(x=radial[0], y=radial[1], z=z, growth=self.growth.value(),
                         max_cells=int(self.max_cells.value()),
@@ -769,37 +857,16 @@ class GeometryPanel(QWidget):
         )
 
     def heaters(self) -> HeaterConfig:
+        """The plant's heat source as the bed sees it: the power and its band."""
         return HeaterConfig(
-            power_total=self.power.value(), n_heaters=self.n_heaters.value(),
-            pattern=self.heater_pattern.currentData(),
+            power_total=self.power.value(),
             offset_bottom=self.offset_bottom.value(), offset_top=self.offset_top.value(),
-            n_rings=self.heater_rings.value(),
-            grid_rows=self.heater_grid_rows.value(), grid_cols=self.heater_grid_cols.value(),
-            sheath_diameter=self.sheath_diameter.value(),
-            leg_spacing=self.leg_spacing.value(),
-            active_length=self.active_length.value() if self.active_length.value() > 0
-            else None,
-            cold_shank=self.cold_shank.value(),
-            support_plate_offset=self.support_offset.value(),
-            flange_offset=self.flange_offset.value(),
-        )
-
-    def tubes(self) -> TubeConfig:
-        from src.units import c_to_k
-
-        return TubeConfig(
-            n_tubes=self.n_tubes.value(), diameter=self.tube_diameter.value(),
-            h_fluid=self.tube_h_fluid.value(), t_fluid=c_to_k(self.tube_t_fluid.value()),
-            active=self.tubes_active.isChecked(), pattern=self.tube_pattern.currentData(),
-            n_rings=self.tube_rings.value(), grid_rows=self.tube_grid_rows.value(),
-            grid_cols=self.tube_grid_cols.value(), grid_spacing=self.tube_grid_spacing.value(),
         )
 
     def apply_geometry(self, battery) -> None:
         """Attach the built config trees to a BatteryGeometry."""
         battery.cylinder = self.cylinder()
         battery.heaters = self.heaters()
-        battery.tubes = self.tubes()
 
     def set_mesh_info(self, text: str, memory: str) -> None:
         self.mesh_info.setText(text)

@@ -1,4 +1,4 @@
-"""The painters that need a point, on a tree: the pipes, the network and the heaters.
+"""The painters that need a point, on a tree: the pipe rasteriser and the network.
 
 Step 6 of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``.  A mask over ``(i, j, k)`` becomes a mask
 over the cell centres and the "cells the axis crosses" walk measures the leaf edge instead
@@ -13,13 +13,9 @@ of ``dx``/``dy``/``dz``; what the module pins is that the model painted does not
 * **the wetted area stays geometric** - ``sum(pi d L_cell) = pi d L_total`` on the tree as
   on the grid, and the cells the paint leaves out (outside the vessel, outside the domain)
   are the same ones on both roads;
-* **the heater bank deposits the same power** - for every pattern of
-  :class:`~src.core.geometry.HeaterPattern`, the sheath mask, the active mask and the
-  volumetric source are the same leaf by leaf, and ``sum(Q_source V)`` is the rated power
-  on either mesh;
 * **a refined tree paints too** - where no structured twin exists the invariants are the
-  check: the area is still ``pi d L_total``, the power is still the rating, every painted
-  leaf is a cell the geometry reaches, and refining is what resolves a coarse bank.
+  check: the area is still ``pi d L_total`` and every painted leaf is a cell the network's
+  centrelines reach.
 
 Nothing here reads an area off the mask: the mask paints material, the centreline measures
 surface.
@@ -30,8 +26,6 @@ import numpy as np
 import pytest
 
 from src.core.adaptive_mesh import AdaptiveMesh, RefinementBand
-from src.core.geometry import (HeaterConfig, HeaterPattern, create_small_test_geometry)
-from src.core.heaters import validate_bank
 from src.core.materials import MaterialManager
 from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.pipe_network import PipeNetworkConfig, build_pipe_network
@@ -60,20 +54,6 @@ def vessel(**kwargs) -> PipeNetworkConfig:
                 horizontal_pitch=0.2, vertical_pitch=0.25)
     base.update(kwargs)
     return PipeNetworkConfig(**base)
-
-
-def discrete_heaters(pattern: str, power_kw: float = 50.0) -> HeaterConfig:
-    """A heater bank of two fat elements: the coarsest one a 0.5 m cell can hold.
-
-    The default sheath (12 mm, legs 80 mm apart) is invisible in a 0.5 m cell - two legs
-    land in the same cell and the bank is refused - so the bank that the pair of
-    ``tests/conftest.py`` can rasterise is a scaled-up one: a 0.3 m sheath with the legs
-    0.9 m apart.  Every pattern that places discrete elements then fits the storage band,
-    which is what makes the six of them comparable on the same mesh.
-    """
-    return HeaterConfig(power_total=power_kw, n_heaters=2, pattern=pattern,
-                        grid_rows=2, grid_cols=1, n_rings=1,
-                        sheath_diameter=0.3, leg_spacing=0.9, active_length=2.0)
 
 
 def leaf_cells(tree: AdaptiveMesh, structured: Mesh3D) -> np.ndarray:
@@ -121,7 +101,7 @@ def same_paint(on_tree, on_grid) -> None:
 
 
 def refined_tree(finest: int = 32, physical_size: float = 0.25) -> AdaptiveMesh:
-    """A tree refined around the vessel: 0.3 m sheath, two leaves across."""
+    """A tree refined around the vessel: 0.125 m leaves, two across a tube spacing."""
     return AdaptiveMesh.from_bands(
         finest, physical_size,
         [RefinementBand((1.5, 1.5, 0.0), (6.5, 6.5, 6.5), 0.125)])
@@ -314,54 +294,6 @@ def test_a_network_that_leaves_the_domain_books_no_length_there_on_a_tree(box_pa
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
 
 
-# ------------------------------------------------------- the heater bank and patterns
-@pytest.mark.parametrize("pattern", HeaterPattern.ALL)
-def test_every_pattern_deposits_the_rated_power_on_a_tree(box_pair, pattern):
-    """Sheath, active cells and volumetric power: the same leaves, the same deposit."""
-    tree, structured = box_pair()
-    power_kw = 50.0
-    geometry = create_small_test_geometry()
-    geometry.heaters = discrete_heaters(pattern, power_kw)
-    report_tree = geometry.apply_to_mesh(tree)
-    report_grid = geometry.apply_to_mesh(structured)
-
-    assert report_tree == report_grid
-    assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
-    driven = tree.source_mask
-    assert driven.any()
-    assert np.array_equal(driven, tree.Q_source > 0.0)
-    # a discrete element drives its own sheath, the uniform zone drives the sand it fills
-    assert np.all(tree.material_id[driven]
-                  == int(MaterialID.SAND if pattern == HeaterPattern.UNIFORM_ZONE
-                         else MaterialID.HEATERS))
-    assert tree.Q_source[driven].min() == pytest.approx(tree.Q_source[driven].max(),
-                                                        rel=1e-12)
-    assert float(np.sum(tree.Q_source * tree.V)) == pytest.approx(power_kw * 1000.0,
-                                                                  rel=1e-12)
-    assert float(np.sum(structured.Q_source * structured.V)) == pytest.approx(
-        power_kw * 1000.0, rel=1e-12)
-
-
-def test_the_bank_is_checked_on_a_tree_the_way_it_is_on_a_grid(box_pair):
-    """``validate_bank`` measures the local cell, and a tree answers the same findings.
-
-    Both legs of an 80 mm element land in the same 0.5 m cell (the bank is placed away
-    from a cell boundary, so the placement is not what saves them), and the check must say
-    so on a tree exactly as it does on the mesh the rasteriser was written for.
-    """
-    tree, structured = box_pair()
-    tight = HeaterConfig(power_total=50.0, n_heaters=2, pattern=HeaterPattern.GRID_VERTICAL,
-                         grid_rows=2, grid_cols=1, n_rings=1, sheath_diameter=0.012,
-                         leg_spacing=0.08)
-    bank = tight.bank(0.5, 4.5)
-    on_tree = validate_bank(bank, tree, 2.7, 2.7, 1.8, 0.5, 4.5)
-    on_grid = validate_bank(bank, structured, 2.7, 2.7, 1.8, 0.5, 4.5)
-
-    assert on_tree == on_grid
-    assert any("share mesh cells" in problem for problem in on_tree)
-    assert any("the legs are" in problem for problem in on_tree)
-
-
 # ------------------------------------------------------------------ the refined tree
 def test_the_network_paints_a_refined_tree_and_keeps_its_area(box_pair):
     """Where no structured twin exists, the invariants are the check."""
@@ -384,24 +316,3 @@ def test_the_network_paints_a_refined_tree_and_keeps_its_area(box_pair):
     # the same network on the coarse tree paints fewer, fatter cells
     coarse_net = build_pipe_network(coarse, config)
     assert coarse_net.paint(coarse).cells < report.cells
-
-
-def test_the_bank_paints_a_refined_tree_and_deposits_its_power():
-    """The gap of step 1 is closed: a discrete bank paints a tree.
-
-    Refining the mesh is what makes the bank resolvable, and the power it deposits is the
-    rating whatever the leaves look like.
-    """
-    tree = refined_tree()
-    geometry = create_small_test_geometry()
-    geometry.heaters = discrete_heaters(HeaterPattern.GRID_VERTICAL, 50.0)
-    report = geometry.apply_to_mesh(tree)
-
-    assert report.n_heater_elements == 2
-    driven = tree.source_mask
-    assert driven.any()
-    assert np.all(tree.material_id[driven] == int(MaterialID.HEATERS))
-    assert tree.Q_source[driven].min() > 0.0
-    assert float(np.sum(tree.Q_source * tree.V)) == pytest.approx(50_000.0, rel=1e-12)
-    sheath = tree.material_id == int(MaterialID.HEATERS)
-    assert int(sheath.sum()) > int(driven.sum())    # the cold shank is sheath, not source

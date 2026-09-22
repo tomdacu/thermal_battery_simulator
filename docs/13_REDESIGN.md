@@ -83,8 +83,8 @@ industrial data; the physics references are named in the rest of this document.*
 | Old model | New model | Why |
 |---|---|---|
 | 6×6×5.6 m box of air around the battery, air as a conducting solid | **no air**: the battery wall carries a Robin condition with `h = h_natural + h_wind` | the air is not part of the machine; simulating it costs cells and buys a resistance that is 2.6% of the total (see §4) |
-| hairpin electric heaters inside the sand, `W/cm²` check | **resistors in the air loop** (`external_power` of the fluid loop) | matches the reference machine; the bed is heated by the pipes |
-| tubes as lumped convective sinks with the inlet temperature everywhere | **1-D fluid network** with the exact effectiveness relation (`src/solver/fluid.py`) | a storage discharges at large NTU, where the lumped model overstates the extraction by `NTU/(1-e^-NTU)` = 10-25× |
+| hairpin electric heaters inside the sand, `W/cm²` check | **resistors in the air loop** (`external_power` of the fluid loop) | matches the reference machine; the bed is heated by the pipes.  *Deleted from the code 2026-09-22*: `HeaterConfig` is the plant's power and its band (`src/core/geometry.py`), `src/core/heaters.py` (bank, hairpin elements, rasteriser, `validate_bank`) is gone, and the `W/cm²` rating moved to the **pipe surface** (`src/core/pipes.py::pipe_surface_power_w_cm2`, reported by the Pipes tab) |
+| tubes as lumped convective sinks with the inlet temperature everywhere | **1-D fluid network** with the exact effectiveness relation (`src/solver/fluid.py`) | a storage discharges at large NTU, where the lumped model overstates the extraction by `NTU/(1-e^-NTU)` = 10-25×.  *Deleted from the code 2026-09-22*: `TubeConfig`/`TubeElement`/`TubePattern` and the film-on-tube-cells path are gone, and the GUI's lumped-tube tab with them - the exchanger is on the circuit and the loop's `t_in` is the circuit's return temperature |
 | uniform or banded Cartesian grid with a global budget | **adaptive octree** with a 2:1 balance (§5) | the scale range (4 m of sand vs 20 mm of shell) cannot be covered by uniform refinement |
 
 Kept as is: the material database and the packed-bed effective properties, the
@@ -287,6 +287,39 @@ the structured search report the same quantities.  What is missing is the *conne
 
 ---
 
+## 5b. The plant, as it is wired (2026-09-22)
+
+The GUI now shows the architecture of §1 and not the one of the old code:
+
+* **Heaters** is the *gas circuit*: the total electric power, the gas (air / nitrogen /
+  steam), the mass flow, the circuit pressure, the temperature the gas comes back to the
+  resistors at ("auto" lets the loop solve its own balance, which is the closed circuit
+  of a charge), the blower efficiency and the wall roughness.  Its summary is computed on
+  the built network: the power over the wetted surface [W/cm²] and the power per riser.
+* **Pipes** is the buried network and only that - one tab, because the network is the
+  exchange path of *both* phases (gas up the risers and hot collection at the top while
+  charging; flow reversed, heat to the exchanger while discharging).
+* **`Build mesh` paints the network by default**, so a run started from the Analysis tab
+  uses the gas loop on the very cells it solves; the Pipes tab's button rebuilds it after
+  a change of the plumbing.
+* **The mesh covers the active model only.**  The refinement regions are 3-D boxes
+  (`src/analysis/mesh_plan.py::active_regions` → `region_bands`): the sand, the insulation
+  ring and the two slabs, the shell, the casing the ambient film sits on and the bundle of
+  the pipes.  The air around the vessel is *not* one of them: `apply_environment` excludes
+  it and holds it at the ambient temperature, so a leaf out there carries no flux.  The
+  graded road keeps per-axis bands and gets one **cap** band at the coarsest active target
+  instead of a "far field".  Measured on the default model (tree road, same commands as
+  §8): **123 740 leaves before → 143 396 after**, of which the excluded air went from
+  **78 584 leaves to 45 232** and the share of the box left at the tree's own coarse level
+  went from **3.6 % to 26.8 %**; the build of the a priori tree takes ~11 s against ~13-22 s
+  for the old band set, and the paint ~0.7 s against ~0.5 s.  The leaf count is up because
+  the bundle is now refined to the tree's floor instead of the air being refined
+  everywhere - the cell budget still bounds it, and the flat corners an axis-aligned box
+  leaves around a cylinder are what the remainder of the waste is.
+* **The 3D preview draws the network** (`src/viz/scene.py::_add_pipe_network`) as one tube
+  actor built from the centrelines, so the pipes that carry the heat are visible next to
+  the vessel they are buried in.
+
 ## 6. Migration order
 
 | # | Step | State |
@@ -326,7 +359,9 @@ not a specification.
 | adaptive mesh: 2:1 octree with a conservative face list, its Laplacian, the flux-jump indicator and an objective-driven refinement; steady solve on the leaf list | core and physics done, **not the production mesh** (no transient driver, no route from `BatteryGeometry`) | `src/core/octree.py`, `src/solver/octree_solver.py`; `tests/test_octree.py` (14) and `tests/test_octree_solver.py` (12) |
 | cycle accounting: charge / standby / discharge through the loop, per-step stops, energy decomposition | done | `src/analysis/cycle.py`; `tests/test_cycle.py`, 10 collected cases |
 | graded Cartesian mesh + automatic mesh search | done, and it is the production path | `src/core/refinement.py`, `src/analysis/convergence.py`, `src/analysis/mesh_plan.py`; 10 + 9 collected cases |
-| GUI: the Pipes tab, the automatic-mesh button, the graded/heater controls | in place | `gui/views/geometry_panel.py`; widget defaults measured in [06](06_GUI_CONFIGURATION.md) |
+| GUI: the circuit tab, the merged Pipes tab, the automatic-mesh button, the region targets | in place | `gui/views/geometry_panel.py`, `gui/main_window.py`; widget defaults measured in [06](06_GUI_CONFIGURATION.md); screenshots `docs/figures/gui_tab_circuit.png`, `gui_tab_pipes.png`, `gui_tab_mesh.png`, `gui_window_after_build.png` |
+| plant wiring: the network is painted by `Build mesh` and the circuit's settings drive the loop | in place | `gui/main_window.py::paint_pipe_network`, `gui/controller.py::_fluid_loop`, `RunConfig.pipe_fluid/pipe_pressure/pipe_inlet/pipe_fan_efficiency` |
+| mesh plan by active region (sand, insulation, shell, tube wall; no air) | in place | `src/analysis/mesh_plan.py::active_regions/region_bands`; `tests/test_mesh_plan.py` |
 | figures: one script regenerates them all | done | `scripts/figures.py`, seven files in `docs/figures/` (list in [README](../README.md#-figures)) |
 
 Measured numbers worth keeping in view (all readings of 2026-09-20, re-run the commands
@@ -340,6 +375,9 @@ before quoting them):
 * the graded mesher reaches the target cell size in a band while keeping the neighbour
   ratio within `growth` (`tests/test_refinement.py`), and a uniform `GridSpec`
   reproduces the legacy uniform mesh bit for bit (`tests/test_graded_mesh.py`);
+* the **mesh of the default model**: 143 396 leaves (tree) of which 57.8 % of the volume is
+  the excluded air held coarse by the region bands, and 349 496 cells on the graded road -
+  the measurements and the before/after are in §5b;
 * the **automatic mesh search** on the default geometry does not reach the 2 K default
   tolerance inside the 400 000-cell default budget, and says so instead of pretending
   (`tests/test_convergence.py`, and the GUI reports "stopped" with the limit);

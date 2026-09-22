@@ -5,14 +5,8 @@ import numpy as np
 import pytest
 
 from src.constants import T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
-from src.core.geometry import (
-    BatteryGeometry,
-    CylinderGeometry,
-    HeaterConfig,
-    HeaterPattern,
-    TubeConfig,
-    create_small_test_geometry,
-)
+from src.core.geometry import (BatteryGeometry, CylinderGeometry,
+                               create_small_test_geometry)
 from src.core.materials import MaterialManager
 from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
@@ -118,31 +112,6 @@ def test_apply_to_mesh_marks_sources_and_keeps_the_power_budget(storage_model):
     assert power == pytest.approx(50_000.0, rel=1e-9)
 
 
-def test_all_heater_patterns_produce_a_source():
-    """Whatever the pattern, cells must be flagged - the old uniform zone was not.
-
-    A discrete pattern is a bank of hairpin elements, so it needs a mesh that can
-    resolve a sheath: this uses a 1:4 scale model with 50 mm cells instead of the
-    coarse 6 m fixture.
-    """
-    for pattern in (HeaterPattern.UNIFORM_ZONE, HeaterPattern.GRID_VERTICAL,
-                    HeaterPattern.RADIAL_ARRAY, HeaterPattern.SPIRAL,
-                    HeaterPattern.CONCENTRIC_RINGS):
-        mesh = Mesh3D(Lx=2.4, Ly=2.4, Lz=2.6, spacing=0.05)
-        geometry = BatteryGeometry(
-            cylinder=CylinderGeometry(center_x=1.2, center_y=1.2, base_z=0.2, height=1.4,
-                                      r_storage=0.8, insulation_thickness=0.15,
-                                      shell_thickness=0.02, insulation_slab_bottom=0.1,
-                                      insulation_slab_top=0.1, enable_cone_roof=False),
-            tubes=TubeConfig(active=False),
-            heaters=HeaterConfig(power_total=10.0, n_heaters=6, pattern=pattern,
-                                 grid_rows=2, grid_cols=3, sheath_diameter=0.012,
-                                 leg_spacing=0.12, active_length=0.8))
-        geometry.apply_to_mesh(mesh)
-        assert mesh.source_mask.sum() > 0, pattern
-        assert float(np.sum(mesh.Q_source * mesh.V)) == pytest.approx(10_000.0, rel=1e-6)
-
-
 def test_geometry_validation_rejects_a_clipped_roof():
     mesh = Mesh3D(Lx=6.0, Ly=6.0, Lz=3.0, spacing=0.5)
     geometry = create_small_test_geometry()
@@ -156,27 +125,6 @@ def test_geometry_validation_rejects_a_battery_larger_than_the_domain():
                                                          r_storage=2.0))
     with pytest.raises(ValueError, match="radius"):
         geometry.apply_to_mesh(mesh)
-
-
-def test_inactive_tubes_never_create_internal_convection(storage_model):
-    mesh = storage_model
-    assert not (mesh.boundary_type == BoundaryType.CONVECTION).any()
-    assert not (mesh.material_id == int(MaterialID.TUBES)).any()
-
-
-def test_active_tubes_are_inside_the_storage_band(storage_model):
-    mesh = storage_model
-    geometry = create_small_test_geometry()
-    geometry.tubes = TubeConfig(n_tubes=4, active=True, diameter=0.2)
-    geometry.apply_to_mesh(mesh)
-    tubes = mesh.material_id == int(MaterialID.TUBES)
-    assert tubes.any()
-    assert mesh.T[tubes].size == int(tubes.sum())
-    z = mesh.Z[tubes]
-    assert z.min() >= geometry.cylinder.z_storage_start - 1e-9
-    assert z.max() < geometry.cylinder.z_storage_end
-    # tubes must not carry a volumetric heater source
-    assert not mesh.source_mask[tubes].any()
 
 
 def test_zone_volumes_and_masses_are_consistent(storage_model):

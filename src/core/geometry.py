@@ -18,13 +18,17 @@ overlaps that used to corrupt the model are now resolved explicitly):
     3  steel lateral shell            (base_z .. cone base, outside the insulation)
     4  radial insulation              (r_storage .. r_insulation, same band)
     5  bottom insulation slab
-    6  storage sand (packed bed)      + volumetric source when the pattern is uniform
+    6  storage sand (packed bed)      + the lumped bed source of the gas circuit
     7  top insulation slab
     8  optional steel plate under the cone
     9  optional conical roof (steel shell, optionally sand-filled)
-   10  discrete heater elements       -> material HEATERS, marked in ``source_mask``
-   11  heat-exchanger tubes           -> material TUBES inside the storage band only
-   12  domain boundary conditions
+   10  domain boundary conditions
+
+The heat-transfer surface itself - the buried pipe network the gas runs through - is
+painted by :meth:`src.core.pipe_network.PipeNetwork.paint` on the same mesh: the
+resistors live in the gas circuit and heat the gas, and the gas delivers that power to
+the sand through the pipes' walls.  Nothing in this module knows of a heater element
+inside the bed.
 
 Units: metres, seconds, watts, KELVIN.  ``apply_to_mesh`` validates the geometry
 against the mesh and raises ``ValueError`` instead of silently clipping the roof
@@ -39,8 +43,6 @@ import numpy as np
 
 from ..constants import PACKING_FRACTION_DEFAULT, T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
 from .environment import h_out
-from .heaters import (DEFAULT_SHEATH_DIAMETER, DEFAULT_SHEATH_MATERIAL,
-                       HeaterBank, rasterize, validate_bank)
 from .materials import MaterialManager, ThermalProperties
 from .mesh import MaterialID, Mesh3D
 from .physics import radiation_h
@@ -88,13 +90,6 @@ def _box(mesh) -> tuple[float, float, float]:
     return size, size, size
 
 
-def _finest_size(mesh) -> float:
-    """Edge of the smallest cell [m]: the resolution a refusal quotes."""
-    if isinstance(mesh, Mesh3D):
-        return float(mesh.dx.min())
-    return float(np.cbrt(np.asarray(mesh.V).min()))
-
-
 def _snap_note(mesh) -> str | None:
     """The "box snapped to the grid" note of the build report, if there is one.
 
@@ -106,74 +101,6 @@ def _snap_note(mesh) -> str | None:
         return None
     return (f"domain snapped to the grid: L_y={mesh.Ly:.3f}, L_z={mesh.Lz:.3f} m "
             f"(cell size {mesh.dx.min():.3f} m)")
-
-
-def _sub_cell_element(mesh, X: np.ndarray, Y: np.ndarray, Z: np.ndarray, element,
-                      z_top: float) -> np.ndarray:
-    """The cells an element thinner than the grid still owns, on either mesh.
-
-    Reached only when half a cell around the axis holds no cell centre, which is what an
-    element smaller than the local cell looks like from the grid: the cells of the axis'
-    own column that carry the band are then the element, and one cell of that column -
-    the one holding the axis' bottom end - is used when the band holds no centre at all.
-    The two meshes locate "the column of the axis" differently (an index pair on a grid,
-    a leaf and its own edge on a tree), and that point location is the whole of it.
-    """
-    if isinstance(mesh, Mesh3D):
-        i, j, k = mesh.find_cell(element.x, element.y, element.z_bottom)
-        column = (mesh.z >= element.z_bottom) & (mesh.z < z_top)
-        if not column.any():
-            column = np.zeros(mesh.Nz, dtype=bool)
-            column[k] = True
-        hit = np.zeros(mesh.T.shape, dtype=bool)
-        hit[i, j, :] = column
-        return hit
-    position = mesh.locate(element.x, element.y, element.z_bottom)
-    half = 0.5 * float(np.cbrt(mesh.V[position]))
-    # the column of the leaf that holds the axis: within half a leaf edge of its centre
-    in_column = ((np.abs(X - X[position]) <= half) & (np.abs(Y - Y[position]) <= half))
-    hit = in_column & (element.z_bottom <= Z) & (z_top > Z)
-    if not hit.any():
-        hit = np.zeros(mesh.T.shape, dtype=bool)
-        hit[position] = True
-    return hit
-
-
-class HeaterPattern:
-    UNIFORM_ZONE = "uniform_zone"
-    GRID_VERTICAL = "grid_vertical"
-    CHESS_PATTERN = "chess_pattern"
-    RADIAL_ARRAY = "radial_array"
-    SPIRAL = "spiral"
-    CONCENTRIC_RINGS = "concentric_rings"
-
-    ALL = (UNIFORM_ZONE, GRID_VERTICAL, CHESS_PATTERN, RADIAL_ARRAY,
-           SPIRAL, CONCENTRIC_RINGS)
-
-
-class TubePattern:
-    CENTRAL_CLUSTER = "central_cluster"
-    RADIAL_ARRAY = "radial_array"
-    GRID = "grid"
-    HEXAGONAL = "hexagonal"
-    SINGLE_CENTRAL = "single_central"
-    CUSTOM = "custom"
-
-    ALL = (CENTRAL_CLUSTER, RADIAL_ARRAY, GRID, HEXAGONAL, SINGLE_CENTRAL, CUSTOM)
-
-
-@dataclass
-@dataclass
-class TubeElement:
-    """One heat-exchanger tube."""
-
-    x: float
-    y: float
-    z_bottom: float
-    z_top: float
-    radius: float = 0.025
-    h_fluid: float = 500.0
-    t_fluid: float = 333.15     # [K]
 
 
 @dataclass
@@ -265,6 +192,32 @@ class CylinderGeometry:
         rel = float(np.clip(z - self.z_cone_base, 0.0, self.roof_height))
         return self.r_shell * (1.0 - rel / self.roof_height)
 
+    def envelope_radius(self, foundation_margin: float = 0.0) -> float:
+        """Radius of the outermost solid of the vessel [m].
+
+        The shell, unless the foundation is wider: the concrete under the floor is a
+        conduction path to the ground and stays in the problem, so it is part of the
+        envelope the mesh has to cover.
+        """
+        return max(self.r_shell, self.r_shell + max(foundation_margin, 0.0))
+
+    def active_bounds(self, foundation_margin: float = 0.0, margin: float = 0.0
+                      ) -> tuple[float, float, float, float, float, float]:
+        """Bounding box of the region the *problem* lives in [m].
+
+        ``(x0, x1, y0, y1, z0, z1)`` of the vessel: the shell's footprint and the
+        foundation inside it, from the domain floor to the roof apex.  Everything air
+        beyond the shell radius or above the apex is *excluded* from the problem by
+        :meth:`BatteryGeometry.apply_environment` - those cells are held at the ambient
+        temperature and conduct nothing - so this is the region a mesh has a reason to
+        refine, and ``margin`` grows it by the distance the refinement must still cover
+        around the vessel.
+        """
+        reach = self.envelope_radius(foundation_margin) + max(margin, 0.0)
+        return (self.center_x - reach, self.center_x + reach,
+                self.center_y - reach, self.center_y + reach,
+                0.0, self.z_cone_apex + max(margin, 0.0))
+
     def validate(self) -> list[str]:
         problems = []
         if self.r_storage <= 0:
@@ -284,166 +237,26 @@ class CylinderGeometry:
 
 @dataclass
 class HeaterConfig:
-    """Heater layout: a uniform volumetric zone or discrete hairpin elements.
+    """The electric heat source of the plant, as the bed sees it.
 
-    The discrete elements are *flanged immersion heaters*: U-shaped (hairpin)
-    sheathed tubes of ``sheath_diameter`` with two legs ``leg_spacing`` apart,
-    rated by ``power_element`` (from the total power and the element count) and
-    checked against the 3-8 W/cm^2 surface power of sheathed elements.
+    The resistors do **not** sit in the bed: they heat the gas of the closed circuit
+    (``src/solver/fluid.py``), and the gas delivers that power to the sand through the
+    walls of the buried pipe network (``src/core/pipe_network.py``).  What the geometry
+    still needs is the *lumped* bed source every analysis that does not march the loop
+    reads: the electric power, spread uniformly over the storage volume inside the two
+    offsets.  The surface the power actually crosses is the pipe network's: the
+    per-square-centimetre rating of the tubes is checked on that surface by
+    :func:`src.core.pipes.pipe_surface_power_w_cm2`, from the total power and the wetted
+    area of the network, not from a sheath diameter that no longer exists.
     """
 
-    power_total: float = 100.0                 # [kW]
-    n_heaters: int = 12
-    pattern: str = HeaterPattern.UNIFORM_ZONE
-    offset_bottom: float = 0.0
-    offset_top: float = 0.0
-    n_rings: int = 2
-    n_per_ring: list[int] | None = None
-    ring_radii: list[float] | None = None
-    grid_rows: int = 4
-    grid_cols: int = 4
-    # hairpin design (see src/core/heaters.py)
-    sheath_diameter: float = DEFAULT_SHEATH_DIAMETER
-    sheath_material: str = DEFAULT_SHEATH_MATERIAL
-    leg_spacing: float = 0.08
-    active_length: float | None = None         # None = fill the storage band
-    cold_shank: float = 0.15
-    flange_offset: float = 0.03
-    support_plate_offset: float = 0.05
-    bend_chords: int = 4
+    power_total: float = 100.0                 # [kW] electric power into the gas
+    offset_bottom: float = 0.0                 # [m] of storage left unheated at the floor
+    offset_top: float = 0.0                    # [m] of storage left unheated under the roof
 
     @property
     def power_w(self) -> float:
         return self.power_total * 1000.0
-
-    def bank(self, z_storage_start: float, z_storage_end: float) -> HeaterBank:
-        """The hairpin bank equivalent of this configuration."""
-        length = (self.active_length if self.active_length else
-                  max(z_storage_end - z_storage_start - self.offset_bottom
-                      - self.offset_top, 0.0))
-        rows, cols = self._layout_counts()
-        return HeaterBank(
-            active=True,
-            sheath_diameter=self.sheath_diameter,
-            sheath_material=self.sheath_material,
-            active_length=length,
-            cold_shank=self.cold_shank,
-            leg_spacing=self.leg_spacing,
-            rows=rows,
-            columns=cols,
-            power_per_element=self.power_w / max(rows * cols, 1),
-            offset_bottom=self.offset_bottom,
-            offset_top=self.offset_top,
-            support_plate_offset=self.support_plate_offset,
-            flange_offset=self.flange_offset,
-            layout="ring" if self.pattern in (HeaterPattern.RADIAL_ARRAY,
-                                              HeaterPattern.CONCENTRIC_RINGS)
-            else "grid",
-            n_rings=max(self.n_rings, 1),
-            bend_chords=self.bend_chords,
-        )
-
-    def _layout_counts(self) -> tuple[int, int]:
-        """(rows, columns) of the bank for the configured pattern."""
-        if self.pattern == HeaterPattern.CHESS_PATTERN:
-            return max(self.grid_rows, 1), max(self.grid_cols, 1)
-        if self.pattern in (HeaterPattern.GRID_VERTICAL,):
-            return max(self.grid_rows, 1), max(self.grid_cols, 1)
-        # rings and spiral: keep the element count, arranged on rings
-        n = max(self.n_heaters, 1)
-        per_ring = max(int(np.ceil(np.sqrt(n))), 1)
-        return max(int(np.ceil(n / per_ring)), 1), per_ring
-
-    @staticmethod
-    def _ring_points(cx, cy, radius, count, offset) -> list[tuple[float, float]]:
-        return [(cx + radius * np.cos(offset + 2 * np.pi * i / count),
-                 cy + radius * np.sin(offset + 2 * np.pi * i / count))
-                for i in range(max(count, 1))]
-
-
-@dataclass
-class TubeConfig:
-    """Heat-exchanger tube layout."""
-
-    n_tubes: int = 8
-    diameter: float = 0.05
-    h_fluid: float = 500.0
-    t_fluid: float = 333.15     # [K]
-    active: bool = False
-    pattern: str = TubePattern.RADIAL_ARRAY
-    tube_length: float | None = None
-    n_rings: int = 2
-    n_per_ring: list[int] | None = None
-    ring_radii: list[float] | None = None
-    grid_rows: int = 3
-    grid_cols: int = 3
-    grid_spacing: float = 0.2
-    custom_positions: list[tuple[float, float]] | None = None
-
-    @property
-    def radius(self) -> float:
-        return self.diameter / 2.0
-
-    def generate_positions(self, center_x: float, center_y: float, r_max: float,
-                           z_bottom: float, z_top: float) -> list[TubeElement]:
-        """Pure: return the element list, never touch the config or its counts."""
-        xy = self._positions(center_x, center_y, r_max)
-        length = self.tube_length if self.tube_length else max(z_top - z_bottom, 0.0)
-        return [TubeElement(x, y, z_bottom, z_bottom + length, self.radius,
-                            self.h_fluid, self.t_fluid) for x, y in xy]
-
-    def _positions(self, cx: float, cy: float, r_max: float) -> list[tuple[float, float]]:
-        p = self.pattern
-        if p == TubePattern.SINGLE_CENTRAL:
-            return [(cx, cy)]
-        if p == TubePattern.CUSTOM:
-            return [(float(x), float(y)) for x, y in (self.custom_positions or [])]
-        if p == TubePattern.CENTRAL_CLUSTER:
-            around = min(6, max(self.n_tubes - 1, 0))
-            r_ring = min(r_max * 0.6, self.grid_spacing * 2)
-            out = [(cx, cy)]
-            out += [(cx + r_ring * np.cos(2 * np.pi * i / max(around, 1)),
-                     cy + r_ring * np.sin(2 * np.pi * i / max(around, 1)))
-                    for i in range(around)]
-            return out[:max(self.n_tubes, 1)]
-        if p == TubePattern.RADIAL_ARRAY:
-            if self.ring_radii and self.n_per_ring:
-                rings = list(zip(self.ring_radii, self.n_per_ring, strict=True))
-            else:
-                rings = np.linspace(r_max * 0.3, r_max * 0.8, max(self.n_rings, 1))
-                base = max(self.n_tubes // max(self.n_rings, 1), 1)
-                extra = self.n_tubes % max(self.n_rings, 1)
-                counts = [base + (1 if i < extra else 0) for i in range(len(rings))]
-                rings = list(zip(rings, counts, strict=True))
-            out = []
-            for radius, count in rings:
-                out += [(cx + radius * np.cos(2 * np.pi * i / max(count, 1)),
-                         cy + radius * np.sin(2 * np.pi * i / max(count, 1)))
-                        for i in range(max(count, 1))]
-            return out[:max(self.n_tubes, 1)]
-        if p == TubePattern.GRID:
-            half_w = (self.grid_cols - 1) * self.grid_spacing / 2
-            half_h = (self.grid_rows - 1) * self.grid_spacing / 2
-            out = []
-            for row in range(self.grid_rows):
-                for col in range(self.grid_cols):
-                    x, y = cx - half_w + col * self.grid_spacing, cy - half_h + row * self.grid_spacing
-                    if float(np.hypot(x - cx, y - cy)) <= r_max:
-                        out.append((x, y))
-            return out[:max(self.n_tubes, 1)]
-        if p == TubePattern.HEXAGONAL:
-            out, ring = [(cx, cy)], 1
-            while len(out) < self.n_tubes:
-                radius = ring * self.grid_spacing
-                if radius > r_max:
-                    break
-                n_on_ring = 6 * ring
-                out += [(cx + radius * np.cos(2 * np.pi * i / n_on_ring + np.pi / 6),
-                         cy + radius * np.sin(2 * np.pi * i / n_on_ring + np.pi / 6))
-                        for i in range(n_on_ring)]
-                ring += 1
-            return out[:max(self.n_tubes, 1)]
-        raise ValueError(f"unknown tube pattern {p!r}; expected one of {TubePattern.ALL}")
 
 
 @dataclass
@@ -453,9 +266,6 @@ class BuildReport:
     zone_volumes: dict = field(default_factory=dict)
     zone_masses: dict = field(default_factory=dict)
     n_source_cells: int = 0
-    n_tube_cells: int = 0
-    n_heater_elements: int = 0
-    n_tube_elements: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -465,7 +275,6 @@ class BatteryGeometry:
 
     cylinder: CylinderGeometry = field(default_factory=CylinderGeometry)
     heaters: HeaterConfig = field(default_factory=HeaterConfig)
-    tubes: TubeConfig = field(default_factory=TubeConfig)
     storage_material: str = "steatite"
     insulation_material: str = "rock_wool"
     shell_material: str = "carbon_steel"
@@ -505,11 +314,6 @@ class BatteryGeometry:
                 problems.append(
                     f"battery height {cyl.z_cone_apex:.3f} m (roof apex) exceeds Lz = "
                     f"{lz:.3f} m: increase Lz or lower the roof/height")
-            if self.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
-                # a warning never blocks a build: it is reported with the build
-                problems.extend(p for p in self.heater_problems(mesh)
-                                if not p.startswith("warning: "))
-            problems.extend(self.tube_problems(mesh))
         return problems
 
     def apply_environment(self, mesh: Mesh3D | AdaptiveMesh,
@@ -569,56 +373,6 @@ class BatteryGeometry:
         self.film = film
         return film
 
-    def tube_problems(self, mesh: Mesh3D | AdaptiveMesh) -> list[str]:
-        """Tubes whose effective radius leaves the storage would heat the air."""
-        if not self.tubes.active:
-            return []
-        cyl = self.cylinder
-        elements = self.tubes.generate_positions(cyl.center_x, cyl.center_y,
-                                                 cyl.r_storage * 0.9,
-                                                 cyl.z_storage_start, cyl.z_storage_end)
-        z_mid = 0.5 * (cyl.z_storage_start + cyl.z_storage_end)
-        cell = max(_axis_size(mesh, 0, cyl.center_x, cyl.center_y, z_mid),
-                   _axis_size(mesh, 1, cyl.center_x, cyl.center_y, z_mid))
-        for element in elements:
-            reach = (float(np.hypot(element.x - cyl.center_x, element.y - cyl.center_y))
-                     + element.radius + 0.5 * cell)
-            if reach > cyl.r_storage + 1e-9:
-                return [f"a heat-exchanger tube at ({element.x:.2f}, {element.y:.2f}) m "
-                        f"reaches r = {reach:.2f} m, outside the storage radius "
-                        f"{cyl.r_storage:.2f} m: it would exchange heat with the air - "
-                        f"reduce the tube diameter, the pattern radius or use a "
-                        f"pattern that stays inside"]
-        return []
-
-    def heater_warnings(self, mesh: Mesh3D | AdaptiveMesh) -> list[str]:
-        """Non-blocking remarks of the heater bank (surface power, resolution)."""
-        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            return []
-        return [p for p in self.heater_problems(mesh) if p.startswith("warning: ")]
-
-    def heater_problems(self, mesh: Mesh3D | AdaptiveMesh,
-                        tubes_problems: bool = True) -> list[str]:
-        """Errors and warnings of the discrete heater bank (warnings prefixed).
-
-        The bank is checked by walking the cells it lands in
-        (:func:`src.core.heaters.validate_bank`, which locates a point on either mesh and
-        measures the local cell there), so a discrete pattern is checked, and painted, the
-        same way on a structured mesh and on a tree.  The uniform zone is a mask, not a
-        bank, and has nothing to rasterise.
-        """
-        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            return []                           # the zone is a mask: nothing to rasterise
-        cyl, cfg = self.cylinder, self.heaters
-        bank = cfg.bank(cyl.z_storage_start, cyl.z_storage_end)
-        tubes = None
-        if tubes_problems and self.tubes.active:
-            tubes = self.tubes.generate_positions(cyl.center_x, cyl.center_y,
-                                                  cyl.r_storage * 0.9,
-                                                  cyl.z_storage_start, cyl.z_storage_end)
-        return validate_bank(bank, mesh, cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
-                             cyl.z_storage_start, cyl.z_storage_end, tubes)
-
     # --------------------------------------------------------------- painting
     def apply_to_mesh(self, mesh: Mesh3D | AdaptiveMesh,
                       materials: MaterialManager = None) -> BuildReport:
@@ -654,9 +408,7 @@ class BatteryGeometry:
         self._paint_shell_and_insulation(mesh, R, Z, insul_props, steel_props, concrete_props)
         self._paint_storage(mesh, R, Z, storage_props)
         self._paint_roof(mesh, R, Z, storage_props, steel_props)
-        report.n_source_cells = self._paint_heaters(mesh, Z, R, materials)
-        report.notes.extend(self.heater_warnings(mesh))
-        report.n_tube_cells = self._paint_tubes(mesh, Z, R, materials)
+        report.n_source_cells = self._paint_source(mesh, Z, R)
 
         # the air around the vessel becomes a boundary condition: the cells outside the
         # envelope leave the problem and the surface carries the film
@@ -665,8 +417,6 @@ class BatteryGeometry:
         self.apply_boundary_conditions(mesh, steel_props)
         report.zone_volumes = self.zone_volumes(mesh)
         report.zone_masses = self.zone_masses(mesh, materials)
-        report.n_heater_elements = self._n_heaters()
-        report.n_tube_elements = self._n_tubes()
         mesh.validate()
         return report
 
@@ -770,8 +520,16 @@ class BatteryGeometry:
         r_inner = np.maximum(r_cone - thickness, 0.0)
         self._fill(mesh, in_region & (r_inner <= R) & (r_cone > R), MaterialID.STEEL, steel)
 
-    def _paint_heaters(self, mesh: Mesh3D | AdaptiveMesh, Z, R,
-                       materials: MaterialManager) -> int:
+    def _paint_source(self, mesh: Mesh3D | AdaptiveMesh, Z, R) -> int:
+        """The lumped bed source: the gas circuit's power over the storage volume.
+
+        The resistors heat the gas, the gas crosses the pipe walls and the sand takes
+        the heat up - and an analysis that does not march the loop (steady, losses) sees
+        that power as a uniform volumetric source over the storage band inside the two
+        offsets.  It is the *same* number the gas carries: ``power_total`` is the
+        electric power of the plant, and the network's own report checks it against the
+        wetted surface the pipes actually offer.
+        """
         cyl, cfg = self.cylinder, self.heaters
         mesh.Q_source.fill(0.0)
         mesh.source_mask.fill(False)
@@ -779,112 +537,13 @@ class BatteryGeometry:
         z_top = cyl.z_storage_end - cfg.offset_top
         if z_top <= z_bottom:
             raise ValueError("heater offsets leave no room inside the storage band")
-        if cfg.pattern == HeaterPattern.UNIFORM_ZONE:
-            mask = (z_bottom <= Z) & (z_top > Z) & (cyl.r_storage > R)
-            n = int(np.count_nonzero(mask))
-            if n == 0:
-                raise ValueError("uniform heater zone covers no cell: refine the mesh")
-            mesh.source_mask[mask] = True
-            mesh.Q_source[mask] = cfg.power_w / float(mesh.V[mask].sum())
-            return n
-
-        # discrete elements: hairpin sheathed tubes, power on the active length only
-        bank = cfg.bank(cyl.z_storage_start, cyl.z_storage_end)
-        raster = rasterize(bank, mesh, cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
-                           cyl.z_storage_start, cyl.z_storage_end)
-        if raster.problem:
-            raise ValueError(f"the heater bank cannot be represented: {raster.problem}")
-        mask = raster.mask
+        mask = (z_bottom <= Z) & (z_top > Z) & (cyl.r_storage > R)
         n = int(np.count_nonzero(mask))
         if n == 0:
-            raise ValueError(
-                "no mesh cell falls inside the discrete heaters: the sheath "
-                f"({bank.sheath_diameter * 1000:.1f} mm) is smaller than the local cell "
-                f"size.  Refine the heater region or use the uniform zone")
-        self._fill(mesh, mask, MaterialID.HEATERS, materials.get(bank.sheath_material))
-        active = raster.active_mask
-        if int(np.count_nonzero(active)) == 0:
-            raise ValueError("the heater elements have no cell inside the storage band: "
-                             "check the offsets and the active length")
-        mesh.source_mask[active] = True
-        mesh.Q_source[active] = bank.total_power_w / float(mesh.V[active].sum())
+            raise ValueError("the heat source covers no cell: refine the mesh")
+        mesh.source_mask[mask] = True
+        mesh.Q_source[mask] = cfg.power_w / float(mesh.V[mask].sum())
         return n
-
-    def _paint_tubes(self, mesh: Mesh3D | AdaptiveMesh, Z, R,
-                     materials: MaterialManager) -> int:
-        cyl, cfg = self.cylinder, self.tubes
-        mask_tubes = np.zeros(mesh.T.shape, dtype=bool)
-        if not cfg.active:
-            mesh.bc_h[mesh.material_id == int(MaterialID.TUBES)] = 0.0
-            return 0
-        elements = cfg.generate_positions(cyl.center_x, cyl.center_y, cyl.r_storage * 0.9,
-                                          cyl.z_storage_start, cyl.z_storage_end)
-        if not elements:
-            return 0
-        band = (cyl.z_storage_start <= Z) & (cyl.z_storage_end > Z)
-        mask_tubes = self._elements_mask(mesh, elements, [e.radius for e in elements]) & band
-        n = int(np.count_nonzero(mask_tubes))
-        if n == 0:
-            raise ValueError(
-                "no mesh cell falls inside the heat-exchanger tubes: the tube radius "
-                f"({cfg.radius} m) is smaller than half the local cell size "
-                f"({_finest_size(mesh) / 2:.3f} m). "
-                "Refine the mesh or increase the tube diameter")
-        steel = materials.get(self.shell_material)
-        self._fill(mesh, mask_tubes, MaterialID.TUBES, steel)
-        self._clear_sources(mesh, mask_tubes)
-        mesh.set_internal_convection(mask_tubes, cfg.h_fluid, cfg.t_fluid)
-        return n
-
-    @staticmethod
-    def _clear_sources(mesh: Mesh3D | AdaptiveMesh, mask: np.ndarray) -> None:
-        """A tube cell is not a heater: never keep a volumetric source there."""
-        mesh.Q_source[mask] = 0.0
-        mesh.source_mask[mask] = False
-
-    @staticmethod
-    def _elements_mask(mesh: Mesh3D | AdaptiveMesh, elements, radii) -> np.ndarray:
-        """Cells covered by the elements; a sub-grid element keeps its own cell.
-
-        The radius is widened to half a cell, and if even that misses every cell
-        centre (an element thinner than the grid) the cell containing the axis is
-        used, so a heater or a tube can never silently vanish.
-
-        The masks are built over the cell centres, which is the set the structured
-        index window used to select: the window spans the cells that meet
-        ``[x - r_eff, x + r_eff]``, so a centre inside the circle is inside the window
-        and dropping the window selects no other cell.
-        """
-        X, Y, Z = _centres(mesh)
-        mask = np.zeros(mesh.T.shape, dtype=bool)
-        for element, radius in zip(elements, radii, strict=True):
-            r_eff = max(float(radius),
-                        0.5 * mesh.cell_size_at(element.x, element.y, element.z_bottom))
-            z_top = max(element.z_top,
-                        element.z_bottom + _axis_size(mesh, 2, element.x, element.y,
-                                                      element.z_bottom))
-            band = (element.z_bottom <= Z) & (z_top > Z)
-            circle = (X - element.x) ** 2 + (Y - element.y) ** 2 <= r_eff ** 2
-            hit = band & circle
-            if not hit.any():
-                hit = _sub_cell_element(mesh, X, Y, Z, element, z_top)
-            mask |= hit
-        return mask
-
-    def _n_heaters(self) -> int:
-        """Elements of the painted bank (the count the rasteriser deposits)."""
-        cyl = self.cylinder
-        if self.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            return 0
-        return self.heaters.bank(cyl.z_storage_start, cyl.z_storage_end).n_elements
-
-    def _n_tubes(self) -> int:
-        if not self.tubes.active:
-            return 0
-        cyl = self.cylinder
-        return len(self.tubes.generate_positions(cyl.center_x, cyl.center_y,
-                                                 cyl.r_storage * 0.9,
-                                                 cyl.z_storage_start, cyl.z_storage_end))
 
     # ------------------------------------------------------------- reporting
     def zone_volumes(self, mesh: Mesh3D | AdaptiveMesh = None) -> dict:
@@ -970,8 +629,6 @@ def create_small_test_geometry() -> BatteryGeometry:
                                   r_storage=2.0, insulation_thickness=0.2,
                                   insulation_slab_bottom=0.2, insulation_slab_top=0.2,
                                   roof_angle_deg=15.0, enable_cone_roof=True),
-        heaters=HeaterConfig(power_total=50.0, n_heaters=6,
-                             pattern=HeaterPattern.UNIFORM_ZONE),
-        tubes=TubeConfig(n_tubes=6, active=False),
+        heaters=HeaterConfig(power_total=50.0),
     )
     return geom

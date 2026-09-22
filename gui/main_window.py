@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.analysis.mesh_plan import plan_regions
-from src.core.geometry import BatteryGeometry, HeaterPattern
+from src.core.geometry import BatteryGeometry
 from src.core.materials import MaterialManager
 from src.core.mesh import Mesh3D
 from src.core.pipe_network import build_pipe_network
@@ -140,7 +140,6 @@ class ThermalBatteryGUI(QMainWindow):
         self.run_btn.clicked.connect(self.run)
         self.cancel_btn.clicked.connect(self.controller.cancel)
         self.geometry_panel.mesh_changed.connect(self._update_mesh_info)
-        self.geometry_panel.preview_requested.connect(self.preview_elements)
         self.materials_panel.storage_material.currentIndexChanged.connect(
             self.materials_panel.refresh_info)
         self.materials_panel.insulation_material.currentIndexChanged.connect(
@@ -172,15 +171,25 @@ class ThermalBatteryGUI(QMainWindow):
         return bool(self.solver_panel.settings().get("radiation", False))
 
     def _refresh_plan(self) -> None:
-        """Recompute the a priori mesh plan from the current geometry and materials."""
+        """Recompute the a priori mesh plan from the current geometry and materials.
+
+        The plan is the *active* model's: the sand, the insulation and the shell.  The
+        region the pipes need is added from the network's own diameter, because that is
+        the surface the power crosses and the mesh has to represent it.
+        """
         try:
             battery = self._battery_from_panels()
         except ValueError:
             return
         plans = plan_regions(battery, MaterialManager())
-        self.geometry_panel.set_plan_targets(
-            {plan.name: plan.target for plan in plans},
-            " | ".join(f"{plan.name} {plan.target * 1000:.0f} mm" for plan in plans))
+        panel = self.geometry_panel
+        pipe = panel.pipe_diameter.value() / max(panel.cells_sheath.value(), 1)
+        rows = [f"{plan.name} {plan.target * 1000:.0f} mm" for plan in plans]
+        rows.append(f"tube wall {pipe * 1000:.0f} mm "
+                    f"({panel.pipe_diameter.value() * 1000:.0f} mm d / "
+                    f"{panel.cells_sheath.value()} cells)")
+        panel.set_plan_targets({plan.name: plan.target for plan in plans},
+                               " | ".join(rows))
 
     @safe_slot
     def build_mesh(self) -> None:
@@ -201,47 +210,55 @@ class ThermalBatteryGUI(QMainWindow):
         self.log("[mesh] " + "; ".join(line.strip() for line in grid_lines(mesh)))
         for note in report.notes:
             self.log(f"[mesh] {note}")
-        self.log(f"[mesh] {report.n_source_cells} source cells, "
-                 f"{report.n_tube_cells} tube cells")
+        self.log(f"[mesh] {report.n_source_cells} source cells")
         if self.geometry_panel.pipe_network() is not None:
             # the pipes were painted on the old mesh: nothing of them survives a rebuild
             self.geometry_panel.set_pipe_network(
                 None, "the mesh was rebuilt: build and paint the network again")
-            self.log("[pipes] the mesh was rebuilt, so the painted pipes are gone")
+        # the network is the heat-transfer surface of the plant, so a fresh mesh gets
+        # one: the pipes are painted on the very cells this run will solve
+        self.paint_pipe_network("the mesh was rebuilt")
         self._update_mesh_info()
         self.viz.show_mesh(mesh)
         self.statusBar().showMessage("Mesh ready")
 
-    @safe_slot
-    def build_pipe_network(self) -> None:
+    def paint_pipe_network(self, reason: str = "") -> object:
         """Build the network of the Pipes tab on this window's mesh and paint it.
 
         The panel owns the widgets but not the mesh: the cells the paint marks have to
         be the cells the run will solve, so the build happens here, on ``self.mesh``.
+        ``build_mesh`` calls it, which is what makes the buried network the *default*
+        path of a simulation - the gas loop is what carries the heat - and the Pipes
+        tab's button calls it again after a change of the plumbing.  Returns the
+        network, or ``None`` when it could not be built.
         """
         panel = self.geometry_panel
         if self.controller.running:
             self.log("[pipes] a simulation is running: the mesh is being read")
-            return
+            return panel.pipe_network()
         if self.mesh is None:
-            QMessageBox.warning(self, "No mesh", "Build the mesh first.")
             panel.set_pipe_network(None, "no mesh: build the mesh first")
-            return
+            return None
         try:
             network = build_pipe_network(self.mesh, panel.pipe_network_config())
             report = network.paint(self.mesh, **panel.pipe_paint_settings())
         except ValueError as exc:
             panel.set_pipe_network(None, f"invalid: {exc}")
             self.log(f"[pipes] refused: {exc}")
-            return
-        panel.set_pipe_network(network, report)
+            return None
+        panel.set_pipe_network(network, report, reason)
         for note in network.notes:
             self.log(f"[pipes] {note}")
         self.log(f"[pipes] {network.n_risers} risers, {network.specific_area:.2f} m2/m3, "
                  f"painted {report.cells:,} cells ({report.area:.1f} m2)")
-        if panel.disable_lumped_tubes():
-            self.log("[pipes] the lumped tube bank of the Tubes tab is off: the gas "
-                     "loop through the network is the heat transfer path now")
+        self.log(f"[pipes] {panel._circuit_line()}")
+        return network
+
+    @safe_slot
+    def build_pipe_network(self) -> None:
+        """The Pipes tab's button: rebuild the network on the current mesh."""
+        if self.paint_pipe_network() is None:
+            return
         self._refresh_results()
         self.statusBar().showMessage("Pipe network painted")
 
@@ -252,45 +269,8 @@ class ThermalBatteryGUI(QMainWindow):
         except ValueError as exc:
             QMessageBox.critical(self, "Geometry error", str(exc))
             return
-        self.viz.show_geometry(self.battery, self.mesh)
-
-    @safe_slot
-    def preview_elements(self) -> None:
-        try:
-            battery = self._battery_from_panels()
-        except ValueError as exc:
-            QMessageBox.critical(self, "Geometry error", str(exc))
-            return
-        cyl = battery.cylinder
-        panel = self.geometry_panel
-        if battery.heaters.pattern == HeaterPattern.UNIFORM_ZONE:
-            panel.heater_positions.clear()
-            panel.heater_positions.addItem("uniform zone: the power is spread over the "
-                                           "whole storage volume (no discrete element)")
-        else:
-            bank = battery.heaters.bank(cyl.z_storage_start, cyl.z_storage_end)
-            heaters = bank.generate_elements(cyl.center_x, cyl.center_y,
-                                             cyl.r_storage * 0.9)
-            panel.heater_positions.clear()
-            for index, element in enumerate(heaters):
-                panel.heater_positions.addItem(
-                    f"{index}: ({element.center_x:.2f}, {element.center_y:.2f}) "
-                    f"legs {element.leg_spacing * 1000:.0f} mm  "
-                    f"{element.rated_power / 1000:.2f} kW  "
-                    f"{element.surface_power_w_cm2:.1f} W/cm2")
-            panel.heater_positions.addItem(
-                f"total {len(heaters)} hairpin elements, "
-                f"{bank.total_power_w / 1000:.1f} kW, "
-                f"{bank.surface_power_w_cm2():.1f} W/cm2")
-        tubes = battery.tubes.generate_positions(cyl.center_x, cyl.center_y,
-                                                 cyl.r_storage * 0.9,
-                                                 cyl.z_storage_start, cyl.z_storage_end)
-        panel.tube_positions.clear()
-        for element in tubes:
-            panel.tube_positions.addItem(
-                f"({element.x:.2f}, {element.y:.2f}) r {element.radius:.3f} m  "
-                f"h {element.h_fluid:.0f} W/(m²·K)")
-        panel.tube_positions.addItem(f"total {len(tubes)} tubes")
+        self.viz.show_geometry(self.battery, self.mesh,
+                               network=self.geometry_panel.pipe_network())
 
     @safe_slot
     def find_auto_mesh(self, build_after: bool = False) -> None:
@@ -348,6 +328,10 @@ class ThermalBatteryGUI(QMainWindow):
             start_from_steady=self.analysis_panel.wants_steady_initial_condition(),
             pipe_network=self.geometry_panel.pipe_network(),
             pipe_flow=self.geometry_panel.pipe_mass_flow(),
+            pipe_fluid=self.geometry_panel.circuit_fluid(),
+            pipe_pressure=self.geometry_panel.circuit_pressure_pa(),
+            pipe_inlet=self.geometry_panel.inlet_temperature(),
+            pipe_fan_efficiency=self.geometry_panel.fan_efficiency_fraction(),
             **self.solver_panel.settings(),
         )
 

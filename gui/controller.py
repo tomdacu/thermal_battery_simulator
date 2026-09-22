@@ -50,11 +50,20 @@ class RunConfig:
     power_profile: PowerProfile = field(default_factory=PowerProfile)
     extraction_profile: ExtractionProfile = field(default_factory=ExtractionProfile)
     start_from_steady: bool = False
-    #: the buried pipe network the Pipes tab built and painted (None = the lumped
-    #: tube bank of the geometry is the heat exchanger)
+    #: the buried pipe network the Pipes tab built and painted (None = no network:
+    #: the geometry's lumped bed source alone drives the run)
     pipe_network: PipeNetwork | None = None
     #: total mass flow of the gas circuit of that network [kg/s]
     pipe_flow: float = 0.0
+    #: the gas the circuit is filled with (``src.solver.fluid.Fluid``); None = air
+    pipe_fluid: object = None
+    #: absolute pressure of the loop [Pa]: it sets the density the gas marches at
+    pipe_pressure: float = 101325.0
+    #: temperature the gas enters the loop at [K]; None = the loop solves its own
+    #: balance from the external power (the closed-circuit case)
+    pipe_inlet: float | None = None
+    #: blower efficiency [-]: the electric power of the fan is the shaft power over it
+    pipe_fan_efficiency: float = 0.7
 
     def solver_config(self) -> SolverConfig:
         return SolverConfig(method=self.method, preconditioner=self.preconditioner,
@@ -217,23 +226,28 @@ class SimulationController(QObject):
                 "automesh": automesh}[config.analysis]
 
     def _fluid_loop(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh):
-        """The gas circuit of a network the Pipes tab built, or None.
+        """The gas circuit of the network the Pipes tab built, or None.
 
         With a network the gas *is* the heat transfer path: the loop marches the pipes
         on the mesh (the cells the paint marked) and the profiles drive its external
-        power instead of depositing heat in the sand.  Without one the lumped tube bank
-        of the geometry keeps doing the job, as it always did.
+        power instead of depositing heat in the sand.  The circuit's own settings come
+        from the Heaters tab - the gas, its pressure, the return temperature when the
+        user prescribes one, and the blower - and the hydraulics of the whole circuit
+        (headers and ducts included) is reported before the march.
         """
         network = config.pipe_network
         if network is None:
             return None
         if config.pipe_flow <= 0.0:
             raise ValueError(
-                "the buried pipe network needs a circuit mass flow > 0 kg/s: set it in "
-                "the Pipes tab")
-        circuit = network.hydraulics(config.pipe_flow)
+                "the buried pipe network needs a circuit mass flow > 0 kg/s: set it on "
+                "the Heaters tab")
+        circuit = network.hydraulics(config.pipe_flow, config.pipe_fluid)
         self.log.emit(f"[pipes] {circuit.summary()}")
-        return network.fluid_loop(config.pipe_flow, mesh=mesh)
+        return network.fluid_loop(config.pipe_flow, fluid=config.pipe_fluid, mesh=mesh,
+                                  t_in=config.pipe_inlet,
+                                  fan_efficiency=config.pipe_fan_efficiency,
+                                  pressure=config.pipe_pressure)
 
     def _finish(self, analysis: str, result) -> None:
         self.finished.emit(analysis, result)

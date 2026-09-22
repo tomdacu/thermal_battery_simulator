@@ -782,3 +782,26 @@ def test_the_spiral_layout_winds_the_tubes_one_pitch_per_turn():
     assert float(np.min(distance)) > config.diameter      # the tubes never touch
     assert LAYOUT_SPIRAL in LAYOUTS
     assert "spiral" in net.summary()
+
+
+# ------------------------------------------------------- the surface power rating
+def test_the_power_of_the_plant_is_rated_on_the_surface_of_the_pipes():
+    """The wall that delivers the power is the tubes': P over the wetted area.
+
+    The rating window the immersion-element practice uses (3-8 W/cm2) is applied to the
+    surface the gas actually crosses - the geometric ``pi d L`` of the network, which is
+    not read off the voxel mask - and a network with no surface has no rating to report.
+    """
+    from src.constants import (PIPE_SURFACE_POWER_LIMIT_W_CM2,
+                               PIPE_SURFACE_POWER_MIN_W_CM2)
+    from src.core.pipes import pipe_surface_power_w_cm2
+
+    net = network()
+    area = net.total_area                                    # ~ pi d L of every run
+    assert area > 0.0
+    # a busbar's power over this surface is far past the window, a kettle's far below it
+    assert pipe_surface_power_w_cm2(1.0e7, area) > PIPE_SURFACE_POWER_LIMIT_W_CM2
+    assert pipe_surface_power_w_cm2(1.0e5, area) < PIPE_SURFACE_POWER_MIN_W_CM2
+    # 1 m2 carrying 10 kW is exactly 1 W/cm2: the conversion is the point of the helper
+    assert pipe_surface_power_w_cm2(10_000.0, 1.0) == pytest.approx(1.0)
+    assert pipe_surface_power_w_cm2(1.0e6, 0.0) == float("inf")

@@ -28,6 +28,15 @@ PACKING_FRACTION_DEFAULT = 0.63
 # --- environment ----------------------------------------------------------
 GRAVITY = 9.81                 # [m/s^2] used by the natural-convection correlations
 
+# --- the gas circuit ------------------------------------------------------
+#: rating window of the *buried pipe* surface [W/cm^2]: the power the electric
+#: resistors put into the gas leaves through the walls of the network, and a wall that
+#: carries more than this is a wall nobody builds.  The window is the one immersion
+#: heaters are rated by - the resistors sit in the circuit, but the surface that
+#: actually delivers the power to the bed is the tubes'.
+PIPE_SURFACE_POWER_MIN_W_CM2 = 3.0
+PIPE_SURFACE_POWER_LIMIT_W_CM2 = 8.0
+
 # --- geometry / numerics --------------------------------------------------
 MIN_CELLS_PER_AXIS = 3
 DEFAULT_SPACING = 0.2          # [m] target cell size

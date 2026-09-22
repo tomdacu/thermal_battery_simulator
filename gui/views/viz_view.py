@@ -36,6 +36,7 @@ class VizView(QWidget):
         self.plotter = None
         self._mesh = None
         self._battery = None
+        self._network = None
         self._mode = "field"
         self._disabled_reason = None
         if os.environ.get("THERMAL_DISABLE_3D", "") in ("1", "true", "yes"):
@@ -133,7 +134,7 @@ class VizView(QWidget):
             position = fraction * length[_AXES[axis][0]]
             add_geometry_preview(self.plotter, self._battery, mesh,
                                  clip=(axis, position),
-                                 opacity_scale=opacity / 0.8)
+                                 opacity_scale=opacity / 0.8, network=self._network)
             self.plotter.add_text(f"geometry preview  |  cut {axis} at {position:.2f} m",
                                   position="upper_left", font_size=10)
         elif mesh is not None:
@@ -178,9 +179,17 @@ class VizView(QWidget):
                 self.field_combo.setCurrentIndex(index)
         self.render()
 
-    def show_geometry(self, battery, mesh=None) -> None:
-        """Schematic preview; the cut and opacity controls apply to it too."""
+    def show_geometry(self, battery, mesh=None, network=None) -> None:
+        """Schematic preview; the cut and opacity controls apply to it too.
+
+        ``network`` is the pipe network the Pipes tab built and painted: the preview
+        draws its circuit, which is the heat-transfer surface of the whole plant.
+        Passing ``None`` on purpose clears it (a rebuilt mesh invalidates the old one);
+        leaving it out keeps whatever the last preview had.
+        """
         self._battery = battery
+        if network is not None or mesh is not None:
+            self._network = network
         self._mode = "geometry"
         if mesh is not None:
             self._mesh = mesh

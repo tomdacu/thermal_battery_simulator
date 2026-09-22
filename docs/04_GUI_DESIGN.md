@@ -11,10 +11,9 @@ displays results.
 │  1. Geometry           │  field / cut / position   │  Statistics      │
 │     Cylinder           │  opacity / reset camera   │  Energy balance  │
 │     Insulation         │  (colormap fixed)         │  Materials       │
-│     Heaters            │                           │  Transient       │
-│     Tubes              │                           │  Log             │
+│     Heaters (circuit)  │                           │  Transient       │
+│     Pipes (network)    │                           │  Log             │
 │     Mesh               │                           │                  │
-│     Pipes              │                           │                  │
 │  2. Materials          │                           │                  │
 │     Storage            │                           │                  │
 │     Insulation         │                           │                  │
@@ -38,8 +37,11 @@ The three panes sit in a `QSplitter` (initial sizes 520 / 560 / 420; the left co
 is capped at 560 px so the 3D view keeps the room).  The window is 1500 x 950 by
 default.
 
-* **Geometry** – domain, cylinder, insulation, heaters, tubes, mesh, buried pipes
-  (`GeometryPanel`, six sub-tabs).
+* **Geometry** – domain, cylinder, insulation, the gas circuit (`Heaters`), the buried
+  pipe network (`Pipes`) and the mesh (`GeometryPanel`, five sub-tabs).  The circuit and
+  the network are the plant: the resistors heat the gas, the gas crosses the tube walls,
+  and the same network charges and discharges the bed.  There is no lumped-tube tab
+  (2026-09-22): the exchanger is on the circuit and the loop's inlet is its return.
 * **Materials** – storage medium, insulation and shell, ambient/ground
   conditions and the radiation switch.  This tab is the *only* place where
   ambient and ground values are defined; the analyses read them.
@@ -58,7 +60,7 @@ parses strings:
 
 | panel | getters |
 |---|---|
-| `GeometryPanel` | `domain()`, `cylinder()`, `heaters()`, `tubes()`, `apply_geometry(battery)`, `build_mesh()`, `grid_spec()`, `wants_auto_search()`, `auto_mesh_settings()`, `set_plan_targets(...)`, `planned(name, manual)`, `auto_spec()`, `set_auto_spec(...)`, `pipe_network_config()`, `build_pipe_network_clicked()`, `set_mesh_info(...)` |
+| `GeometryPanel` | `domain()`, `cylinder()`, `heaters()`, `apply_geometry(battery)`, `build_mesh()`, `grid_spec()`, `mesh_regions()`, `wants_auto_search()`, `auto_mesh_settings()`, `set_plan_targets(...)`, `planned(name, manual)`, `auto_spec()`, `set_auto_spec(...)`, `pipe_network_config()`, `pipe_paint_settings()`, `pipe_mass_flow()`, `circuit_fluid()`, `inlet_temperature()`, `circuit_pressure_pa()`, `fan_efficiency_fraction()`, `pipe_surface_power()`, `set_pipe_network(...)`, `set_mesh_info(...)` |
 | `MaterialsPanel` | `storage_key()`, `insulation_key()`, `shell_key()`, `packing_fraction()`, `conditions()`, `radiation_enabled()`, `refresh_info()` |
 | `AnalysisPanel` | `analysis_type()`, `initial_condition()`, `wants_steady_initial_condition()`, `power_profile()`, `extraction_profile()`, `transient_settings()`, `losses_target_kelvin()` |
 | `SolverPanel` | `settings()`, `losses_settings()`, `threads()` |
@@ -156,7 +158,7 @@ widget degrades to a placeholder explaining why, and the rest of the application
 keeps working; `THERMAL_DISABLE_3D=1` forces that mode (used by the test suite).
 
 `Preview geometry` draws the schematic configuration (shell, insulation, storage,
-roof, foundation, tubes, heaters) straight from the geometry object, so what you
+roof, foundation, and the pipe network) straight from the geometry object, so what you
 see is what `apply_to_mesh` will paint.
 
 ## 6. Units at the boundary

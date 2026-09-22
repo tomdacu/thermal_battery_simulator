@@ -14,7 +14,11 @@ for label, widget in GeometryPanel().tabs.widget(0).fields.items():
 ```
 
 Ranges are the widget limits; "feeds" is the `src` field the getter writes.
-`GeometryPanel` has six sub-tabs: Cylinder, Insulation, Heaters, Tubes, Mesh, Pipes.
+`GeometryPanel` has five sub-tabs: **Cylinder, Insulation, Heaters, Pipes, Mesh**.  The
+Heaters tab is the *plant's heat source* (the gas circuit the electric resistors heat)
+and the Pipes tab is the buried network that carries that heat into the sand; there is
+one heat exchanger and it is on the circuit, so the old lumped-tube tab is gone
+(2026-09-22).
 
 ## 1. Geometry — Cylinder
 
@@ -44,48 +48,60 @@ stay below `Lz`: the build refuses rather than clipping the roof.
 | Top slab [m] | 0.2 | 0–1 | `insulation_slab_top` |
 | Foundation margin [m] | 0.5 | 0–3 | `foundation_margin` (concrete beyond the shell) |
 
-## 3. Geometry — Heaters
+## 3. Geometry — Heaters (the gas circuit)
+
+The resistors do not sit in the bed: they heat the gas of a closed loop that runs
+through the buried pipes, and the gas hands the power to the sand across the tube walls.
+Everything on this tab is a property of that circuit; the network itself is the Pipes
+tab, and the two summaries below are computed on it (`PipeNetwork.hydraulics`,
+`PipeNetwork.summary` and the geometric wetted area `pi d L`).
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Total power [kW] | **5.0** | 0–10 000 | `HeaterConfig.power_total` |
-| Pattern | Uniform zone (volumetric) | 6 patterns | `HeaterConfig.pattern` |
-| Elements | 12 | 1–500 | `n_heaters` (ring/spiral layouts) |
-| Offset from bottom / top [m] | 0.0 / 0.0 | 0–2 | `offset_bottom` / `offset_top` |
-| Grid rows / columns | 4 / 4 | 1–20 | `grid_rows` / `grid_cols` |
-| Rings | 2 | 1–10 | `n_rings` |
-| Sheath diameter [m] | 0.012 | 0.006–0.05, step 0.002 | `sheath_diameter` |
-| Leg spacing [m] | 0.08 | 0.02–1 | `leg_spacing` between the two legs |
-| Active length [m] | 0.0 (= whole band) | 0–30 | `active_length` (heater `None` when 0) |
-| Cold shank [m] | 0.15 | 0–2 | `cold_shank` through insulation and air |
-| Support plate [m] | 0.05 | 0–1 | `support_plate_offset` above the storage floor |
-| Flange above roof [m] | 0.03 | 0–1 | `flange_offset` |
-| Power per element [kW] | computed | – | display: `power_total / n_heaters` |
-| Surface power [W/cm²] | computed | – | display: `P / (π d (L_active + bend))`, with "in range" / "out of the 3-8 W/cm² range" |
-| *Calculate positions* | – | – | fills the element list (preview only; the config is unchanged) |
+| Total power [kW] | **5.0** | 0–100 000 | `HeaterConfig.power_total`; the resistors' electric power, and the bed source of an analysis that does not march the loop |
+| Gas | Air | air / nitrogen / steam | `RunConfig.pipe_fluid` (`Fluid` of `src/solver/fluid.py`) |
+| Source from bottom / top [m] | 0.0 / 0.0 | 0–2 | `HeaterConfig.offset_bottom` / `offset_top`: the band of the storage the lumped bed source covers |
+| Mass flow [kg/s] | 0.5 | 0–200 | `RunConfig.pipe_flow`, i.e. the `FluidLoop`'s total mass flow (the branches split it) |
+| Circuit pressure [bar] | 1.01325 | 0.1–100 | `RunConfig.pipe_pressure`: the density of the gas follows the pressure (`Fluid.at_pressure`) |
+| Return to the resistors [°C] | "auto" | 0 (auto) – 700 | `RunConfig.pipe_inlet`; at "auto" the loop solves its own inlet temperature from the power balance (closed circuit) |
+| Fan efficiency [%] | 70 | 10–100 | `RunConfig.pipe_fan_efficiency`: the blower's electric power |
+| Wall roughness [um] | 0 ("from the tube material") | 0–2000 | `PipeNetworkConfig.roughness` (the tubes', headers' and ducts' walls) |
+| Circuit | "build the network to size it" | – | read-only: the total power over the network's wetted surface (W/cm²), the power per riser, the flow and the pressure |
 
-Patterns (`HeaterPattern.ALL`): uniform zone (volumetric, the default), vertical
-grid, checkerboard, radial array, spiral, concentric rings.  The pattern selects the
-*bank geometry* of `src/core/heaters.py`: the two grid names produce a
-`grid_rows × grid_cols` bank, the spiral a bank sized from `n_heaters` (about
-`sqrt(n) × sqrt(n)`), and the radial/ring names a ring layout whose element count
-follows the circumference and the leg spacing.  The validations and the surface
-power window are in [03](03_GEOMETRY.md) §3.
+The **surface power** is the rating that matters and it is the pipe wall's:
+`pipe_surface_power_w_cm2` puts the designed power over the wetted area of the network
+and the report quotes the 3–8 W/cm² window the immersion-element practice uses.  It is
+computed on the built network, so it appears when the network exists.
 
-## 4. Geometry — Tubes
+## 4. Geometry — Pipes (the buried network)
+
+One tab for the whole circuit inside the vessel: the layout, the tube, the collectors,
+the gas film the paint writes and the build-and-paint action.  The same network is the
+charge path (flow up the risers, hot collection at the top) and the discharge path (flow
+reversed, heat out to the exchanger), so there is no second heat exchanger in the vessel.
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Heat exchanger ("tubes active (discharge)") | off | – | `TubeConfig.active` |
-| Fluid inlet [°C] | 60 | −20–400 | `t_fluid` (converted to K) |
-| Fluid h [W/(m²·K)] | 500 | 10–20 000 | `h_fluid` |
-| Pattern | Radial array | 6 patterns | `TubeConfig.pattern` |
-| Tubes | 8 | 1–200 | `n_tubes` |
-| Diameter [m] | 0.05 | 0.01–0.5 | `diameter` |
-| Grid rows / columns | 3 / 3 | 1–20 | `grid_rows` / `grid_cols` |
-| Grid spacing [m] | 0.2 | 0.05–2 | `grid_spacing` |
-| Rings | 2 | 1–10 | `n_rings` |
-| *Calculate positions* | – | – | fills the tube list (preview only) |
+| Layout | Concentric rings (`rings`) | staggered / grid / rings / radial / spiral | `PipeNetworkConfig.layout` |
+| Collection | Reverse return (balanced) | distributor + collector / reverse return / central header / two-level rings | `PipeNetworkConfig.collection` |
+| Rings / Radial files | 3 / 12 | 1–12 / 3–72 | `n_rings` / `n_files` |
+| Pipe outer d [m] | 0.05 | 0.01–0.3 | `diameter` (the pitch follows it) |
+| Wall thickness [mm] | 2.0 | 0–20 | `wall_thickness` (the bore drives the gas) |
+| Tube material | Stainless steel (drawn) | stainless / carbon | `material` (label + default roughness) |
+| Duct d [m] | 0.15 | 0.05–0.6 | `duct_diameter` |
+| Insulated headers | off | – | `insulated_headers` (lagged headers exchange nothing) |
+| Junction refinement [m] | 0 ("off") | 0–0.5 | `junction_refinement`: the mesh band at the two header elevations |
+| Inlet / Outlet azimuth [deg] | 180 / 0 | 0–360 | `azimuth_in` / `azimuth_out` |
+| Flow split | Equal per branch | equal / from path length / per ring main / per sector | `split_mode` |
+| Sectors | 4 | 1–16 | `n_sectors` |
+| Gas h [W/(m²·K)] | 500 | 10–20 000 | the film `paint` writes on the pipe cells (a loop run replaces it) |
+| Gas T [°C] | 60 | −20–400 | the gas temperature of that film |
+| *Build network and paint it on the mesh* | – | – | rebuilds and repaints on the current mesh |
+| Network | "build the mesh, then the network" | – | read-only: `summary()`, the paint report and the surface power |
+
+`Build mesh` builds **and paints** the network by default: the pipes are the
+heat-transfer surface, so a run started from the Analysis tab uses the loop painted on
+the very cells it solves.
 
 ## 5. Geometry — Mesh
 
@@ -95,13 +111,21 @@ power window are in [03](03_GEOMETRY.md) §3.
 | Cell size (uniform) [m] | 0.2 | 0.02–1 | `spacing` when the refined mode is off |
 | Cells across storage | 10 | 2–200 | target = `r_storage / n` inside the storage band |
 | Cells across insulation | 3 | 1–50 | target = `insulation_thickness / n` in the shell ring |
-| Cells across sheath | 2 | 1–20 | target = `min(sheath, tube diameter) / n` around the **heater bank** |
-| Far field [m] | 0.4 | 0.05–2 | largest cell in the air |
+| Cells across the tube wall | 2 | 1–20 | target = `pipe outer d / n` over the **pipe bundle** (the wall is the heat-transfer surface) |
 | Growth ratio | 1.3 | 1.02–2 | largest size change between neighbouring cells |
 | Smallest cell [m] | 0 ("auto") | 0–1 | `GridSpec.min_size`: floor on the realised size |
 | Largest cell [m] | 0 ("auto") | 0–5 | `GridSpec.max_size`: ceiling on the realised size |
 | Cell budget | 400 000 | 10 000–20 000 000 | every target is scaled by a common factor to fit it |
-| Physics plan / Grid / Memory | computed | – | read-only summary: the a priori plan, cells per axis, size range, worst ratio, field memory, and whether a rail or the budget is active |
+| Active regions / Grid / Memory | computed | – | read-only summary: the targets per **active region** (sand, insulation, shell, tube wall) as the a priori plan of `src/analysis/mesh_plan.py` gives them, cells per axis (or leaves and levels), size range, worst ratio, field memory, and whether a rail or the budget is active |
+
+The refinement covers the **active** model only: the sand, the insulation (radial ring
+and the two slabs), the shell, the casing the ambient film sits on and the bundle of the
+pipes - never the air around the vessel, which `apply_environment` excludes from the
+problem and holds at the ambient temperature.  On the tree road those regions are
+3-D boxes (`mesh_plan.active_regions` → `region_bands`); on the graded road they are the
+per-axis bands plus one **cap** band that carries the coarsest target the active regions
+ask for.  There is no "far field" control (2026-09-22): a cell out there carries no
+flux.
 
 The refined targets are *physical* (they do not depend on the domain size); the
 uniform mode uses one cell size everywhere and snaps Y/Z to whole cells.
@@ -121,35 +145,7 @@ uniform mode uses one cell size everywhere and snaps Y/Z to whole cells.
 When the cell budget or the minimum cell size stops the refinement the search says so
 instead of pretending; the adopted spec is stored in the panel and used by the build.
 
-## 6. Geometry — Pipes
-
-| control | default | range | feeds |
-|---|---|---|---|
-| Layout | Concentric rings (`rings`) | staggered / grid / rings / radial | `PipeNetworkConfig.layout` |
-| Collection | Reverse return (balanced) | distributor + collector / reverse return / central header / two-level rings | `PipeNetworkConfig.collection` |
-| Rings | 3 | 1–12 | `n_rings` (ring layouts) |
-| Radial files | 12 | 3–72 | `n_files` (radial layout) |
-| Pipe outer d [m] | 0.05 | 0.01–0.3 | `diameter` (the pitch follows it) |
-| Duct d [m] | 0.15 | 0.05–0.6 | `duct_diameter` |
-| Inlet azimuth [deg] | 180 | 0–360, step 15 | `azimuth_in` (stored in radians) |
-| Outlet azimuth [deg] | 0 | 0–360, step 15 | `azimuth_out` (stored in radians) |
-| Flow split | Equal per branch (`equal`) | equal / from path length | `split_mode` |
-| *Build network* | – | – | rasterises the network on the current mesh and reports `summary()` plus any validation problem |
-| Network | "build the mesh, then the network" | – | read-only: the report of the last build |
-
-The panel derives the band from the vessel: `band_bottom = base_z + max(offset
-bottom, 0.1)` and `band_top = base_z + height − 0.4`, so with the defaults the risers
-run from 0.4 m to 3.9 m.  Layouts, collection modes and the design rules are in
-[docs/15](15_PIPE_NETWORKS.md).
-
-**Caveat (2026-09-20)**: this table is the state of the panel when the defaults were
-dumped.  The Pipes tab is being extended - a spiral layout, wall thickness/material/
-roughness, insulated headers, junction refinement, a build-and-paint action and a
-circuit mass flow that feeds the transient's fluid loop - so re-read the widget dump
-(`GeometryPanel().tabs.widget(5)`) and [docs/15](15_PIPE_NETWORKS.md), which is the
-authority for the pipe controls, before trusting a row here.
-
-## 7. Materials
+## 6. Materials
 
 | control | default | options | feeds |
 |---|---|---|---|
@@ -168,7 +164,7 @@ that every analysis reads these values, so a run cannot use a different ambient 
 the one displayed.  The *Storage* and *Insulation* tabs also show the properties of
 the selected medium (k, ρ, cp, T_max).
 
-## 8. Analysis — Type
+## 7. Analysis — Type
 
 | control | default | range / options |
 |---|---|---|
@@ -185,7 +181,7 @@ the selected medium (k, ρ, cp, T_max).
 The losses and transient groups are hidden unless their radio is selected, and `Run`
 follows the type (`Run steady state`, `Run losses analysis`, `Run transient`).
 
-## 9. Analysis — Initial condition
+## 8. Analysis — Initial condition
 
 | control | default | notes |
 |---|---|---|
@@ -194,7 +190,7 @@ follows the type (`Run steady state`, `Run losses analysis`, `Run transient`).
 | Load a saved HDF5 state | – | read-only path + *Browse*; `StateManager.load_state` with the geometry-hash check |
 | Start from the steady solution | – | the controller solves the steady case first and keeps that field (`InitialCondition(mode="keep")`) |
 
-## 10. Analysis — Power profile
+## 9. Analysis — Power profile
 
 | control | default | notes |
 |---|---|---|
@@ -203,7 +199,7 @@ follows the type (`Run steady state`, `Run losses analysis`, `Run transient`).
 | Scheduled profile | – | table of (time [s], power [W]) with Add/Remove row; times must increase |
 | From CSV (t, P) | – | read-only path + *Browse*; a missing or malformed file raises |
 
-## 11. Analysis — Extraction
+## 10. Analysis — Extraction
 
 | control | default | range | notes |
 |---|---|---|---|
@@ -216,7 +212,7 @@ follows the type (`Run steady state`, `Run losses analysis`, `Run transient`).
 The power widget is enabled only in the target-power mode and the flow/h widgets only
 in the flow-rate mode; the inlet temperature stays enabled unless extraction is off.
 
-## 12. Analysis — Save / Load
+## 11. Analysis — Save / Load
 
 | control | default | notes |
 |---|---|---|
@@ -226,7 +222,7 @@ in the flow-rate mode; the inlet temperature stays enabled unless extraction is 
 | *Load state (HDF5)* | – | refused if the geometry hash or the grid does not match, or while a run is in flight |
 | State | "no state loaded" | read-only: result of the last save/load |
 
-## 13. Tools — Solver and Losses
+## 12. Tools — Solver and Losses
 
 | control | default | options |
 |---|---|---|
@@ -246,7 +242,7 @@ The default note in the panel: CG is refused on non-symmetric systems, so the so
 reports the switch instead of diverging silently.  The `Tools` tab also carries the
 **Help** page with the workflow summary.
 
-## 14. 3D view
+## 13. 3D view
 
 | control | default | options |
 |---|---|---|
@@ -261,7 +257,7 @@ If no OpenGL context is available the whole group degrades to a placeholder labe
 stays disabled (the controls exist but `controls.setEnabled(False)`), which is the mode
 the test suite forces with `THERMAL_DISABLE_3D=1`.
 
-## 15. Exports
+## 14. Exports
 
 | control | where | notes |
 |---|---|---|

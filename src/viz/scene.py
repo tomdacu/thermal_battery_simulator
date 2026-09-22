@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..core.geometry import HeaterPattern
 from ..core.mesh import MaterialID, Mesh3D
 
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
@@ -172,7 +171,7 @@ def _disk(plotter, cx, cy, z0, z1, radius, colour, opacity, clip=None, opacity_s
 
 
 def add_geometry_preview(plotter, battery, mesh: Mesh3D | AdaptiveMesh = None, clip=None,
-                         opacity_scale: float = 1.0):
+                         opacity_scale: float = 1.0, network=None):
     """Schematic view of the configured battery, zone by zone.
 
     Every part is drawn between the same elevations ``apply_to_mesh`` uses, so the
@@ -180,6 +179,11 @@ def add_geometry_preview(plotter, battery, mesh: Mesh3D | AdaptiveMesh = None, c
     steel plate used to leave a visible gap under the roof.  ``clip=(axis_name,
     position [m])`` and ``opacity_scale`` apply the same view controls as the field
     view.
+
+    ``network`` - the :class:`~src.core.pipe_network.PipeNetwork` the Pipes tab built -
+    draws the circuit itself: the risers that cross the sand and the headers that feed
+    and collect them.  Without it the picture shows the vessel alone, because the
+    network is built on a mesh and a preview may run before one exists.
     """
     import pyvista as pv
 
@@ -217,15 +221,8 @@ def add_geometry_preview(plotter, battery, mesh: Mesh3D | AdaptiveMesh = None, c
             plotter.add_mesh(cone, color=steel, opacity=min(0.35 * scale, 1.0),
                              label="roof")
 
-    if battery.tubes.active:
-        for element in battery.tubes.generate_positions(cx, cy, cyl.r_storage * 0.9,
-                                                        cyl.z_storage_start,
-                                                        cyl.z_storage_end):
-            _disk(plotter, element.x, element.y, element.z_bottom, element.z_top,
-                  max(element.radius, 0.01), MATERIAL_COLORS[int(MaterialID.TUBES)], 0.95,
-                  clip, scale)
-    if battery.heaters.pattern != HeaterPattern.UNIFORM_ZONE:
-        _add_heater_bank(plotter, battery, cyl, clip, scale)
+    if network is not None:
+        _add_pipe_network(plotter, network, clip, scale)
 
     lx, ly, lz = domain_extent(mesh) if mesh else (cyl.r_shell * 2 + 1,
                                                    cyl.r_shell * 2 + 1,
@@ -235,39 +232,34 @@ def add_geometry_preview(plotter, battery, mesh: Mesh3D | AdaptiveMesh = None, c
     return plotter
 
 
-def _add_heater_bank(plotter, battery, cyl, clip, scale) -> None:
-    """Hairpin elements: flange, support plate, two legs and the bottom bend."""
+def _add_pipe_network(plotter, network, clip, scale) -> None:
+    """The buried circuit in one actor: every run of the network as a tube.
+
+    The centrelines and their diameters are the network's own - the same runs the
+    voxeliser paints and the gas marches - so the preview and the model agree on where
+    the heat crosses.  All the runs go into one polyline dataset and one tube filter,
+    which is what keeps a hundred risers cheap to draw.
+    """
     import pyvista as pv
 
-    bank = battery.heaters.bank(cyl.z_storage_start, cyl.z_storage_end)
-    colour = MATERIAL_COLORS[int(MaterialID.HEATERS)]
-    steel = MATERIAL_COLORS[int(MaterialID.STEEL)]
-    elements = bank.generate_elements(cyl.center_x, cyl.center_y, cyl.r_storage * 0.9)
-    z_bottom = cyl.z_storage_start + bank.offset_bottom
-    z_top = cyl.z_storage_end + bank.flange_offset
-    radius = max(bank.sheath_diameter * 0.5, 0.006)
-
-    for element in elements:
-        for a, b in element.segments(z_bottom, z_top, z_bottom + bank.active_length):
-            if a[2] == b[2]:                        # a bend chord
-                points = np.array([a, b], dtype=float)
-                tube = pv.Tube(points=points, radius=radius, n_sides=8)
-            else:
-                tube = pv.Cylinder(center=((a[0] + b[0]) / 2, (a[1] + b[1]) / 2,
-                                           (a[2] + b[2]) / 2),
-                                   direction=(0, 0, 1), radius=radius,
-                                   height=abs(b[2] - a[2]), resolution=10)
-            tube = _clip_dataset(tube, clip)
-            if tube.n_points:
-                plotter.add_mesh(tube, color=colour, opacity=min(0.95 * scale, 1.0))
-
-    # flange on the roof and support plate at the bottom of the sand
-    reach = cyl.r_storage * 0.45
-    _disk(plotter, cyl.center_x, cyl.center_y, cyl.z_cone_base - 0.02,
-          cyl.z_cone_base + 0.02, min(reach * 1.2, cyl.r_storage * 0.9), steel, 0.8,
-          clip, scale)
-    _disk(plotter, cyl.center_x, cyl.center_y, z_bottom - 0.01, z_bottom + 0.01,
-          min(reach * 1.2, cyl.r_storage * 0.9), steel, 0.6, clip, scale)
+    points: list[list[float]] = []
+    lines: list[int] = []
+    for run in network.runs:
+        vertices = np.asarray(run.points, dtype=float)
+        if vertices.shape[0] < 2:
+            continue
+        first = len(points)
+        points.extend(vertices.tolist())
+        lines.extend([vertices.shape[0], *range(first, first + vertices.shape[0])])
+    if not lines:
+        return
+    polydata = pv.PolyData(np.asarray(points, dtype=float),
+                           lines=np.asarray(lines, dtype=np.int64))
+    radius = max(0.5 * float(network.config.diameter), 0.005)
+    tubes = _clip_dataset(polydata.tube(radius=radius, n_sides=6), clip)
+    if tubes.n_points:
+        plotter.add_mesh(tubes, color=MATERIAL_COLORS[int(MaterialID.TUBES)],
+                         opacity=min(0.95 * scale, 1.0), label="pipe network")
 
 
 def field_values(mesh: Mesh3D | AdaptiveMesh, field: str) -> np.ndarray:
