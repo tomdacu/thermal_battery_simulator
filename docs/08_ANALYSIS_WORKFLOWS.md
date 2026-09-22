@@ -7,21 +7,24 @@ reported numbers are defined.  Entry points: `src/solver/steady.py`,
 
 ## 1. Steady state
 
-**Question**: with the heaters running at the rated power, where does the heat
+**Question**: with the resistors running at the rated power, where does the heat
 go and what temperature field settles?
 
-1. `BatteryGeometry.apply_to_mesh` paints the mesh and writes the heater power
-   into `mesh.Q_source` over `mesh.source_mask`.
-2. `SteadyStateSolver.solve()` assembles `A T = b` and solves it
-   (`src/solver/matrix.py`, [02](02_FDM_DISCRETIZATION.md)).  With radiation
-   enabled the linearised coefficient is refreshed in a Picard sweep until the
-   field moves less than `picard_tolerance` (1e-3 K) or `max_picard` sweeps run out.
+1. `BatteryGeometry.apply_to_mesh` paints the mesh, and `PipeNetwork.paint` marks the
+   pipe cells (the window does both on *Build mesh*).
+2. `SteadyStateSolver(mesh, config, fluid_loop=loop).solve()` marches the gas at the
+   resistors' power, writes the exchange on the pipe cells as an implicit film
+   ([12](12_METHODS.md) §11), assembles `A T = b` and solves it, and repeats until the
+   field moves less than `picard_tolerance` (1e-3 K); radiation, when enabled, is
+   refreshed in the same sweeps.  Without a network the power is the lumped source of
+   the geometry over the sand (`BatteryGeometry.apply_source`).
 3. The solver reports `converged`, the relative residual, the sweep count, the
    wall time, the solver notes (method substitutions) and min/max/mean/median
    temperatures.
 
-**Reported**: temperature statistics (whole domain and storage), the envelope
-loss breakdown, stored energy and exergy, thermal autonomy
+**Reported**: temperature statistics (the battery and the storage), the envelope
+loss breakdown, stored energy and exergy, thermal autonomy, and the gas loop - inlet
+and outlet temperature, bed power, NTU, pressure drop, fan power
 (`ResultsPanel.update_energy`).
 
 ## 2. Losses analysis
@@ -33,11 +36,11 @@ how much of it leaks away?
 
 1. the storage cell mask is taken from `MaterialID.SAND`; the total volume is the
    number of cells times the cell volume;
-2. the ground coupling is applied explicitly: `h_ground > 0` installs a
-   convective bottom face, `0` keeps the fixed-temperature ground of the
-   geometry (writing `mesh.bc_h` without changing the boundary type - the old
-   behaviour - was silently ignored by the assembly);
-3. the power is iterated: solve, compare the mean storage temperature with the
+2. the ground is the mesh's own (`h_ground = 0`, the default); `h_ground > 0`
+   installs a convective bottom face, which then stays on the mesh;
+3. the power is iterated - with a network it is the external power of the gas loop and
+   each solve is the coupled steady state of §1: solve, compare the mean storage
+   temperature with the
    target, update with a secant/Newton step using the measured slope
    $dT/dP$, damped by `relaxation`, with the power floored at 0;
 4. the loop stops when $|T_{mean} - T_{target}| \le$ `tolerance` [K], when
@@ -58,20 +61,26 @@ power schedule and extraction?
 
 1. `TransientConfig.validate(mesh)` checks the time stepping, the profiles and
    the initial condition; the mesh is validated too;
-2. the initial field is applied (`InitialCondition`: uniform, per material, from
-   an HDF5 state, or from a steady pre-run driven by the controller);
-3. the operators `(M/dt + L)` are built once (rebuilt every step when radiation
-   is on), together with the preconditioner and its cache;
+2. the initial field is applied (`InitialCondition`: uniform, per material, the
+   field the mesh already holds - `keep`, the last run or a loaded state - or a
+   steady pre-run driven by the controller);
+3. with a gas loop, the loop is marched on that field and its film written on the
+   pipe cells; the operators `(M/dt + L)` are then built once (rebuilt when radiation
+   is on, when the step is shortened, or when the film coefficients change), together
+   with the preconditioner and its cache;
 4. for every step `t -> t + dt` (the last step is shortened so the loop never
-   overshoots `t_final`; the operators are rebuilt for that shortened step,
-   otherwise the matrix and the right-hand side would disagree):
-   * **power**: `power_at(t)` is spread over `source_mask` as
-     $Q = P/(n_{cells}V_{cell})$; a profile that asks for power with no source
-     cell raises `ValueError` instead of heating nothing;
-   * **extraction**: `off` clears the tube coupling; `flow_rate` installs the
-     tube convection with `t_inlet`; `power` imposes a volumetric sink on the tube
-     cells **capped** at the available $h A (T_{tube} - T_{inlet})$, so no heat is
-     extracted from a body colder than the inlet;
+   overshoots `t_final`):
+   * **with the gas loop** (the plant): the loop's external power is
+     `power_at(t) - extraction` (the resistors minus the exchanger), or - in the
+     `return_temperature` extraction - the gas re-enters at a set temperature and the
+     power follows; the step is solved with the implicit film and the loop inlet is
+     solved with it, so the step deposits exactly the external power
+     ([12](12_METHODS.md) §11); the gas is re-marched on the new field for the next
+     step, and an operating point the loop cannot carry stops the run on the last good
+     state with a note;
+   * **without a loop** (a mesh with no network): `power_at(t)` is spread over
+     `source_mask`; `flow_rate` installs the legacy tube film with `t_inlet`, `power`
+     a sink on the tube cells capped at $h A (T_{tube} - T_{inlet})$;
    * the right-hand side is refreshed, the step is solved with a warm start, and
      the field is written back to the mesh;
    * the balance is evaluated and the cumulative energies accumulate
@@ -155,10 +164,11 @@ pipes** ([13](13_REDESIGN.md), [15](15_PIPE_NETWORKS.md)).  The pieces a run use
 1. `src/core/pipes.py` / `src/core/pipe_network.py` give the geometry: runs (polylines),
    the wetted area per cell, the branches and their flow shares;
 2. `src/solver/fluid.py::FluidLoop` marches each run with the exact relation
-   $T_{out} = T_w + (T_{in}-T_w)e^{-NTU}$, $NTU = hA/(\dot m c_p)$, deposits
-   $\dot m c_p (T_{in}-T_{out})$ in the bed as a volumetric source `q_fluid` [W/m³] - the
-   same term charges and discharges, its sign follows the loop - and computes the film
-   coefficient from the flow (`pipe_h`) unless the caller fixes it;
+   $T_{out} = T_w + (T_{in}-T_w)e^{-NTU}$, $NTU = hA/(\dot m c_p)$, and hands the bed the
+   exchange $\dot m c_p (T_{in}-T_{out}) = G (T_{gas} - T_w)$ as an implicit film per pipe
+   cell (`FluidResult.apply`, [12](12_METHODS.md) §11) - the same term charges and
+   discharges, its sign follows the loop - with the film coefficient computed from the
+   flow (`pipe_h`) unless the caller fixes it;
 3. the loop is closed, so every temperature is affine in the loop inlet temperature and
    the balance $\sum_i \dot m_i c_p (T_{out,i} - T_{in}) = -Q_{ext}$ is solved for
    $T_{in}$ in one step; `Q_ext > 0` are the resistors, `Q_ext < 0` the exchanger;

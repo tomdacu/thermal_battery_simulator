@@ -22,12 +22,12 @@ from PyQt6.QtWidgets import (
 )
 
 from src.analysis.mesh_plan import plan_regions
+from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import BatteryGeometry
 from src.core.materials import MaterialManager
-from src.core.mesh import Mesh3D
 from src.core.pipe_network import build_pipe_network
 from src.io.state import StateError, StateManager
-from src.viz.scene import export_csv, export_vtk, grid_lines
+from src.viz.scene import export_vtk, grid_lines
 
 from .assets import window_icon_path
 from .controller import RunConfig, SimulationController
@@ -39,23 +39,27 @@ from .views.results_panel import ResultsPanel
 from .views.solver_panel import SolverPanel
 from .views.viz_view import VizView
 
-if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
+if TYPE_CHECKING:
     from src.analysis.convergence import AdaptivePlan
-    from src.core.adaptive_mesh import AdaptiveMesh
-    from src.core.refinement import GridSpec
 
 HELP_TEXT = """
+<b>The plant</b>: electric resistors heat a gas in a closed circuit; the gas runs
+through pipes buried in the sand and hands the heat to the bed across the pipe
+walls.  On discharge an exchanger on the same circuit takes the heat back out.
 <b>Workflow</b>
 <ol>
-<li><b>Geometry</b>: domain, cylinder, insulation, heaters, tubes, cell size.</li>
-<li><b>Materials</b>: storage medium, insulation, ambient and ground conditions.</li>
-<li><b>Analysis</b>: steady state, losses analysis or transient profiles.</li>
-<li><b>Tools &gt; Solver</b>: linear method, preconditioner, threading, radiation.</li>
-<li><b>Build mesh</b>, then <b>Run</b>.</li>
+<li><b>Geometry</b>: the vessel (Cylinder, Insulation), the circuit (Gas circuit:
+power, gas, flow, pressure, blower), the buried network (Pipes) and the mesh
+(an octree refined on the sand, the insulation, the shell and the pipes).</li>
+<li><b>Materials</b>: storage medium, insulation, shell; ambient, ground, wind.</li>
+<li><b>Analysis</b>: steady state (the circuit at its power), losses (the power
+that holds a temperature) or transient (power and extraction profiles).</li>
+<li><b>Build mesh</b> - it paints the pipe network too - then <b>Run</b>.</li>
 </ol>
 <b>Units</b>: the interface is in degC, the model works in Kelvin; conversion
 happens only at this boundary. Powers are W, lengths m, time s.
-<b>Results</b>: statistics, energy balance (envelope losses), materials, time series.
+<b>Results</b>: statistics, energy balance (envelope losses, the gas loop),
+materials, time series; the field exports to VTK for ParaView.
 """
 
 
@@ -69,9 +73,7 @@ class ThermalBatteryGUI(QMainWindow):
         icon = window_icon_path()
         if icon is not None:
             self.setWindowIcon(QIcon(str(icon)))
-        self.mesh: Mesh3D | AdaptiveMesh = None
-        self._auto_tried = False          # the search runs once per configuration
-        self._build_after_search = False
+        self.mesh: AdaptiveMesh | None = None
         self.battery = BatteryGeometry()
         self.state_manager = StateManager()
         self.controller = SimulationController(self)
@@ -147,6 +149,7 @@ class ThermalBatteryGUI(QMainWindow):
         self.analysis_panel.save_requested.connect(self.save_state)
         self.analysis_panel.load_requested.connect(self.load_state)
         self.analysis_panel.analysis_changed.connect(self._on_analysis_changed)
+        self.results.export_requested.connect(self.export_vtk)
         self.controller.progressed.connect(self._on_progress)
         self.controller.log.connect(self.log)
         self.controller.finished.connect(self._on_finished)
@@ -154,7 +157,6 @@ class ThermalBatteryGUI(QMainWindow):
         self.controller.running_changed.connect(self._on_running)
 
     # -------------------------------------------------------------- actions
-    @safe_slot
     def _battery_from_panels(self) -> BatteryGeometry:
         battery = BatteryGeometry()
         self.geometry_panel.apply_geometry(battery)
@@ -193,12 +195,10 @@ class ThermalBatteryGUI(QMainWindow):
 
     @safe_slot
     def build_mesh(self) -> None:
-        self._refresh_plan()
-        if (self.geometry_panel.wants_auto_search()
-                and self.geometry_panel.auto_spec() is None and not self._auto_tried):
-            self.log("[mesh] automatic mesh: searching before the build")
-            self.find_auto_mesh(build_after=True)
+        if self.controller.running:
+            self.log("[mesh] a simulation is running: the mesh is being read")
             return
+        self._refresh_plan()
         try:
             battery = self._battery_from_panels()
             mesh = self.geometry_panel.build_mesh()
@@ -210,14 +210,14 @@ class ThermalBatteryGUI(QMainWindow):
         self.log("[mesh] " + "; ".join(line.strip() for line in grid_lines(mesh)))
         for note in report.notes:
             self.log(f"[mesh] {note}")
-        self.log(f"[mesh] {report.n_source_cells} source cells")
-        if self.geometry_panel.pipe_network() is not None:
-            # the pipes were painted on the old mesh: nothing of them survives a rebuild
-            self.geometry_panel.set_pipe_network(
-                None, "the mesh was rebuilt: build and paint the network again")
+        film = getattr(battery, "film", None)
+        if film:
+            self.log(f"[mesh] outer film {film['total']:.2f} W/(m2 K) "
+                     f"(natural {film['natural']:.2f} + wind {film['wind']:.2f}) "
+                     f"at {battery.t_ambient - 273.15:.1f} degC ambient")
         # the network is the heat-transfer surface of the plant, so a fresh mesh gets
-        # one: the pipes are painted on the very cells this run will solve
-        self.paint_pipe_network("the mesh was rebuilt")
+        # one: the pipes are painted on the very cells the run will solve
+        self.paint_pipe_network("painted with the mesh")
         self._update_mesh_info()
         self.viz.show_mesh(mesh)
         self.statusBar().showMessage("Mesh ready")
@@ -241,7 +241,7 @@ class ThermalBatteryGUI(QMainWindow):
             return None
         try:
             network = build_pipe_network(self.mesh, panel.pipe_network_config())
-            report = network.paint(self.mesh, **panel.pipe_paint_settings())
+            report = network.paint(self.mesh)
         except ValueError as exc:
             panel.set_pipe_network(None, f"invalid: {exc}")
             self.log(f"[pipes] refused: {exc}")
@@ -251,7 +251,7 @@ class ThermalBatteryGUI(QMainWindow):
             self.log(f"[pipes] {note}")
         self.log(f"[pipes] {network.n_risers} risers, {network.specific_area:.2f} m2/m3, "
                  f"painted {report.cells:,} cells ({report.area:.1f} m2)")
-        self.log(f"[pipes] {panel._circuit_line()}")
+        self.log(f"[pipes] {panel.circuit_line()}")
         return network
 
     @safe_slot
@@ -273,47 +273,30 @@ class ThermalBatteryGUI(QMainWindow):
                                network=self.geometry_panel.pipe_network())
 
     @safe_slot
-    def find_auto_mesh(self, build_after: bool = False) -> None:
+    def find_auto_mesh(self) -> None:
         """Search the mesh that makes the steady answer converge (background thread)."""
-        self._refresh_plan()
         if self.controller.running:
             self.log("[automesh] a simulation is already running")
             return
+        self._refresh_plan()
         try:
             self.battery = self._battery_from_panels()
         except ValueError as exc:
             QMessageBox.critical(self, "Geometry error", str(exc))
             return
-        if not self.geometry_panel.refined.isChecked():
-            self.log("[automesh] the search needs the refined mesh mode")
-            return
-        self.mesh = None
-        self._auto_tried = True
-        self._build_after_search = bool(build_after)
         self.geometry_panel.set_auto_spec(None, "searching...")
         config = self._run_config()
         config.analysis = "automesh"
         self.controller.start(config, None)
 
-    def _mesh_request(self) -> GridSpec | AdaptivePlan | None:
-        """The refinement request the automatic search refines, or ``None``.
-
-        The two roads start from the same physical targets in the vocabulary of their own
-        mesh (``docs/16`` step 4): a :class:`~src.analysis.convergence.AdaptivePlan` builds
-        a tree, a ``GridSpec`` a graded grid.  The window hands the search the one the
-        Mesh tab selected, so the controller never has to guess the mesh mode.
-        """
-        panel = self.geometry_panel
-        if not panel.refined.isChecked():
-            return None
-        return (panel.adaptive_plan() if panel.mesh_kind() == "adaptive"
-                else panel.grid_spec())
+    def _mesh_request(self) -> AdaptivePlan:
+        """The tree the automatic search starts from: the Mesh tab's a priori plan."""
+        return self.geometry_panel.adaptive_plan()
 
     def _run_config(self) -> RunConfig:
         return RunConfig(
             analysis=self.analysis_panel.analysis_type(),
             battery=self.battery,
-            domain=self.geometry_panel.domain(),
             mesh_spec=self._mesh_request(),
             convergence=self.geometry_panel.auto_mesh_settings(),
             n_threads=self.solver_panel.threads(),
@@ -327,10 +310,10 @@ class ThermalBatteryGUI(QMainWindow):
             extraction_profile=self.analysis_panel.extraction_profile(),
             start_from_steady=self.analysis_panel.wants_steady_initial_condition(),
             pipe_network=self.geometry_panel.pipe_network(),
+            pipe_config=self.geometry_panel.pipe_network_config(),
             pipe_flow=self.geometry_panel.pipe_mass_flow(),
             pipe_fluid=self.geometry_panel.circuit_fluid(),
             pipe_pressure=self.geometry_panel.circuit_pressure_pa(),
-            pipe_inlet=self.geometry_panel.inlet_temperature(),
             pipe_fan_efficiency=self.geometry_panel.fan_efficiency_fraction(),
             **self.solver_panel.settings(),
         )
@@ -352,7 +335,6 @@ class ThermalBatteryGUI(QMainWindow):
         self.controller.start(config, self.mesh)
 
     # ---------------------------------------------------------------- state
-    @safe_slot
     def _geometry_params(self) -> dict:
         """Parameters that must match between a saved state and the current model."""
         cyl = self.battery.cylinder
@@ -425,20 +407,18 @@ class ThermalBatteryGUI(QMainWindow):
                 f"dT {result.chosen.d_temperature:.2f} K, "
                 f"dP {100 * result.chosen.d_power:.2f}%")
             if result.converged:
-                self.log("[automesh] mesh adopted")
+                self.log("[automesh] mesh adopted: press Build mesh to use it")
             else:
                 QMessageBox.warning(self, "Automatic mesh", result.message)
             self.statusBar().showMessage(f"automesh {state}")
-            if self._build_after_search:
-                self._build_after_search = False
-                self.build_mesh()
             return
+        loop = self.controller.last_loop
         if analysis == "losses":
             self.log(f"[losses] converged={result.converged} iterations={result.iterations} "
                      f"power={result.power / 1000:.2f} kW")
             self.results.update_energy(self.mesh, losses=result,
                                        ambient=self.battery.t_ambient,
-                                       radiation=self._radiation())
+                                       radiation=self._radiation(), loop=loop)
         elif analysis == "transient":
             self._last_transient = result
             summary = result.summary()
@@ -447,11 +427,10 @@ class ThermalBatteryGUI(QMainWindow):
             self.results.update_transient(result)
             self.results.update_energy(self.mesh, transient=result,
                                        ambient=self.battery.t_ambient,
-                                       radiation=self._radiation())
+                                       radiation=self._radiation(), loop=loop)
         else:
-            self.log(f"[steady] converged={result.converged} residual={result.residual:.2e}")
             self.results.update_energy(self.mesh, ambient=self.battery.t_ambient,
-                                       radiation=self._radiation())
+                                       radiation=self._radiation(), loop=loop)
         self._refresh_results()
         self.statusBar().showMessage(f"{analysis} finished")
 
@@ -467,7 +446,6 @@ class ThermalBatteryGUI(QMainWindow):
             self.results.update_energy(self.mesh, ambient=self.battery.t_ambient,
                                        radiation=self._radiation())
         self.viz.show_mesh(self.mesh)
-        _ = recompute_balance
 
     @safe_slot
     def _on_analysis_changed(self, analysis: str) -> None:
@@ -497,23 +475,15 @@ class ThermalBatteryGUI(QMainWindow):
 
     @safe_slot
     def export_vtk(self) -> None:
+        """Write the current field (every leaf, every field) for ParaView."""
         if self.mesh is None:
+            QMessageBox.warning(self, "No mesh", "Build the mesh first.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export VTK", "results/field.vti",
-                                              "VTK (*.vti *.vtu *.vtr)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export the field (VTK)",
+                                              "results/field.vtu", "VTK (*.vtu)")
         if path:
             written = export_vtk(self.mesh, path)
             self.log(f"[export] {written}")
-
-    @safe_slot
-    def export_csv_field(self) -> None:
-        if self.mesh is None:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "results/field.csv",
-                                              "CSV (*.csv)")
-        if path:
-            export_csv(path, None, mesh=self.mesh)
-            self.log(f"[export] {path}")
 
 
 def main() -> int:

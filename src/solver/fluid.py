@@ -40,7 +40,7 @@ is solved exactly for ``T_in`` in one step.  ``Q_ext > 0`` are the resistors
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -263,6 +263,48 @@ class FluidResult:
                 f"external {self.external_power / 1000:+.2f} kW, "
                 f"dp {self.delta_p / 1000:.2f} kPa, fan {self.fan_power / 1000:.2f} kW "
                 f"({100 * self.circulation_loss:.1f}% of the bed power)")
+
+
+def hold_loop_balance(result: FluidResult, mesh, x: np.ndarray,
+                      solve: Callable[[np.ndarray], np.ndarray],
+                      pinned: np.ndarray) -> np.ndarray:
+    """The field that makes the implicit film deposit exactly the loop's external power.
+
+    The march fixes the gas entering every cell from the walls it was marched on, so the
+    implicit film alone deposits ``sum G (T_gas - T_new)``, which drifts from the power
+    the resistors put in as the walls move.  The loop inlet is therefore solved *with*
+    the field: every ``T_gas`` moves with ``T_in`` by its slope ``alpha``, the field by
+    ``delta * y`` with ``A y = G alpha / V``, and the one scalar ``delta`` that makes the
+    deposit equal the external power closes the loop's enthalpy balance on the new field
+    - a Schur complement of one row, at the cost of one more solve with the same
+    operator (``solve``).  ``x`` is the field the film alone gave, flat; ``pinned`` the
+    cells whose rows the elimination fixed.  ``result`` and the mesh's film temperatures
+    are updated to the new inlet; the new field is returned.  A prescribed inlet
+    (``result.balanced`` False) leaves everything as it is.
+    """
+    if not result.balanced or result.conductance is None:
+        return x
+    g = result.conductance
+    cells = (g > 0.0) & ~np.asarray(pinned, dtype=bool)
+    if not cells.any():
+        return x
+    volume = np.asarray(mesh.V, dtype=float).ravel(order="F")
+    alpha = result.gas_slope
+    e = np.zeros(g.size)
+    e[cells] = g[cells] * alpha[cells] / volume[cells]
+    y = np.asarray(solve(e), dtype=float)
+    x = np.asarray(x, dtype=float)
+    deposit = float(np.sum(g[cells] * (result.t_gas[cells] - x[cells])))
+    slope = float(np.sum(g[cells] * (alpha[cells] - y[cells])))
+    if slope <= 0.0:
+        return x
+    delta = (float(result.external_power) - deposit) / slope
+    result.t_in += delta
+    result.t_gas = result.t_gas + np.where(cells, alpha * delta, 0.0)
+    t_inf = np.asarray(mesh.bc_T_inf, dtype=float).ravel(order="F").copy()
+    t_inf[cells] = result.t_gas[cells]
+    mesh.bc_T_inf = t_inf.reshape(np.shape(mesh.T), order="F")
+    return x + delta * y
 
 
 @dataclass

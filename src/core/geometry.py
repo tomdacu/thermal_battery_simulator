@@ -120,7 +120,6 @@ class CylinderGeometry:
     steel_slab_top: float = 0.0
     fill_cone_with_sand: bool = False
     enable_cone_roof: bool = True
-    phase_offset_deg: float = 15.0
     foundation_margin: float = 0.5
 
     @property
@@ -140,10 +139,6 @@ class CylinderGeometry:
         if not self.enable_cone_roof or self.roof_angle_deg <= 0:
             return 0.0
         return self.r_shell * float(np.tan(self.roof_angle_rad))
-
-    @property
-    def phase_offset_rad(self) -> float:
-        return float(np.radians(self.phase_offset_deg))
 
     @property
     def z_slab_bottom_start(self) -> float:
@@ -419,6 +414,18 @@ class BatteryGeometry:
         report.zone_masses = self.zone_masses(mesh, materials)
         mesh.validate()
         return report
+
+    def apply_source(self, mesh: Mesh3D | AdaptiveMesh) -> int:
+        """Re-paint the lumped bed source (the plant power over the storage band).
+
+        The analyses that run without a gas loop read it; a transient overwrites
+        ``Q_source`` step by step, so a run that follows one calls this to start from the
+        power of the geometry again.  Returns the number of source cells.
+        """
+        cyl = self.cylinder
+        X, Y, Z = _centres(mesh)
+        R = np.sqrt((X - cyl.center_x) ** 2 + (Y - cyl.center_y) ** 2)
+        return self._paint_source(mesh, Z, R)
 
     def apply_boundary_conditions(self, mesh: Mesh3D | AdaptiveMesh,
                                   steel_props: ThermalProperties = None) -> None:

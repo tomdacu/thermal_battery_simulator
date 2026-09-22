@@ -193,8 +193,9 @@ def test_the_network_paints_the_same_leaves_on_a_tree(box_pair):
     tubes = tree.material_id == int(MaterialID.TUBES)
     assert tubes.sum() > 0 and int(tubes.sum()) == int(
         np.count_nonzero(structured.material_id == int(MaterialID.TUBES)))
-    # the paint wrote the tube material and the gas film, and no source
-    props = MaterialManager().get(config.material)
+    # the paint marked the pipes and wrote the gas film, and no source; the cells keep
+    # the properties they had (a thin pipe inside a cell of the bed - air in this box)
+    props = MaterialManager().get("air")
     assert tree.rho[tubes].min() == pytest.approx(props.rho, rel=1e-12)
     assert tree.k[tubes].min() == pytest.approx(props.k, rel=1e-12)
     assert tree.bc_h[tubes].min() == pytest.approx(350.0, rel=1e-12)

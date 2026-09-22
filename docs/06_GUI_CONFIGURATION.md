@@ -2,175 +2,164 @@
 
 Every control, its default, its range and what it configures.  **Defaults are the
 live widget values**, not a copy that can drift: they were read by instantiating the
-panels off-screen and asking each widget (2026-09-20, PyQt6 + `QT_QPA_PLATFORM=offscreen`):
+panels off-screen and walking the form rows of every tab (2026-09-23, PyQt6 +
+`QT_QPA_PLATFORM=offscreen`):
 
 ```python
 from gui.views.geometry_panel import GeometryPanel
-from gui.views.materials_panel import MaterialsPanel
-from gui.views.analysis_panel import AnalysisPanel
-from gui.views.solver_panel import SolverPanel
-for label, widget in GeometryPanel().tabs.widget(0).fields.items():
-    print(label, widget.value())          # .value() / .currentData() / .isChecked()
+panel = GeometryPanel()
+for i in range(panel.tabs.count()):
+    layout = panel.tabs.widget(i).layout()        # a QFormLayout: label + field per row
+    ...                                           # .value() / .currentText() / .isChecked()
 ```
 
 Ranges are the widget limits; "feeds" is the `src` field the getter writes.
-`GeometryPanel` has five sub-tabs: **Cylinder, Insulation, Heaters, Pipes, Mesh**.  The
-Heaters tab is the *plant's heat source* (the gas circuit the electric resistors heat)
-and the Pipes tab is the buried network that carries that heat into the sand; there is
-one heat exchanger and it is on the circuit, so the old lumped-tube tab is gone
-(2026-09-22).
+
+**The plant, as the GUI shows it** (2026-09-23): electric resistors heat a gas in a closed
+circuit; the gas runs through pipes buried in the sand and hands the heat to the bed
+across the pipe walls; on discharge an exchanger on the same circuit takes it back out.
+`GeometryPanel` has five sub-tabs: **Cylinder, Insulation, Gas circuit, Pipes, Mesh**.
+Every analysis - steady, losses, transient, and the automatic mesh search - runs the gas
+loop through the painted pipes; there is no heater element in the bed, no fixed film on
+the pipes and no second exchanger inside the vessel.
 
 ## 1. Geometry — Cylinder
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Lx / Ly / Lz [m] | 6.0 / 6.0 / 5.6 | 1–50, step 0.5 | `Mesh3D(Lx, Ly, Lz, ...)` |
-| Centre X / Y [m] | 3.0 / 3.0 | 0.1–49, step 0.1 | `CylinderGeometry.center_x/center_y` |
+| Lx / Ly / Lz [m] | 6.0 / 6.0 / 5.6 | 1–50 | the box the vessel sits in (`tree_resolution` makes the octree's cube from it) |
+| Centre X / Y [m] | 3.0 / 3.0 | 0.1–49 | `CylinderGeometry.center_x/center_y` |
 | Base elevation [m] | 0.3 | 0–5 | `base_z` |
 | Storage radius [m] | 2.0 | 0.2–20 | `r_storage` |
 | Storage height [m] | 4.0 | 0.5–30 | `height` |
-| Tubes/heaters phase [deg] | 15 | 0–180 | `phase_offset_deg` |
 | Conical roof | on ("enable") | – | `enable_cone_roof` |
 | Roof angle [deg] | 15 | 0–45 | `roof_angle_deg` |
-| Steel slab [m] | 0.005 | 0–0.2, step 0.005 | `steel_slab_top` |
+| Steel slab [m] | 0.005 | 0–0.2 | `steel_slab_top` |
 | Cone fill ("fill with sand") | off | – | `fill_cone_with_sand` |
 
-The roof apex (`base_z + slabs + height + steel slab + r_shell·tan(angle)`) must
-stay below `Lz`: the build refuses rather than clipping the roof.
+The box only has to contain the vessel: the air around it is excluded from the problem
+(`BatteryGeometry.apply_environment`), and the roof apex must stay below `Lz` - the build
+refuses rather than clipping the roof.
 
 ## 2. Geometry — Insulation
 
 | control | default | range | feeds |
 |---|---|---|---|
 | Radial insulation [m] | 0.3 | 0.02–1 | `insulation_thickness` |
-| Steel shell [m] | 0.02 | 0–0.2, step 0.005 | `shell_thickness` |
+| Steel shell [m] | 0.02 | 0–0.2 | `shell_thickness` |
 | Bottom slab [m] | 0.2 | 0–1 | `insulation_slab_bottom` |
 | Top slab [m] | 0.2 | 0–1 | `insulation_slab_top` |
 | Foundation margin [m] | 0.5 | 0–3 | `foundation_margin` (concrete beyond the shell) |
 
-## 3. Geometry — Heaters (the gas circuit)
-
-The resistors do not sit in the bed: they heat the gas of a closed loop that runs
-through the buried pipes, and the gas hands the power to the sand across the tube walls.
-Everything on this tab is a property of that circuit; the network itself is the Pipes
-tab, and the two summaries below are computed on it (`PipeNetwork.hydraulics`,
-`PipeNetwork.summary` and the geometric wetted area `pi d L`).
+## 3. Geometry — Gas circuit
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Total power [kW] | **5.0** | 0–100 000 | `HeaterConfig.power_total`; the resistors' electric power, and the bed source of an analysis that does not march the loop |
+| Total power [kW] | **5.0** | 0–100 000 | `HeaterConfig.power_total`: the resistors' power of the steady run and the start of the losses iteration (the transient takes Analysis > Power) |
 | Gas | Air | air / nitrogen / steam | `RunConfig.pipe_fluid` (`Fluid` of `src/solver/fluid.py`) |
-| Source from bottom / top [m] | 0.0 / 0.0 | 0–2 | `HeaterConfig.offset_bottom` / `offset_top`: the band of the storage the lumped bed source covers |
-| Mass flow [kg/s] | 0.5 | 0–200 | `RunConfig.pipe_flow`, i.e. the `FluidLoop`'s total mass flow (the branches split it) |
-| Circuit pressure [bar] | 1.01325 | 0.1–100 | `RunConfig.pipe_pressure`: the density of the gas follows the pressure (`Fluid.at_pressure`) |
-| Return to the resistors [°C] | "auto" | 0 (auto) – 700 | `RunConfig.pipe_inlet`; at "auto" the loop solves its own inlet temperature from the power balance (closed circuit) |
+| Mass flow [kg/s] | 0.5 | 0–200 | `RunConfig.pipe_flow`: the loop's total mass flow (the branches split it) |
+| Circuit pressure [bar] | 1.01325 ("1 bar") | 0.1–100 | `RunConfig.pipe_pressure`: the density follows it (`Fluid.at_pressure`) |
 | Fan efficiency [%] | 70 | 10–100 | `RunConfig.pipe_fan_efficiency`: the blower's electric power |
-| Wall roughness [um] | 0 ("from the tube material") | 0–2000 | `PipeNetworkConfig.roughness` (the tubes', headers' and ducts' walls) |
-| Circuit | "build the network to size it" | – | read-only: the total power over the network's wetted surface (W/cm²), the power per riser, the flow and the pressure |
+| Wall roughness [um] | "from the tube material" | 0–2000 | `PipeNetworkConfig.roughness` (tubes, headers, ducts) |
+| Circuit | "build the network to size it" | – | read-only: the power over the wetted surface (W/cm²), the power per riser, the flow and the pressure |
 
-The **surface power** is the rating that matters and it is the pipe wall's:
-`pipe_surface_power_w_cm2` puts the designed power over the wetted area of the network
-and the report quotes the 3–8 W/cm² window the immersion-element practice uses.  It is
-computed on the built network, so it appears when the network exists.
+The **surface power** is the pipe wall's rating: `pipe_surface_power_w_cm2` puts the
+design power over the geometric wetted area of the network and quotes it against the
+3–8 W/cm² window.  The film coefficient of every pipe cell is not a setting: the loop
+computes it from the flow, the gas and the bore (`pipe_h`).
 
-## 4. Geometry — Pipes (the buried network)
+Removed 2026-09-23, because nothing in the plant corresponds to them any more: the
+*Source from bottom/top* offsets (the band of a lumped bed source no analysis uses once
+the network is painted) and *Return to the resistors* (a prescribed loop inlet, which
+silently ignored the power; the discharge that returns the gas at a set temperature is
+now an extraction mode, §10).
 
-One tab for the whole circuit inside the vessel: the layout, the tube, the collectors,
-the gas film the paint writes and the build-and-paint action.  The same network is the
-charge path (flow up the risers, hot collection at the top) and the discharge path (flow
-reversed, heat out to the exchanger), so there is no second heat exchanger in the vessel.
+## 4. Geometry — Pipes
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Layout | Concentric rings (`rings`) | staggered / grid / rings / radial / spiral | `PipeNetworkConfig.layout` |
-| Collection | Reverse return (balanced) | distributor + collector / reverse return / central header / two-level rings | `PipeNetworkConfig.collection` |
+| Layout | Concentric rings | staggered / grid / rings / radial / spiral | `PipeNetworkConfig.layout` |
+| Collection | Reverse return (balanced) | distributor + collector / reverse return / central header / two-level rings | `collection` |
 | Rings / Radial files | 3 / 12 | 1–12 / 3–72 | `n_rings` / `n_files` |
 | Pipe outer d [m] | 0.05 | 0.01–0.3 | `diameter` (the pitch follows it) |
-| Wall thickness [mm] | 2.0 | 0–20 | `wall_thickness` (the bore drives the gas) |
-| Tube material | Stainless steel (drawn) | stainless / carbon | `material` (label + default roughness) |
+| Wall thickness [mm] | 2.0 | 0–20 | `wall_thickness` (the bore carries the gas) |
+| Tube material | Stainless steel (drawn) | stainless / carbon | `material` (and its default roughness) |
 | Duct d [m] | 0.15 | 0.05–0.6 | `duct_diameter` |
 | Insulated headers | off | – | `insulated_headers` (lagged headers exchange nothing) |
-| Junction refinement [m] | 0 ("off") | 0–0.5 | `junction_refinement`: the mesh band at the two header elevations |
 | Inlet / Outlet azimuth [deg] | 180 / 0 | 0–360 | `azimuth_in` / `azimuth_out` |
-| Flow split | Equal per branch | equal / from path length / per ring main / per sector | `split_mode` |
+| Flow split | Equal per branch | equal / path length / per ring main / per sector | `split_mode` |
 | Sectors | 4 | 1–16 | `n_sectors` |
-| Gas h [W/(m²·K)] | 500 | 10–20 000 | the film `paint` writes on the pipe cells (a loop run replaces it) |
-| Gas T [°C] | 60 | −20–400 | the gas temperature of that film |
-| *Build network and paint it on the mesh* | – | – | rebuilds and repaints on the current mesh |
-| Network | "build the mesh, then the network" | – | read-only: `summary()`, the paint report and the surface power |
+| *Rebuild the network on the mesh* | – | – | rebuilds and repaints on the current mesh |
+| Network | "build the mesh: it paints the network" | – | read-only: `summary()`, the paint report, the surface power |
 
-`Build mesh` builds **and paints** the network by default: the pipes are the
-heat-transfer surface, so a run started from the Analysis tab uses the loop painted on
-the very cells it solves.
+`Build mesh` builds **and paints** the network: the pipes are the heat-transfer surface,
+so every run uses the loop painted on the very cells it solves.  The paint marks the
+exchanging cells (`TUBES`, convective) and writes no film value; the loop writes one per
+cell in every analysis.  Removed 2026-09-23: *Gas h / Gas T* (the fixed film of the old
+lumped tube model, which turned the pipes into a 60 °C sink in the steady and losses
+runs) and *Junction refinement* (a band of the graded grid only).
 
 ## 5. Geometry — Mesh
 
+The mesh is the adaptive **octree** (`AdaptiveMesh.from_bands`); the uniform and graded
+modes are no longer in the GUI (`Mesh3D` stays in `src/` as the reference road of the
+equivalence tests).
+
 | control | default | range | feeds |
 |---|---|---|---|
-| Refined mesh ("cells placed where the gradients are") | on | on/off | graded (`GridSpec`) vs uniform (`Mesh3D.spacing`) |
-| Cell size (uniform) [m] | 0.2 | 0.02–1 | `spacing` when the refined mode is off |
-| Cells across storage | 10 | 2–200 | target = `r_storage / n` inside the storage band |
-| Cells across insulation | 3 | 1–50 | target = `insulation_thickness / n` in the shell ring |
-| Cells across the tube wall | 2 | 1–20 | target = `pipe outer d / n` over the **pipe bundle** (the wall is the heat-transfer surface) |
-| Growth ratio | 1.3 | 1.02–2 | largest size change between neighbouring cells |
-| Smallest cell [m] | 0 ("auto") | 0–1 | `GridSpec.min_size`: floor on the realised size |
-| Largest cell [m] | 0 ("auto") | 0–5 | `GridSpec.max_size`: ceiling on the realised size |
-| Cell budget | 400 000 | 10 000–20 000 000 | every target is scaled by a common factor to fit it |
-| Active regions / Grid / Memory | computed | – | read-only summary: the targets per **active region** (sand, insulation, shell, tube wall) as the a priori plan of `src/analysis/mesh_plan.py` gives them, cells per axis (or leaves and levels), size range, worst ratio, field memory, and whether a rail or the budget is active |
+| Cells across storage | 10 | 2–200 | target `r_storage / n` over the sand |
+| Cells across insulation | 3 | 1–50 | target `thickness / n` for the insulation ring, the slabs and the shell |
+| Cells across the tube | 2 | 1–20 | target `pipe outer d / n` over the pipe bundle |
+| Cell budget | 400 000 | 10 000–20 000 000 | `tree_resolution`: the finest leaf the tree may use |
+| Active regions / Mesh / Memory | computed | – | read-only: the a priori targets per region, the box and the finest leaf, the leaf count per level after a build, the field memory |
 
-The refinement covers the **active** model only: the sand, the insulation (radial ring
-and the two slabs), the shell, the casing the ambient film sits on and the bundle of the
-pipes - never the air around the vessel, which `apply_environment` excludes from the
-problem and holds at the ambient temperature.  On the tree road those regions are
-3-D boxes (`mesh_plan.active_regions` → `region_bands`); on the graded road they are the
-per-axis bands plus one **cap** band that carries the coarsest target the active regions
-ask for.  There is no "far field" control (2026-09-22): a cell out there carries no
-flux.
-
-The refined targets are *physical* (they do not depend on the domain size); the
-uniform mode uses one cell size everywhere and snaps Y/Z to whole cells.
+Each region takes the finer of the count above and the a priori plan of
+`src/analysis/mesh_plan.py` (`thickness/N`, the convective sub-layer `2k/h`).  Only the
+**active** model is refined - the sand, the insulation, the shell, the casing the outer
+film sits on and the pipe bundle; the air outside the vessel is excluded and its leaves
+stay coarse.
 
 **Automatic mesh** (same tab):
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Temperature tolerance [K] | 2.0 | 0.05–100 | `delta_temperature` of the search |
+| Temperature tolerance [K] | 2.0 | 0.05–100 | `delta_temperature` |
 | Power tolerance [%] | 2.0 | 0.05–50 | `delta_power` (stored as a fraction) |
 | Levels | 4 | 2–8 | `max_levels` |
 | Refine factor | 0.6 | 0.2–0.9 | target scale from one level to the next |
-| Automatic mesh ("search before building") | on | on/off | `wants_auto_search()`: *Build mesh* runs the search first |
-| *Find the mesh* | – | – | runs `analysis.convergence.find_mesh` on the background thread |
-| Search | "not run yet" | – | read-only result: converged or stopped, cells, dT, dP |
+| *Find the mesh* | – | – | `analysis.convergence.find_mesh` on the background thread |
+| Search | "not run yet" | – | read-only: converged or stopped, leaves, dT, dP |
 
-When the cell budget or the minimum cell size stops the refinement the search says so
-instead of pretending; the adopted spec is stored in the panel and used by the build.
+The search builds a tree per level, paints the battery **and the pipe network** on it
+and solves the coupled steady state, so it measures the model every run uses.  An
+adopted plan is used by the next *Build mesh*; changing a mesh setting drops it.  The
+"search before building" switch was removed (2026-09-23): *Build mesh* builds the planned
+tree, *Find the mesh* searches.
 
 ## 6. Materials
 
 | control | default | options | feeds |
 |---|---|---|---|
-| Storage medium | Steatite (soapstone) | 7 media (silica sand, olivine, steatite, basalt, magnetite, quartzite, granite) | `BatteryGeometry.storage_material` |
+| Storage medium | Steatite (soapstone) | silica sand, olivine, steatite, basalt, magnetite, quartzite, granite | `storage_material` |
 | Packing [%] | 63 | 20–90 | `packing_fraction` (÷100) |
-| Insulation | Rock wool | 5 insulators (rock wool, glass wool, calcium silicate, ceramic fibre, expanded perlite) | `insulation_material` |
-| Shell | Carbon steel | 3 structural (carbon steel, stainless steel 304, concrete) | `shell_material` |
+| Insulation | Rock wool | rock wool, glass wool, calcium silicate, ceramic fibre, expanded perlite | `insulation_material` |
+| Shell | Carbon steel | carbon steel, stainless steel 304, concrete | `shell_material` |
 | Ambient [°C] | 20 | −40–80 | `t_ambient` (K) |
 | Ground [°C] | 10 | −20–60 | `t_ground` (K) |
-| h top [W/(m²·K)] | 10 | 0–200 | top face convection |
-| h lateral [W/(m²·K)] | 5 | 0–200 | lateral face convection |
-| Radiation | Model off | off / on (linearised) | `SolverConfig.radiation` |
+| Wind speed [m/s] | 0 | 0–30 | `BatteryGeometry.wind_speed`: the forced part `4 + 4 v` of the outer film |
 
-The *Conditions* tab is the single authority for ambient and ground: the hint states
-that every analysis reads these values, so a run cannot use a different ambient from
-the one displayed.  The *Storage* and *Insulation* tabs also show the properties of
-the selected medium (k, ρ, cp, T_max).
+The outer film is computed from the correlations (Churchill-Chu natural convection plus
+the wind term, `src/core/environment.py`) and logged after every build.  Removed
+2026-09-23: *h top / h lateral* (films on the box faces, which only touch excluded air)
+and the second *Radiation* switch (never read; radiation is Tools > Solver).
 
 ## 7. Analysis — Type
 
 | control | default | range / options |
 |---|---|---|
-| Steady state (fixed heater power) | **selected** | – |
-| Losses analysis (hold a target temperature) | – | shows the Losses target group |
-| Transient (power and extraction profiles) | – | shows the Time stepping group |
+| Steady state (the circuit at its power) | **selected** | the resistors' power held until the bed settles |
+| Losses analysis (hold a target temperature) | – | the power that holds the target |
+| Transient (power and extraction profiles) | – | the profiles drive the loop |
 | Mean storage T [°C] (losses) | 400 | 20–1200 |
 | Duration | 10 | 0.01–100 000, in the selected unit |
 | Unit | hours | seconds / minutes / hours / days |
@@ -178,39 +167,43 @@ the selected medium (k, ρ, cp, T_max).
 | Save interval [s] | 600 | 1–86 400 |
 | Full fields ("save T field per sample") | off | – |
 
-The losses and transient groups are hidden unless their radio is selected, and `Run`
-follows the type (`Run steady state`, `Run losses analysis`, `Run transient`).
+The coupling of the gas and the sand is implicit in the wall temperature and holds the
+loop balance per step, so the time step is an accuracy choice, not a stability limit
+(docs/12 §11).
 
 ## 8. Analysis — Initial condition
 
 | control | default | notes |
 |---|---|---|
 | Uniform temperature | selected | 20 °C, −40–1200 |
-| Temperature per material | – | one value per material, 20 °C each, −40–1200: sand, insulation, steel, air, concrete, tubes |
-| Load a saved HDF5 state | – | read-only path + *Browse*; `StateManager.load_state` with the geometry-hash check |
-| Start from the steady solution | – | the controller solves the steady case first and keeps that field (`InitialCondition(mode="keep")`) |
+| Temperature per material | – | 20 °C each: sand, insulation, steel, concrete, pipes |
+| Current field (last result or loaded state) | – | the mesh's own field (`InitialCondition(mode="keep")`): chain a discharge after a charge, or start from a state loaded in Save / Load |
+| Start from the steady solution | – | the controller solves the coupled steady state at the power profile's first value and keeps that field |
 
-## 9. Analysis — Power profile
+Replaced 2026-09-23: *Load a saved HDF5 state* read the `.h5` file with `np.load`, which
+cannot read HDF5 - the option could not work.  Loading is on the Save / Load tab and
+*Current field* starts from it.
+
+## 9. Analysis — Power profile (the resistors)
 
 | control | default | notes |
 |---|---|---|
-| Off | – | no heating |
-| Constant power | selected | 10 000 in the selected unit; unit default **kW**, options W / kW / MW - so the default is 1 × 10⁷ W |
-| Scheduled profile | – | table of (time [s], power [W]) with Add/Remove row; times must increase |
-| From CSV (t, P) | – | read-only path + *Browse*; a missing or malformed file raises |
+| Off | – | resistors off |
+| Constant power | selected | **5 kW** (value 5, unit kW; W / kW / MW) - it was 10 000 kW before 2026-09-23 |
+| Scheduled profile | – | table of (time [s], power [W]); times must increase |
+| From CSV (t, P) | – | a missing or malformed file raises |
 
-## 10. Analysis — Extraction
+## 10. Analysis — Extraction (the exchanger on the circuit)
 
 | control | default | range | notes |
 |---|---|---|---|
-| No extraction | selected | – | tubes inactive |
-| Target power [W] | 5000 | 0–10 000 000 | capped by the available `h A (T_tube − T_inlet)` |
-| Mass flow [kg/s] | 0.1 | 0.001–100 | convective exchange with the inlet temperature |
-| Inlet T [°C] | 20 | −20–400 | passed in every mode |
-| Tube h [W/(m²·K)] | 500 | 10–20 000 | used by the two extraction modes (not in "off") |
+| No extraction | selected | – | the exchanger is idle |
+| Exchanger power [kW] | 5 | 0–100 000 | `ExtractionProfile(mode="power")`: taken out of the gas; the loop solves its inlet temperature, and a run stops (keeping its samples) when the bed can no longer give it |
+| Exchanger return temperature [°C] | 60 | −20–400 | `ExtractionProfile(mode="return_temperature")`: the gas comes back at this temperature and the power is whatever the bed gives it; the resistors are off |
 
-The power widget is enabled only in the target-power mode and the flow/h widgets only
-in the flow-rate mode; the inlet temperature stays enabled unless extraction is off.
+The loop's external power is `power profile − exchanger power`, so a charge and a
+discharge at the same time are a net power into the gas.  Removed 2026-09-23: *Fluid
+flow rate* and *Tube h* (the lumped-tube extraction, ignored whenever the loop runs).
 
 ## 11. Analysis — Save / Load
 
@@ -219,28 +212,28 @@ in the flow-rate mode; the inlet temperature stays enabled unless extraction is 
 | Name | "Simulation" | written into the HDF5 state |
 | Description | empty | written as a note |
 | *Save state (HDF5)* | – | `results/states/<name>.h5` with geometry hash, unit tag and version |
-| *Load state (HDF5)* | – | refused if the geometry hash or the grid does not match, or while a run is in flight |
-| State | "no state loaded" | read-only: result of the last save/load |
+| *Load state (HDF5)* | – | refused if the geometry hash or the tree does not match, or while a run is in flight |
+| State file / State | – | read-only: the file and the result of the last save/load |
 
 ## 12. Tools — Solver and Losses
 
 | control | default | options |
 |---|---|---|
-| Method | BiCGSTAB | BiCGSTAB (robust) / CG (symmetric only) / GMRES / direct LU |
-| Preconditioner | Jacobi | Jacobi / none / ILU / AMG Ruge-Stuben / AMG smoothed aggregation |
-| Tolerance | 1e-8 | 1e-10 / 1e-8 / 1e-6 / 1e-4 |
-| Max iterations | 5000 | 100–200 000, step 500 |
-| Threads | All − 1 | Auto (all cores) / All − 1 / 2 cores / 1 core - the BLAS and OpenMP budget |
+| Tolerance | 1e-8 | 1e-10 / 1e-8 / 1e-6 |
+| Max iterations | 2000 | 100–200 000 |
+| Threads | All − 1 | Auto (all cores) / All − 1 / 2 cores / 1 core (applied through `threadpoolctl`) |
 | Radiation | Off | Off / On |
 | Losses: T tolerance [K] | 1.0 | 0.05–20 |
 | Losses: max iterations | 20 | 1–200 |
 | Losses: under-relaxation | 0.7 | 0.1–1.0 |
 | Losses: initial power density [W/m³] | 100 | 1–10 000 |
-| Losses: ground h [W/(m²·K)] | 5 | 0–1000 (0 keeps the fixed-temperature ground) |
 
-The default note in the panel: CG is refused on non-symmetric systems, so the solver
-reports the switch instead of diverging silently.  The `Tools` tab also carries the
-**Help** page with the workflow summary.
+The linear method is fixed: **conjugate gradients + AMG (Ruge-Stüben)** on the
+volume-symmetrised operator (docs/12 §3, the measurements in docs/14).  The linear layer
+falls back on its own - BiCGSTAB on a non-symmetric operator, Jacobi without PyAMG - and
+reports it in the log.  Removed 2026-09-23: the method and preconditioner selectors and
+the losses' *ground h* (it rewrote the ground condition of the mesh and left it changed
+for the runs that followed).
 
 ## 13. 3D view
 
@@ -248,18 +241,19 @@ reports the switch instead of diverging silently.  The `Tools` tab also carries 
 |---|---|---|
 | Field | Temperature | Temperature / Material / Sources / Conductivity |
 | Cut | z | x / y / z |
-| Position slider | 50 % | 1–99 % of the axis length (clamped to 2–98 % when rendering) |
+| Position slider | 50 % | 1–99 % of the axis length |
 | Opacity slider | 80 % | 5–100 % |
 | *Reset camera* | – | restores the default point of view |
-| Colourmap | `coolwarm`, fixed | the selector was removed; the value labels of both sliders are printed next to them |
+| Colourmap | `coolwarm`, fixed | – |
 
-If no OpenGL context is available the whole group degrades to a placeholder label and
-stays disabled (the controls exist but `controls.setEnabled(False)`), which is the mode
-the test suite forces with `THERMAL_DISABLE_3D=1`.
+Without an OpenGL context the group degrades to a placeholder (`THERMAL_DISABLE_3D=1`
+forces that mode).
 
-## 14. Exports
+## 14. Results and exports
 
 | control | where | notes |
 |---|---|---|
-| Export time series to CSV... | results panel (below the tabs) | writes `TransientResults` to CSV; with no transient run in memory it only logs "no transient results to export" |
-| Export VTK / CSV of the field | **code only** | `ThermalBatteryGUI.export_vtk` and `export_csv_field` exist as slots but no button is wired to them; scripts call `src.viz.scene.export_vtk` / `export_csv` directly |
+| Statistics | results panel | temperatures of the battery (the excluded air is left out), the mesh report |
+| Energy balance | results panel | input (gas → bed), extraction, envelope losses by face, all paths, imbalance, stored energy and exergy, and the **gas loop**: inlet/outlet temperature, bed power, NTU, pressure drop, fan power |
+| Export time series (CSV)... | results panel | `TransientResults.export_csv` |
+| Export field (VTK)... | results panel | `src.viz.scene.export_vtk`: every leaf and every field, `.vtu` for ParaView |

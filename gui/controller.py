@@ -3,23 +3,30 @@
 The GUI never runs physics: it assembles a :class:`RunConfig` from its widgets
 and hands it to :class:`SimulationController`, which owns the threads, the
 progress reporting and the cancel flag.  All the numerics happen in ``src/``.
+
+Every analysis runs the plant: when the window has painted a pipe network, the gas
+loop of that network is the heat path of the run - the steady state and the losses
+analysis couple it (``SteadyStateSolver(fluid_loop=...)``), the transient marches it
+step by step - and each run sets the state it needs on the mesh itself, so nothing
+a previous run left behind (a transient's last sources, its films) leaks into it.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from src.analysis.balance import compute_balance
 from src.analysis.convergence import AdaptivePlan, ConvergenceTarget, find_mesh
-from src.analysis.mesh_plan import describe as describe_plan, plan_regions
-from src.core.materials import MaterialManager
 from src.analysis.losses import LossesConfig, solve_losses
+from src.analysis.mesh_plan import describe as describe_plan
+from src.analysis.mesh_plan import plan_regions
 from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import BatteryGeometry
+from src.core.materials import MaterialManager
 from src.core.mesh import Mesh3D
-from src.core.pipe_network import PipeNetwork
+from src.core.pipe_network import PipeNetwork, PipeNetworkConfig, build_pipe_network
 from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from src.solver.steady import SolverConfig, SteadyStateSolver
 from src.solver.transient import TransientConfig, TransientSolver
@@ -33,15 +40,14 @@ class RunConfig:
 
     analysis: str = "steady"
     battery: BatteryGeometry = field(default_factory=BatteryGeometry)
-    domain: tuple = (6.0, 6.0, 5.6, 0.2)
-    #: refinement spec of the automatic mesh search (None = uniform mesh)
-    mesh_spec: object = None
+    #: the tree the automatic mesh search refines (``None``: no search)
+    mesh_spec: AdaptivePlan | None = None
     #: tolerances of the search: delta_temperature [K], delta_power [-], levels, budget
     convergence: dict = field(default_factory=dict)
-    method: str = "bicgstab"
-    preconditioner: str = "jacobi"
+    method: str = "cg"
+    preconditioner: str = "amg_rs"
     tolerance: float = 1e-8
-    max_iterations: int = 5000
+    max_iterations: int = 2000
     n_threads: int = -1
     radiation: bool = False
     losses: dict = field(default_factory=dict)
@@ -50,18 +56,17 @@ class RunConfig:
     power_profile: PowerProfile = field(default_factory=PowerProfile)
     extraction_profile: ExtractionProfile = field(default_factory=ExtractionProfile)
     start_from_steady: bool = False
-    #: the buried pipe network the Pipes tab built and painted (None = no network:
-    #: the geometry's lumped bed source alone drives the run)
+    #: the buried pipe network the window built and painted on the run's mesh (None =
+    #: no network: the geometry's lumped bed source alone drives the run)
     pipe_network: PipeNetwork | None = None
-    #: total mass flow of the gas circuit of that network [kg/s]
+    #: the recipe of that network, for the meshes the automatic search builds
+    pipe_config: PipeNetworkConfig | None = None
+    #: total mass flow of the gas circuit [kg/s]
     pipe_flow: float = 0.0
     #: the gas the circuit is filled with (``src.solver.fluid.Fluid``); None = air
     pipe_fluid: object = None
     #: absolute pressure of the loop [Pa]: it sets the density the gas marches at
     pipe_pressure: float = 101325.0
-    #: temperature the gas enters the loop at [K]; None = the loop solves its own
-    #: balance from the external power (the closed-circuit case)
-    pipe_inlet: float | None = None
     #: blower efficiency [-]: the electric power of the fan is the shaft power over it
     pipe_fan_efficiency: float = 0.7
 
@@ -111,8 +116,8 @@ class SimulationController(QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._job: SimulationJob | None = None
-        self._mesh: Mesh3D | AdaptiveMesh | None = None
-        self._config: RunConfig | None = None
+        #: the gas-loop result of the last run, for the results panel (None: no loop)
+        self.last_loop = None
 
     @property
     def running(self) -> bool:
@@ -123,7 +128,6 @@ class SimulationController(QObject):
         if self.running:
             self.failed.emit("a simulation is already running")
             return
-        self._config, self._mesh = config, mesh
         work = self._make_work(config, mesh)
         self._job = SimulationJob(work, parent=self)
         self._job.progressed.connect(self.progressed.emit)
@@ -147,69 +151,89 @@ class SimulationController(QObject):
     # --------------------------------------------------------------- engine
     def _make_work(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh) -> Callable:
         solver_config = config.solver_config()
+        power = config.battery.heaters.power_w
+
+        def steady_solve(target, loop_power: float, network, progress=None):
+            """The steady state of the plant at ``loop_power`` on ``target``."""
+            loop = self._fluid_loop(config, target, network, power=loop_power)
+            if loop is None:
+                config.battery.apply_source(target)
+            solver_config.progress_callback = progress
+            solver = SteadyStateSolver(target, solver_config, fluid_loop=loop)
+            result = solver.solve()
+            solver_config.progress_callback = None
+            self.last_loop = solver.fluid_result
+            return result
 
         def steady(progress, should_stop):
-            self.log.emit("[steady] solving")
-            result = SteadyStateSolver(mesh, solver_config).solve()
+            self.log.emit(f"[steady] solving at {power / 1000:.2f} kW")
+            result = steady_solve(mesh, power, config.pipe_network, progress)
             self.log.emit(f"[steady] converged={result.converged} "
-                          f"residual={result.residual:.2e} in {result.solve_time:.2f} s")
+                          f"residual={result.residual:.2e} in {result.solve_time:.2f} s "
+                          f"({result.iterations} sweeps)")
+            self._log_loop()
             for note in result.notes:
                 self.log.emit(f"[solver] {note}")
             return result
 
         def losses(progress, should_stop):
             cfg = LossesConfig(**config.losses)
-            self.log.emit("[losses] iterating on the heater power")
-            return solve_losses(mesh, cfg, solver_config, progress, should_stop)
+            loop = self._fluid_loop(config, mesh, config.pipe_network)
+            self.log.emit("[losses] iterating on the resistors' power")
+            result = solve_losses(mesh, cfg, solver_config, progress, should_stop,
+                                  fluid_loop=loop)
+            self.last_loop = loop.solve(mesh) if loop is not None else None
+            self._log_loop()
+            return result
 
         def automesh(progress, should_stop):
-            spec = config.mesh_spec
-            if spec is None:
-                raise ValueError("the automatic mesh search needs a refined mesh spec")
+            plan = config.mesh_spec
+            if plan is None:
+                raise ValueError("the automatic mesh search needs the tree plan of the "
+                                 "Mesh tab")
             settings = {k: v for k, v in (config.convergence or {}).items()
                         if k in ConvergenceTarget.__dataclass_fields__}
             target = ConvergenceTarget(**settings)
             self.log.emit(f"[automesh] tolerances: dT {target.delta_temperature} K, "
                           f"dP {100 * target.delta_power:.1f}%, budget "
                           f"{target.max_cells:,} cells")
-
-            plans = plan_regions(config.battery, MaterialManager())
-            for line in describe_plan(plans).splitlines():
+            for line in describe_plan(plan_regions(config.battery,
+                                                   MaterialManager())).splitlines():
                 self.log.emit(f"[plan] {line}")
+            networks: dict[int, PipeNetwork] = {}
 
-            def build(spec_level):
-                """One search level, on the mesh its request describes.
+            def build(level: AdaptivePlan):
+                """One search level: the tree, the battery and the network painted on it."""
+                tree = AdaptiveMesh.from_bands(level.n_finest, level.physical_size,
+                                               level.bands, level.base_level)
+                config.battery.apply_to_mesh(tree)
+                if config.pipe_config is not None:
+                    network = build_pipe_network(tree, config.pipe_config)
+                    network.paint(tree)
+                    networks[id(tree)] = network
+                return tree
 
-                The panel hands the search an ``AdaptivePlan`` when the Mesh tab builds a
-                tree and a ``GridSpec`` when it builds a graded grid: the same physical
-                targets in the vocabulary of their own mesh, so the search refines - and
-                the chosen level rebuilds - the mesh mode that is selected.
-                """
-                if isinstance(spec_level, AdaptivePlan):
-                    mesh = AdaptiveMesh.from_bands(spec_level.n_finest,
-                                                   spec_level.physical_size,
-                                                   spec_level.bands, spec_level.base_level)
-                else:
-                    mesh = Mesh3D(Lx=lx, Ly=ly, Lz=lz, grid=spec_level)
-                config.battery.apply_to_mesh(mesh)
-                return mesh
-
-            def observables(mesh):
-                SteadyStateSolver(mesh, solver_config).solve()
-                balance = compute_balance(mesh)
+            def observables(tree):
+                steady_solve(tree, power, networks.get(id(tree)))
+                balance = compute_balance(tree, config.battery.t_ambient,
+                                          radiation=config.radiation)
                 return {"t_mean_storage": balance.t_mean_storage,
                         "t_max": balance.t_max, "power": balance.q_battery}
 
-            lx, ly, lz, _ = config.domain
-            report = find_mesh(build, observables, spec, target, progress, should_stop)
+            report = find_mesh(build, observables, plan, target, progress, should_stop)
             for line in report.summary().splitlines():
                 self.log.emit(f"[automesh] {line}")
             return report
 
         def transient(progress, should_stop):
+            loop = self._fluid_loop(config, mesh, config.pipe_network)
+            if loop is None:
+                config.battery.apply_source(mesh)
             if config.start_from_steady:
-                self.log.emit("[transient] steady pre-run for the initial field")
-                SteadyStateSolver(mesh, solver_config).solve()
+                start = config.power_profile.power_at(0.0)
+                self.log.emit(f"[transient] steady pre-run at {start / 1000:.2f} kW for "
+                              f"the initial field")
+                steady_solve(mesh, start, config.pipe_network)
             settings = dict(config.transient)
             settings.setdefault("save_full_field", False)
             t_cfg = TransientConfig(
@@ -217,37 +241,51 @@ class SimulationController(QObject):
                 power_profile=config.power_profile,
                 extraction_profile=config.extraction_profile,
                 t_ambient=config.battery.t_ambient,
-                fluid_loop=self._fluid_loop(config, mesh),
+                fluid_loop=loop,
                 **settings,
             )
-            return TransientSolver(mesh, t_cfg, solver_config).run(progress, should_stop)
+            solver = TransientSolver(mesh, t_cfg, solver_config)
+            results = solver.run(progress, should_stop)
+            self.last_loop = solver.fluid_result
+            self._log_loop()
+            for note in solver.notes:
+                self.log.emit(f"[transient] {note}")
+            if loop is not None:
+                self.log.emit(f"[transient] fan {solver.fluid_fan_energy / 3.6e6:.3f} kWh, "
+                              f"delivered by the exchanger "
+                              f"{solver.fluid_delivered / 3.6e6:.3f} kWh")
+            return results
 
+        self.last_loop = None
         return {"steady": steady, "losses": losses, "transient": transient,
                 "automesh": automesh}[config.analysis]
 
-    def _fluid_loop(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh):
-        """The gas circuit of the network the Pipes tab built, or None.
+    def _fluid_loop(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh,
+                    network: PipeNetwork | None, power: float = 0.0):
+        """The gas circuit of ``network`` on ``mesh``, or None without a network.
 
         With a network the gas *is* the heat transfer path: the loop marches the pipes
-        on the mesh (the cells the paint marked) and the profiles drive its external
-        power instead of depositing heat in the sand.  The circuit's own settings come
-        from the Heaters tab - the gas, its pressure, the return temperature when the
-        user prescribes one, and the blower - and the hydraulics of the whole circuit
-        (headers and ducts included) is reported before the march.
+        on the mesh (the cells the paint marked) at the circuit's own settings - the gas,
+        its pressure, the blower - and ``power`` is the resistors' power it starts from.
         """
-        network = config.pipe_network
         if network is None:
             return None
         if config.pipe_flow <= 0.0:
             raise ValueError(
                 "the buried pipe network needs a circuit mass flow > 0 kg/s: set it on "
-                "the Heaters tab")
+                "the Gas circuit tab")
         circuit = network.hydraulics(config.pipe_flow, config.pipe_fluid)
         self.log.emit(f"[pipes] {circuit.summary()}")
         return network.fluid_loop(config.pipe_flow, fluid=config.pipe_fluid, mesh=mesh,
-                                  t_in=config.pipe_inlet,
+                                  external_power=power,
                                   fan_efficiency=config.pipe_fan_efficiency,
                                   pressure=config.pipe_pressure)
+
+    def _log_loop(self) -> None:
+        if self.last_loop is not None:
+            self.log.emit(f"[loop] {self.last_loop.summary()}")
+            for note in self.last_loop.notes:
+                self.log.emit(f"[loop] {note}")
 
     def _finish(self, analysis: str, result) -> None:
         self.finished.emit(analysis, result)

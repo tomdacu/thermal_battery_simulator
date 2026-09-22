@@ -39,11 +39,8 @@ def window():
     from gui.main_window import ThermalBatteryGUI
 
     win = ThermalBatteryGUI()
-    win.geometry_panel.refined.setChecked(False)   # small uniform mesh
-    # the automatic mesh search is the GUI default but it is a background
-    # solve: the tests build the grid they configure, not the one it finds
-    win.geometry_panel.auto_first.setChecked(False)
-    win.geometry_panel.spacing.setValue(0.5)
+    # the smallest budget the Mesh tab offers: the coarsest tree the GUI can build
+    win.geometry_panel.max_cells.setValue(10_000)
     yield win
     win.close()
     del app
@@ -55,14 +52,16 @@ def test_window_builds_the_mesh_with_the_panel_defaults(window):
     assert mesh is not None
     assert mesh.source_mask.any()
     assert mesh.T.min() > 100.0                      # Kelvin, not Celsius
-    assert "cells" in window.geometry_panel.mesh_info.text()
+    assert "leaves" in window.geometry_panel.mesh_info.text()
+    # the build paints the plant's network: the gas loop is the run's heat path
+    assert window.geometry_panel.pipe_network() is not None
 
 
 def test_run_config_is_read_from_the_widgets(window):
     window.build_mesh()
     config = window._run_config()
     assert config.analysis in ("steady", "losses", "transient")
-    assert config.method in ("cg", "bicgstab", "gmres", "direct")
+    assert (config.method, config.preconditioner) == ("cg", "amg_rs")
     assert 0 < config.tolerance <= 1e-4
     assert config.battery.t_ambient > 200.0          # the degC value is converted
     assert config.battery.heaters.power_w == pytest.approx(
@@ -138,9 +137,6 @@ def test_the_window_solves_a_steady_case_on_a_tree(window):
     from src.core.adaptive_mesh import AdaptiveMesh
 
     panel = window.geometry_panel
-    panel.refined.setChecked(True)
-    panel.adaptive.setChecked(True)
-    panel.max_cells.setValue(10_000)
     try:
         window.build_mesh()
         mesh = window.mesh
@@ -160,10 +156,13 @@ def test_the_window_solves_a_steady_case_on_a_tree(window):
         assert "Temperature" in stats and "degC" in stats
         assert "leaves" in stats and "domain" in stats
         assert "losses (envelope)" in energy and "imbalance" in energy
+        # the steady state is the plant's: the circuit carried the power into the bed
+        assert "Gas loop" in energy
+        loop = window.controller.last_loop
+        assert loop is not None
+        assert loop.power == pytest.approx(panel.power.value() * 1000.0, rel=1e-3)
     finally:
-        panel.adaptive.setChecked(False)
-        panel.refined.setChecked(False)
-        panel.max_cells.setValue(400_000)
+        panel.max_cells.setValue(10_000)
 
 
 def test_the_automatic_search_refines_a_tree(window):
@@ -179,22 +178,22 @@ def test_the_automatic_search_refines_a_tree(window):
     from PyQt6.QtWidgets import QApplication
 
     from src.analysis.convergence import AdaptivePlan
-    from src.analysis.mesh_plan import refinement_bands
+    from src.analysis.mesh_plan import region_bands
     from src.core.adaptive_mesh import AdaptiveMesh
 
     panel = window.geometry_panel
-    lx, ly, lz, _ = panel.domain()
+    # the manual targets alone: the a priori plan of a built mesh asks for millimetres at
+    # the shell, which a 375 mm floor could never refine towards
+    panel.set_plan_targets({})
     plan = AdaptivePlan(n_finest=16, physical_size=0.375,
-                        bands=refinement_bands(panel.grid_spec(), (lx, ly, lz))).scaled(6.0)
-    panel.refined.setChecked(True)
-    panel.adaptive.setChecked(True)
+                        bands=region_bands(panel.mesh_regions())).scaled(20.0)
     try:
         assert isinstance(window._run_config().mesh_spec, AdaptivePlan)
         window.battery = window._battery_from_panels()
         config = window._run_config()
         config.analysis = "automesh"
         config.mesh_spec = plan
-        config.convergence = {"delta_temperature": 1e6, "delta_power": 1.0,
+        config.convergence = {"delta_temperature": 1e6, "delta_power": 1e3,
                               "max_levels": 4, "refine": 0.5, "probe_levels": 2,
                               "max_cells": 10_000}
         window.controller.start(config, None)
@@ -208,5 +207,3 @@ def test_the_automatic_search_refines_a_tree(window):
         assert window.mesh.n_cells > 512, "the rounds must have refined the plan"
     finally:
         panel.set_auto_spec(None)
-        panel.adaptive.setChecked(False)
-        panel.refined.setChecked(False)

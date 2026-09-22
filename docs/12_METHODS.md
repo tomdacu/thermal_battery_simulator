@@ -91,7 +91,14 @@ mesh search.
 ## 3. Linear solver
 
 **Choice.** CG on the symmetrised system, AMG (Ruge-Stüben) preconditioner when PyAMG
-is installed, Jacobi otherwise; direct sparse LU for small problems.
+is installed, Jacobi otherwise; direct sparse LU for small problems.  Since 2026-09-23
+this is also what the GUI runs, with no selector: every operator the application
+assembles is symmetric once the volumes scale it, and on the default model (143 396
+leaves, steady) CG + AMG RS took 1.8 s against 2.8 s for CG + Jacobi, 5.6 s for CG + AMG
+smoothed aggregation and 6.3 s for BiCGSTAB + Jacobi (the previous GUI default); all four
+agree with a direct solve to 1e-4 K, CG + AMG RS to 1e-5 K in 6 iterations.  The linear
+layer still falls back by itself - BiCGSTAB on an operator that is not symmetric, Jacobi
+without PyAMG - and says so.
 
 **Why.** The matrix comes from a diffusion operator: CG with a multigrid preconditioner
 has iteration counts that grow only weakly with the mesh size, which is what keeps a
@@ -105,6 +112,11 @@ predictability wins.
 be compared honestly.  A run that hits `max_iterations` is reported as
 `converged=False` and the field is not silently presented as a solution.
 
+**Cache.** The AMG hierarchy is the dominant setup cost, so it is kept while the matrix
+*content* is unchanged (a hash of the CSR arrays).  It used to be keyed on the matrix
+object as well, and the symmetrised operator of a graded mesh is a new object at every
+call, so a transient on the tree rebuilt the hierarchy at every step.
+
 **Checked.** `tests/test_solver.py` (convergence, symmetry, fallback note), the
 benchmarks in `scripts/`.
 
@@ -114,7 +126,7 @@ benchmarks in `scripts/`.
 
 | Iteration | Criterion | Why this criterion |
 |---|---|---|
-| Radiation sweeps | max field change between sweeps <= 1e-3 K, at most 30 sweeps | the linearised coefficient is a fixed point; the *field* change is what the user sees, and 1e-3 K is far below any physical uncertainty |
+| Radiation sweeps, gas-loop coupling (steady) | max field change between sweeps <= 1e-3 K, at most 60 sweeps | the linearised coefficient and the gas temperatures are fixed points of the field they drive; the *field* change is what the user sees, and 1e-3 K is far below any physical uncertainty |
 | Losses analysis (secant) | change of the storage mean temperature <= tolerance | the target is a temperature set point; the secant method converges in 3-6 iterations because the loss is smooth and monotone in the power |
 | Automatic mesh | Richardson estimate of the discretisation error of the *chosen* grid, against the tolerance | with predicted jumps the raw change between two grids is dominated by the coarse one; the Richardson estimate divides it by `r^p - 1` and is what Roache's GCI is built on |
 
@@ -221,7 +233,10 @@ Bisection would be slower and needs a bracket.
 
 **Assumption to know about.** The iteration treats each solve as a steady state: the
 loss at the target temperature is computed *as if* the battery had been sitting there.
-Storage dynamics (charging/discharging) belong to the transient analysis.
+Storage dynamics (charging/discharging) belong to the transient analysis.  With a painted
+network the power is the resistors' and it enters through the pipe walls (the coupled
+steady state of §11), so the answer is the plant's holding power; the model is the mesh
+as built, the ground condition included (the losses run no longer rewrites it).
 
 ---
 
@@ -263,6 +278,58 @@ material database is the single source of truth used by solver, balance and GUI.
   ground path included.
 * **Mesh uncertainty** is reported as the GCI of the chosen grid (see §5), never as an
   unqualified number.
+
+---
+
+## 11. Coupling the gas and the bed
+
+**Choice.** The loop is marched on the current wall temperatures, and each pipe cell
+receives the exact exchange of its piece of pipe *written as an implicit film*:
+
+```
+q = m_dot c_p (T_in,cell - T_out,cell) = G (T_gas - T_wall)
+G = m_dot c_p (1 - e^-NTU)          [W/K]
+T_gas = temperature the gas enters the cell at
+```
+
+`FluidResult.apply` writes `G` and `T_gas` on the cell as `bc_h` and `bc_T_inf`, so the
+solver treats `T_wall` implicitly.  In a transient the loop inlet is solved *with* the
+field: every `T_gas` moves with `T_in` by a known slope, the field moves with it by the
+solution of one more system with the same operator, and the one scalar that makes the
+deposit equal the external power closes the loop's enthalpy balance on the new field (a
+one-row Schur complement).  The gas is re-marched at the end of every step, so the state
+a caller reads between steps - the delivery temperature a cycle stops on - belongs to the
+field it sees.  The steady state iterates march + solve (Picard) with the same
+balance held in every sweep, so each sweep deposits the resistors' power and the
+iteration only settles how the gas distributes it (11 sweeps, 21 s on the default
+model of 143 396 leaves).  A pipe cell keeps the bed's properties: the pipe is a
+thin wall inside a cell of sand, and only its exchange is added to the cell.
+
+**Why.** The previous coupling deposited the marched power as a fixed source for the
+whole step.  That is an explicit scheme in the wall temperature: a cell whose `G` is
+large against its heat capacity overshoots, and on long steps the bed oscillated -
+down to below 100 K in the cycle runs of 2026-09-21.  The implicit film is stable at any
+step; holding the balance keeps the energy ledger exact (the charge deposits exactly the
+resistors' power).  Measured on the test silo, discharge time against the step:
+19.0 / 18.5 / 18.0 / 18.0 / 17.9 h for dt = 3600 / 1800 / 900 / 450 / 225 s (the explicit
+coupling: 19.0 / 18.5 / 18.25 / 18.1 / 18.0 h, where it did not diverge).
+
+**The steady state is the plant's.**  Before 2026-09-23 the steady and losses runs
+spread the power uniformly over the sand and gave the painted pipes a fixed film at a
+fixed "gas temperature" of 60 °C - the lumped tube model - so the pipes were a *sink*
+(967 W of the 5 kW on the default model, the storage mean 40 K too cold).  Now the power
+enters through the pipe walls at the circuit's flow, and the gas temperatures are the
+loop's own.
+
+**Limits.** The gas properties are evaluated once, at the prescribed inlet or at 300 K,
+not along the loop: `h` and the pressure drop therefore do not follow the temperature of
+the gas (at 600 °C the turbulent `h` of air is ~30 % higher, the laminar one ~2.4x).
+Making them follow it changes `G`, hence the operator, and needs a rebuild policy; it is
+the next refinement of this model.
+
+**Checked.** `tests/test_cycle.py` (the deposit equals the external power; the cycle
+identity closes to 1 %; the discharge stop within one step), `tests/test_fluid.py`,
+`tests/test_transient_on_tree.py` (the same ledger on the tree and on the grid).
 
 ---
 

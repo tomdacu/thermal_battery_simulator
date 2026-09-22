@@ -25,9 +25,8 @@ _IC_MATERIALS = (
     ("Sand", int(MaterialID.SAND), 20.0),
     ("Insulation", int(MaterialID.INSULATION), 20.0),
     ("Steel", int(MaterialID.STEEL), 20.0),
-    ("Air", int(MaterialID.AIR), 20.0),
     ("Concrete", int(MaterialID.CONCRETE), 20.0),
-    ("Tubes", int(MaterialID.TUBES), 20.0),
+    ("Pipes", int(MaterialID.TUBES), 20.0),
 )
 _POWER_UNITS = (("W", 1.0), ("kW", 1e3), ("MW", 1e6))
 _DURATION_UNITS = (("seconds", 1.0), ("minutes", 60.0), ("hours", 3600.0), ("days", 86400.0))
@@ -56,7 +55,7 @@ class AnalysisPanel(QWidget):
     # ------------------------------------------------------------------ type
     def _build_type_tab(self) -> None:
         panel = FormPanel()
-        self.radio_steady = QRadioButton("Steady state (fixed heater power)")
+        self.radio_steady = QRadioButton("Steady state (the circuit at its power)")
         self.radio_losses = QRadioButton("Losses analysis (hold a target temperature)")
         self.radio_transient = QRadioButton("Transient (power and extraction profiles)")
         self.type_group = QButtonGroup(self)
@@ -81,8 +80,11 @@ class AnalysisPanel(QWidget):
         for radio in (self.radio_steady, self.radio_losses, self.radio_transient):
             radio.toggled.connect(self._update_visibility)
         self.radio_steady.setChecked(True)
-        panel.add_hint("Ambient and ground conditions come from Materials > Conditions; "
-                       "the heater power from the Heaters tab.")
+        panel.add_hint("Every analysis runs the gas loop of Geometry > Gas circuit "
+                       "through the painted pipes.  Steady: the resistors' power held until "
+                       "the bed settles.  Losses: the power that holds the target.  "
+                       "Transient: the Power and Extraction profiles drive the loop.  "
+                       "Ambient and ground come from Materials > Conditions.")
         self.tabs.addTab(panel, "Type")
 
     @safe_slot
@@ -108,10 +110,10 @@ class AnalysisPanel(QWidget):
         panel = FormPanel()
         self.radio_uniform = QRadioButton("Uniform temperature")
         self.radio_by_material = QRadioButton("Temperature per material")
-        self.radio_from_file = QRadioButton("Load a saved HDF5 state")
+        self.radio_current = QRadioButton("Current field (last result or loaded state)")
         self.radio_from_steady = QRadioButton("Start from the steady solution")
         self.ic_group = QButtonGroup(self)
-        for radio in (self.radio_uniform, self.radio_by_material, self.radio_from_file,
+        for radio in (self.radio_uniform, self.radio_by_material, self.radio_current,
                       self.radio_from_steady):
             self.ic_group.addButton(radio)
             panel.add_row(radio)
@@ -120,10 +122,9 @@ class AnalysisPanel(QWidget):
         for label, material_id, default in _IC_MATERIALS:
             self.material_spins[material_id] = panel.add(f"{label} [°C]",
                                                          double_spin(default, -40.0, 1200.0, 5.0, 1))
-        self.file_path = panel.add("State file", QLineEdit())
-        self.file_path.setReadOnly(True)
-        panel.add_row(button("Browse...", self._browse_state))
-        for radio in (self.radio_uniform, self.radio_by_material, self.radio_from_file,
+        panel.add_hint("Current field: the transient starts from what the mesh holds - "
+                       "the field of the last run, or a state loaded from Save / Load.")
+        for radio in (self.radio_uniform, self.radio_by_material, self.radio_current,
                       self.radio_from_steady):
             radio.toggled.connect(self._update_ic_visibility)
         self.radio_uniform.setChecked(True)
@@ -137,12 +138,6 @@ class AnalysisPanel(QWidget):
         self.t_uniform.setEnabled(uniform)
         for spin in self.material_spins.values():
             spin.setEnabled(by_material)
-        self.file_path.setEnabled(self.radio_from_file.isChecked())
-
-    def _browse_state(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open state", "results/states", "HDF5 (*.h5)")
-        if path:
-            self.file_path.setText(path)
 
     def initial_condition(self) -> InitialCondition:
         if self.radio_by_material.isChecked():
@@ -150,10 +145,9 @@ class AnalysisPanel(QWidget):
                 mode="by_material",
                 t_by_material={mid: c_to_k(spin.value())
                                for mid, spin in self.material_spins.items()})
-        if self.radio_from_file.isChecked():
-            return InitialCondition(mode="from_file", file_path=self.file_path.text())
-        if self.radio_from_steady.isChecked():
-            # the controller solves the steady case first: keep that field
+        if self.radio_current.isChecked() or self.radio_from_steady.isChecked():
+            # the field the mesh carries (a loaded state, the last run), or the one the
+            # controller's steady pre-run leaves in it
             return InitialCondition(mode="keep")
         return InitialCondition(mode="uniform", t_uniform=c_to_k(self.t_uniform.value()))
 
@@ -171,7 +165,7 @@ class AnalysisPanel(QWidget):
         for radio in (self.power_off, self.power_constant, self.power_schedule, self.power_csv):
             self.power_group.addButton(radio)
             panel.add_row(radio)
-        self.power_value = panel.add("Power", double_spin(10000.0, 0.0, 1e6, 1000.0, 0))
+        self.power_value = panel.add("Power", double_spin(5.0, 0.0, 1e6, 1.0, 2))
         self.power_unit = panel.add("Unit", combo(_POWER_UNITS, 1))
         self.schedule = QTableWidget(3, 2)
         self.schedule.setHorizontalHeaderLabels(["Time [s]", "Power [W]"])
@@ -221,22 +215,29 @@ class AnalysisPanel(QWidget):
 
     # --------------------------------------------------------- extraction
     def _build_extraction_tab(self) -> None:
+        """The exchanger on the gas circuit: what the discharge takes out of the gas."""
         panel = FormPanel()
         self.extract_off = QRadioButton("No extraction")
-        self.extract_power = QRadioButton("Target power")
-        self.extract_flow = QRadioButton("Fluid flow rate")
+        self.extract_power = QRadioButton("Exchanger power")
+        self.extract_return = QRadioButton("Exchanger return temperature")
         self.extract_group = QButtonGroup(self)
-        for radio in (self.extract_off, self.extract_power, self.extract_flow):
+        for radio in (self.extract_off, self.extract_power, self.extract_return):
             self.extract_group.addButton(radio)
             panel.add_row(radio)
-        self.extract_power_value = panel.add("Power [W]", double_spin(5000.0, 0.0, 1e7, 500.0, 0))
-        self.extract_flow_value = panel.add("Mass flow [kg/s]",
-                                            double_spin(0.1, 0.001, 100.0, 0.05, 3))
-        self.extract_t_inlet = panel.add("Inlet T [°C]", double_spin(20.0, -20.0, 400.0, 5.0, 1))
-        self.extract_h = panel.add("Tube h [W/(m²·K)]", double_spin(500.0, 10.0, 20000.0, 50.0, 0))
-        panel.add_hint("Target power is capped by what the tube surface can deliver "
-                       "(h·A·ΔT): the solver never extracts heat from a colder body.")
-        for radio in (self.extract_off, self.extract_power, self.extract_flow):
+        self.extract_power_value = panel.add("Power [kW]", double_spin(
+            5.0, 0.0, 100000.0, 1.0, 2,
+            tooltip="Heat the exchanger takes out of the gas: the loop solves the "
+                    "temperature the gas re-enters the bed at, and the run stops when "
+                    "the bed can no longer give that power"))
+        self.extract_return_t = panel.add("Return T [°C]", double_spin(
+            60.0, -20.0, 400.0, 5.0, 1,
+            tooltip="Temperature the exchanger returns the gas at (40-70 degC in the "
+                    "reference plants): the power is whatever the bed gives the gas, and "
+                    "the resistors are off"))
+        panel.add_hint("The exchanger sits on the gas circuit of Geometry > Gas circuit: "
+                       "the power profile heats the gas, the extraction cools it, and the "
+                       "loop carries the difference through the pipe walls.")
+        for radio in (self.extract_off, self.extract_power, self.extract_return):
             radio.toggled.connect(self._update_extraction_visibility)
         self.extract_off.setChecked(True)
         self._update_extraction_visibility()
@@ -245,21 +246,17 @@ class AnalysisPanel(QWidget):
     @safe_slot
     def _update_extraction_visibility(self) -> None:
         self.extract_power_value.setEnabled(self.extract_power.isChecked())
-        for widget in (self.extract_flow_value, self.extract_h):
-            widget.setEnabled(self.extract_flow.isChecked())
-        self.extract_t_inlet.setEnabled(not self.extract_off.isChecked())
+        self.extract_return_t.setEnabled(self.extract_return.isChecked())
 
     def extraction_profile(self) -> ExtractionProfile:
+        t_return = c_to_k(self.extract_return_t.value())
         if self.extract_power.isChecked():
-            return ExtractionProfile(mode="power", power=self.extract_power_value.value(),
-                                     t_inlet=c_to_k(self.extract_t_inlet.value()),
-                                     h_fluid=self.extract_h.value())
-        if self.extract_flow.isChecked():
-            return ExtractionProfile(mode="flow_rate",
-                                     mass_flow=self.extract_flow_value.value(),
-                                     t_inlet=c_to_k(self.extract_t_inlet.value()),
-                                     h_fluid=self.extract_h.value())
-        return ExtractionProfile(mode="off", t_inlet=c_to_k(self.extract_t_inlet.value()))
+            return ExtractionProfile(mode="power",
+                                     power=self.extract_power_value.value() * 1000.0,
+                                     t_inlet=t_return)
+        if self.extract_return.isChecked():
+            return ExtractionProfile(mode="return_temperature", t_inlet=t_return)
+        return ExtractionProfile(mode="off", t_inlet=t_return)
 
     # ------------------------------------------------------------ save/load
     def _build_save_tab(self) -> None:
@@ -268,9 +265,12 @@ class AnalysisPanel(QWidget):
         self.state_description = panel.add("Description", QLineEdit())
         panel.add_row(button("Save state (HDF5)", self._save_clicked))
         panel.add_row(button("Load state (HDF5)", self._load_clicked))
+        self.file_path = panel.add("State file", QLineEdit())
+        self.file_path.setReadOnly(True)
         self.state_info = panel.add("State", hint("no state loaded"))
         panel.add_hint("A saved state records the geometry hash: loading it into a "
-                       "different model is refused.")
+                       "different model is refused.  A loaded field is the start of the "
+                       "next transient with Initial condition > Current field.")
         self.tabs.addTab(panel, "Save / Load")
 
     save_requested = pyqtSignal(str, str)

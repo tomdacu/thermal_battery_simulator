@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-09-23 - the solver checked, the GUI cut to the plant
+
+Every item was measured before it was changed; the numbers are in the commits and in
+docs/12 §3 and §11.
+
+### Solver defects fixed
+
+| # | Defect | Evidence | Fix |
+|---|--------|----------|-----|
+| 1 | The octree rebuilt its face list at every request: a transient step cost seconds | 27 face-list builds in 4 steps, 2.2 s each on 25 000 leaves; 80 s for 4 steps | face list, sizes, centres and wall tables cached per tree state (`Octree.version`); matrix and Dirichlet elimination vectorised: 1.15 s for the same 4 steps, same answer |
+| 2 | The gas loop was coupled explicitly (its marched power a fixed source for the step): a pipe cell with a large exchange overshoots | the bed driven below 100 K in the cycle runs of 2026-09-21 | implicit film `q = G (T_gas - T_wall)` per pipe cell, the loop inlet solved with the field so each step deposits exactly the external power, the gas re-marched at the end of the step |
+| 3 | The steady and losses runs used the lumped tube model: a uniform source in the sand plus a fixed 500 W/(m2 K) film to a 60 degC "gas" on the pipes, so the pipes were a sink | default model: 967 W of the 5 kW left through the pipes, storage mean 110 degC instead of 150 | the steady state couples the loop (Picard + the balance held per sweep: 11 sweeps, exactly 5000 W into the bed) |
+| 4 | Painting the network zeroed the source in the pipe cells without rescaling it | 4758 W of the 5 kW | the remaining source is rescaled |
+| 5 | A transient left its loop sources and films on the mesh, and the next steady run solved them | a steady run after a 50 kW transient: sand at 4392 degC | every run sets the state it needs (the loop's film, or the lumped source repainted) |
+| 6 | The AMG hierarchy was keyed on the matrix object; the symmetrised operator is a new object every call | the hierarchy rebuilt at every transient step | keyed on the matrix content |
+| 7 | The thread setting only wrote environment variables, after BLAS was loaded | no effect | `threadpoolctl` |
+| 8 | The losses analysis rewrote the ground condition of the mesh and left it changed | the steady run after a losses run had a convective ground | `h_ground` defaults to 0 (the mesh's own ground) |
+| 9 | A pipe film on a box-face cell was dropped (a legacy of the lumped tubes) | risers reaching the box lost their end cells | the film is kept; pinned cells drop it on their own |
+| 10 | "Load a saved HDF5 state" as an initial condition read the `.h5` file with `np.load` | could not work | replaced by "Current field" (a state loaded in Save / Load, or the last run) |
+| 11 | The transient power default was 10 000 kW (value 10 000 in the kW unit) | – | 5 kW, the circuit's power |
+| 12 | The pipe cells were painted as solid tube material: a 94 mm cell of steel for a 50 mm pipe with a 2 mm wall | default network: 1.6 m3 of "pipe" steel for 0.05 m3 of real wall; a 24 h, 50 kW charge raised the sand by 18 K instead of 27 | the cells keep the bed's properties and carry the pipe's exchange |
+| 13 | The exchanger's delivered energy was `max(-net loop power, 0)`: zero whenever the resistors ran at the same time, and the explicit march estimate in the return-temperature mode | a 24 h discharge "delivered" 1344 kWh from 1137 kWh stored | the exchanger delivers its set power; in the return-temperature mode, the net exchange of the solved field |
+| 14 | The coupled steady state drifted from the resistors' power (60 sweeps, 2069 W of 5000 into the bed) | default model | the loop balance is held in every sweep: 11 sweeps, 5000.0 W |
+
+### GUI: what was removed, and why
+
+* The mesh is the octree only: the uniform and graded modes, the growth ratio, the
+  min/max cell rails and "search before building" are gone (`Mesh3D` stays in `src/` as
+  the reference of the equivalence tests).
+* Gas circuit: the "Source from bottom/top" offsets and "Return to the resistors"
+  (it silently ignored the power) are gone; a set return temperature is now an
+  extraction mode of the exchanger.
+* Pipes: the fixed "Gas h / Gas T" film and the graded-only "Junction refinement".
+* Materials: "h top / h lateral" (films on the box faces, which only touch excluded air)
+  and the second "Radiation" switch (never read); "Wind speed" feeds the outer film.
+* Extraction: "Fluid flow rate" and "Tube h" (ignored whenever the loop runs).
+* Cylinder: "Tubes/heaters phase" (read by nothing).
+* Solver: the method and preconditioner selectors - the GUI solves with CG + AMG
+  Ruge-Stuben, the fastest of the measured options, with the linear layer's own
+  fallbacks.
+* Added: the gas loop in the energy balance (inlet/outlet, bed power, NTU, pressure
+  drop, fan), the VTK export button, the outer film in the log.
+
 ## Refactor 2026 - correctness, modularisation, line reduction
 
 The code base was reviewed end to end (numerical audit against analytic

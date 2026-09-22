@@ -37,7 +37,7 @@ from ..core.mesh import MaterialID, Mesh3D
 from ..core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from .linear import PreconditionerCache, solve_linear
 from ..core.grid import GridIndex
-from .fluid import FluidLoop
+from .fluid import FluidLoop, hold_loop_balance
 from .matrix import build_transient_operators, transient_rhs
 from .results import TransientResults
 from .steady import SolverConfig
@@ -227,40 +227,16 @@ class TransientSolver:
     def _hold_loop_balance(self, a, linear) -> None:
         """Make the step deposit exactly the loop's external power (in place).
 
-        The march fixes the gas entering every cell from the walls of the previous
-        step, so the implicit film alone would deposit ``sum G (T_gas - T_new)``, which
-        drifts from the power the resistors put in as the bed warms within the step.
-        The loop inlet is therefore solved *with* the field: every ``T_gas`` moves with
-        ``T_in`` by its slope ``alpha``, the field by ``delta * y`` with ``A y = G alpha / V``,
-        and the one scalar ``delta`` that makes the deposit equal the external power closes
-        the loop's enthalpy balance on the new field - a Schur complement of one row, at
-        the cost of a second solve with the same (cached) operator.
+        See :func:`~src.solver.fluid.hold_loop_balance`: the loop inlet is solved with
+        the field, at the cost of one more solve with the same (cached) operator.
         """
-        result = self.fluid_result
-        if result is None or not result.balanced or result.conductance is None:
+        if self.fluid_result is None:
             return
-        g = result.conductance
-        pinned = pinned_cells(self.mesh, self.index)
-        cells = (g > 0.0) & ~pinned
-        if not cells.any():
-            return
-        volume = np.asarray(self.mesh.V, dtype=float).ravel(order="F")
-        alpha = result.gas_slope
-        e = np.zeros(g.size)
-        e[cells] = g[cells] * alpha[cells] / volume[cells]
-        y = solve_linear(a, e, self.solver_config, cache=self._cache, scale=self._scale).T
-        x = np.asarray(linear.T, dtype=float)
-        deposit = float(np.sum(g[cells] * (result.t_gas[cells] - x[cells])))
-        slope = float(np.sum(g[cells] * (alpha[cells] - y[cells])))
-        if slope <= 0.0:
-            return
-        delta = (float(result.external_power) - deposit) / slope
-        linear.T = x + delta * y
-        result.t_in += delta
-        result.t_gas = result.t_gas + np.where(cells, alpha * delta, 0.0)
-        t_inf = np.asarray(self.mesh.bc_T_inf, dtype=float).ravel(order="F").copy()
-        t_inf[cells] = result.t_gas[cells]
-        self.mesh.bc_T_inf = t_inf.reshape(np.shape(self.mesh.T), order="F")
+        linear.T = hold_loop_balance(
+            self.fluid_result, self.mesh, linear.T,
+            lambda e: solve_linear(a, e, self.solver_config, cache=self._cache,
+                                   scale=self._scale).T,
+            pinned_cells(self.mesh, self.index))
 
     # -------------------------------------------------------------------- run
     def run(self, progress_callback: Callable[[int, str], None] | None = None,
@@ -317,11 +293,7 @@ class TransientSolver:
             # of that step, or before the first one): its film is already on the mesh
             loop_used = loop is not None and self.fluid_result is not None
             if loop_used:
-                if cfg.extraction_profile.mode == "return_temperature":
-                    # the resistors are off: the gas comes back at a fixed temperature
-                    power = max(self.fluid_result.external_power, 0.0)
                 self.fluid_fan_energy += self.fluid_result.fan_power * step_dt
-                self.fluid_delivered += max(-self.fluid_result.external_power, 0.0) * step_dt
             if not loop_used:
                 self._set_power(power)
                 self._set_extraction(t)
@@ -352,6 +324,19 @@ class TransientSolver:
             d_e = balance.e_stored - e_prev
             balance.imbalance = (balance.p_input - balance.p_extracted - balance.q_domain
                                  - d_e / step_dt)
+            if loop_used:
+                if cfg.extraction_profile.mode == "return_temperature":
+                    # the gas comes back at a set temperature and the resistors are off:
+                    # the exchanger takes what the bed gave the gas *on the solved field*
+                    # (the march's own estimate is explicit in the wall temperature and
+                    # overstates a hot start), or heats the gas when the bed is colder
+                    net = balance.p_extracted - balance.p_input
+                    self.fluid_delivered += max(net, 0.0) * step_dt
+                    power = max(-net, 0.0)
+                else:
+                    # the balance is held: the exchanger takes exactly what it asked for
+                    self.fluid_delivered += (cfg.extraction_profile.power_request(t)
+                                             * step_dt)
             e_in += power * step_dt
             e_out += balance.p_extracted * step_dt
             e_loss += balance.q_battery * step_dt

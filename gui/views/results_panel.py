@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtWidgets import QFileDialog, QTabWidget, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import (QFileDialog, QHBoxLayout, QTabWidget, QTextEdit, QVBoxLayout,
+                             QWidget)
 
 from src.analysis.balance import compute_balance
 from src.constants import T_AMBIENT_DEFAULT
@@ -18,6 +20,9 @@ MONO = "font-family: Consolas, monospace; font-size: 11px;"
 class ResultsPanel(QWidget):
     """Read-only report tabs; every number is computed by ``src.analysis``."""
 
+    #: the window owns the mesh, so it writes the field export
+    export_requested = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -28,7 +33,11 @@ class ResultsPanel(QWidget):
         self.materials_text = self._add_tab("Materials")
         self.transient_text = self._add_tab("Transient")
         self.log_text = self._add_tab("Log", size=10)
-        layout.addWidget(button("Export time series to CSV...", self._export_csv))
+        row = QHBoxLayout()
+        row.addWidget(button("Export time series (CSV)...", self._export_csv))
+        row.addWidget(button("Export field (VTK)...", self.export_requested.emit,
+                             "Every leaf and every field, for ParaView"))
+        layout.addLayout(row)
 
     def _add_tab(self, title: str, size: int = 11) -> QTextEdit:
         view = QTextEdit()
@@ -47,10 +56,13 @@ class ResultsPanel(QWidget):
     # ---------------------------------------------------------- statistics
     def update_statistics(self, mesh) -> None:
         storage = mesh.material_id == 1
-        field_c = mesh.T - 273.15
+        # the air around the vessel is excluded from the problem and held at the ambient:
+        # it is not part of the battery and would only dilute the statistics
+        active = ~np.asarray(mesh.excluded, dtype=bool)
+        field_c = np.asarray(mesh.T)[active] - 273.15
         lines = [
             "=== Temperature (degC) ===",
-            f"whole domain   min {field_c.min():8.2f}   max {field_c.max():8.2f}   "
+            f"battery        min {field_c.min():8.2f}   max {field_c.max():8.2f}   "
             f"mean {field_c.mean():8.2f}   std {field_c.std():7.2f}",
         ]
         if storage.any():
@@ -69,7 +81,7 @@ class ResultsPanel(QWidget):
 
     # ------------------------------------------------------- energy balance
     def update_energy(self, mesh, losses=None, transient=None, ambient=None,
-                      radiation: bool = False) -> None:
+                      radiation: bool = False, loop=None) -> None:
         # the ambient of the *run* (the ground and the air are inputs, not defaults)
         # and the same radiation switch the solver used, or the fluxes shown would
         # not be the fluxes that were solved
@@ -77,13 +89,13 @@ class ResultsPanel(QWidget):
                                   radiation=radiation)
         lines = [
             "=== Power balance ===",
-            f"input (heaters)     {balance.p_input / 1000:9.3f} kW",
-            f"extracted (fluid)   {balance.p_extracted / 1000:9.3f} kW",
+            f"input (gas -> bed)  {balance.p_input / 1000:9.3f} kW",
+            f"extracted (bed->gas){balance.p_extracted / 1000:9.3f} kW",
             f"losses (envelope)   {balance.q_battery / 1000:9.3f} kW",
             f"    top             {balance.q_battery_top / 1000:9.3f} kW",
             f"    side            {balance.q_battery_side / 1000:9.3f} kW",
             f"    bottom          {balance.q_battery_bottom / 1000:9.3f} kW",
-            f"losses (box faces)  {balance.q_domain / 1000:9.3f} kW",
+            f"losses (all paths)  {balance.q_domain / 1000:9.3f} kW",
             f"imbalance           {balance.imbalance / 1000:9.3f} kW",
             "",
             "=== Stored energy ===",
@@ -96,12 +108,23 @@ class ResultsPanel(QWidget):
         if balance.q_battery > 0:
             hours = balance.e_stored / balance.q_battery / 3600.0
             lines.append(f"thermal autonomy    {hours:9.1f} h")
+        if loop is not None:
+            lines += [
+                "",
+                "=== Gas loop ===",
+                f"gas in / out        {k_to_c(loop.t_in):9.1f} / {k_to_c(loop.t_out):.1f} degC",
+                f"bed power           {loop.power / 1000:9.3f} kW",
+                f"NTU (mean)          {loop.ntu:9.2f}",
+                f"pressure drop       {loop.delta_p / 1000:9.3f} kPa",
+                f"fan power           {loop.fan_power / 1000:9.3f} kW "
+                f"({100 * loop.circulation_loss:.2f} % of the bed power)",
+            ]
         if losses is not None:
             lines += [
                 "",
                 "=== Losses analysis ===",
                 f"converged           {losses.converged} ({losses.iterations} iterations)",
-                f"required power      {losses.power / 1000:9.3f} kW",
+                f"resistors' power    {losses.power / 1000:9.3f} kW",
                 f"power density       {losses.power_density:9.1f} W/m³",
             ]
         if transient is not None and len(transient):

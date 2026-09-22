@@ -35,25 +35,27 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 ### Core Simulation
 - **Cell-centred finite volume / FDM** solver for the heat equation
   (`src/solver/matrix.py`)
-- **Steady-state and transient analysis** with a backward Euler implicit scheme
-- **Iterative losses analysis** with a secant update of the heater power
-- **Solver methods**: direct LU, CG, BiCGSTAB, GMRES (`src/solver/linear.py`);
-  the GUI starts at **BiCGSTAB + Jacobi**, the plateaued `LinearConfig` default is
-  direct LU, and the automatic mesh search uses CG + AMG Ruge-Stuben
-- **Preconditioners**: none, Jacobi, ILU, AMG Ruge-Stuben, AMG smoothed
-  aggregation (PyAMG); the AMG hierarchy is cached while the matrix is unchanged
+- **Steady-state and transient analysis** with a backward Euler implicit scheme,
+  both driven by the **gas loop**: the resistors heat the gas and the gas heats the bed
+  through the pipe walls, coupled implicitly and with the loop balance held per step
+- **Iterative losses analysis** with a secant update of the resistors' power
+- **Linear solver**: conjugate gradients + AMG (Ruge-Stuben) on the volume-symmetrised
+  operator - the fastest option measured on the default model, and the only one the GUI
+  uses; `src/solver/linear.py` also offers direct LU, BiCGSTAB, GMRES and the Jacobi,
+  ILU and smoothed-aggregation preconditioners, and falls back by itself (BiCGSTAB on a
+  non-symmetric operator, Jacobi without PyAMG); the AMG hierarchy is cached while the
+  matrix content is unchanged
 - **CPU only**: the GPU backends were removed (see `CHANGELOG.md`)
 - **Vectorised NumPy matrix assembly** (no JIT dependency, reference-tested)
 
 ### Geometry Modeling
-- **Cartesian 3D mesh** with flexible dimensions (Lx, Ly, Lz)
+- **Adaptive octree mesh** refined on the active model (sand, insulation, shell, pipe
+  bundle); the air around the vessel is excluded and replaced by an outer film
 - **Cylindrical storage region** centered in domain
 - **Multi-layer insulation**: radial, top, and bottom slabs
 - **Optional conical roof** for realistic industrial designs
-- **Six heater patterns** (`HeaterPattern`): uniform zone (default), vertical
-  grid, checkerboard, radial array, spiral, concentric rings
-- **Six heat-exchanger tube patterns** (`TubePattern`): central cluster, radial
-  array (default), grid, hexagonal, single central, custom
+- **The gas circuit**: electric power, gas (air / nitrogen / steam), mass flow,
+  pressure, blower efficiency, wall roughness
 - **Buried pipe networks** (`src/core/pipes.py`, `src/core/pipe_network.py`):
   layouts (staggered bundle, square grid, concentric rings, radial files and a
   spiral), four collection modes (distributor + collector, reverse return, central
@@ -61,9 +63,10 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
   headers, voxelisation of the network, hydraulics and the gas loop built from it -
   configured from the *Geometry > Pipes* tab, documented in
   [docs/15](docs/15_PIPE_NETWORKS.md)
-- **Graded mesh from physical targets** plus an **automatic mesh search** that
-  refines until the steady answer stops moving (`src/core/refinement.py`,
-  `src/analysis/convergence.py`)
+- **A priori mesh plan from physical targets** plus an **automatic mesh search** that
+  refines the tree until the steady answer stops moving (`src/analysis/mesh_plan.py`,
+  `src/analysis/convergence.py`); the graded Cartesian grid (`Mesh3D`,
+  `src/core/refinement.py`) stays in `src/` as the reference of the equivalence tests
 
 ### Materials & Physics
 - **Built-in material database**: steatite, silica sand, olivine, basalt,
@@ -93,8 +96,11 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
   the energy decomposition in `src/analysis/cycle.py`
 
 ### Transient Analysis
-- **Power profiles**: off, constant, a time schedule, or a CSV file
-- **Extraction profiles**: off, a fixed power, or a fluid flow rate
+- **Power profiles** (the resistors): off, constant, a time schedule, or a CSV file
+- **Extraction** (the exchanger on the circuit): off, a set power, or a set return
+  temperature of the gas
+- **Initial condition**: uniform, per material, the current field (chain a discharge
+  after a charge, or start from a loaded state), or the steady solution
 - **State save/load**: HDF5 format with geometry hash verification
 - **Time-series results** with CSV export (full fields can be saved per sample for ParaView)
 
@@ -108,15 +114,15 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 
 ### User Interface
 - **PyQt6 GUI** with a left column of four tabs - *1. Geometry* (Cylinder,
-  Insulation, Heaters, Tubes, Mesh, Pipes), *2. Materials* (Storage, Insulation,
+  Insulation, Gas circuit, Pipes, Mesh), *2. Materials* (Storage, Insulation,
   Conditions), *3. Analysis* (Type, Initial condition, Power, Extraction,
   Save/Load), *4. Tools* (Solver, Losses, Help)
 - **Threaded simulation** - responsive UI during computation, cancellable
-- **Results panel**: Statistics, Energy balance, Materials, Transient, Log
+- **Results panel**: Statistics, Energy balance (with the gas loop), Materials,
+  Transient, Log
 - **Save/Load simulation states** in HDF5 format
-- **Exports**: the time-series CSV from the results panel; `src/viz/scene.py`
-  provides `export_csv` / `export_vtk` field export for scripts (the window
-  slots `export_vtk` / `export_csv_field` exist but are not wired to a button)
+- **Exports**: the time series to CSV and the field to VTK (`.vtu`, ParaView), both
+  from the results panel
 
 ---
 
@@ -182,8 +188,7 @@ Where each piece lives (every path is in this repository):
 | index tables and cached face factors | `src/core/grid.py` |
 | face conductances (harmonic mean, half cell, radiation) | `src/core/physics.py` |
 | material database and packed-bed model | `src/core/materials.py` |
-| vessel, heater and tube configuration, voxel painting | `src/core/geometry.py` |
-| hairpin (U-shaped) heater bank and rasteriser | `src/core/heaters.py` |
+| vessel and plant-power configuration, voxel painting | `src/core/geometry.py` |
 | graded grid from physical targets | `src/core/refinement.py` |
 | buried pipes and pipe networks | `src/core/pipes.py`, `src/core/pipe_network.py` |
 | outside film without an air domain | `src/core/environment.py` |
@@ -253,32 +258,29 @@ python run_gui.py
 
 ### Basic Workflow
 
-1. **Configure Geometry** (*1. Geometry* tab, six sub-tabs)
+1. **Configure Geometry** (*1. Geometry* tab, five sub-tabs)
    - *Cylinder*: domain (Lx, Ly, Lz), centre, storage radius and height, roof
    - *Insulation*: radial insulation, steel shell, bottom/top slabs, foundation
-   - *Heaters*: total power (**5 kW** by default), pattern and element geometry
-   - *Tubes*: heat-exchanger tubes (inactive by default)
-   - *Mesh*: refined targets or a uniform cell size, plus *Find the mesh*
-   - *Pipes*: buried pipe-network layout, collection mode and ducts
+   - *Gas circuit*: total power (**5 kW** by default), gas, mass flow, pressure, blower
+   - *Pipes*: buried pipe-network layout, collection mode, tube and ducts
+   - *Mesh*: cells across the regions, cell budget, plus *Find the mesh*
 
 2. **Set Materials** (*2. Materials* tab)
    - *Storage*: medium (steatite by default) and packing fraction (63 %)
    - *Insulation*: insulation and shell material
-   - *Conditions*: ambient 20 °C, ground 10 °C, `h_top` 10, `h_lateral` 5, radiation
+   - *Conditions*: ambient 20 °C, ground 10 °C, wind speed
 
 3. **Configure Analysis** (*3. Analysis* tab)
    - *Type*: steady state, losses analysis, transient
-   - *Initial condition*: uniform, per material, from an HDF5 state, or from steady
-   - *Power* / *Extraction*: the transient profiles
+   - *Initial condition*: uniform, per material, the current field, or from steady
+   - *Power* / *Extraction*: the resistors and the exchanger of the transient
    - *Save / Load*: HDF5 state with a geometry hash
 
-4. **Configure Solver** (*4. Tools > Solver*)
-   - Method (BiCGSTAB by default), preconditioner (Jacobi), tolerance, iterations
-   - Threads (BLAS/OpenMP budget), radiation switch
-   - *Tools > Losses*: the iteration controls of the losses analysis
+4. **Solver** (*4. Tools > Solver*): tolerance, iterations, threads, radiation; the
+   method is CG + AMG. *Tools > Losses*: the iteration controls of the losses analysis
 
 5. **Build & Run**
-   - *Build mesh* (runs the automatic mesh search first when it is enabled)
+   - *Build mesh* builds the octree and paints the battery and the pipe network
    - *Run* (the button text follows the selected analysis)
    - *Cancel* stops a running job at its next checkpoint
 
@@ -307,49 +309,25 @@ The battery uses a **4-zone concentric structure**:
 - `shell_thickness`: Steel shell [m]
 - `height`: Total battery height [m]
 
-### Heater Patterns
+### The gas circuit
 
-Six patterns (`HeaterPattern.ALL`), all of them rated by the surface power density
-in W/cm² (3-8 for a sheathed element in a solid medium):
-
-| Pattern | Description | Notes |
-|---------|-------------|-------|
-| **Uniform zone** (default) | Power spread over the whole storage volume | no discrete element |
-| **Vertical grid** | A `grid_rows` x `grid_cols` bank of hairpins | regular layout |
-| **Checkerboard** | The same `grid_rows` x `grid_cols` bank | the name survives from the rod-heater era; with hairpins it is the grid layout |
-| **Radial array** | Elements distributed on `n_rings` concentric rings | ring count from the circumference and the leg spacing |
-| **Spiral** | A rectangular bank sized from `n_heaters` (about `sqrt(n)` x `sqrt(n)`) | |
-| **Concentric rings** | Elements on `n_rings` concentric rings | pairs with the tube rings |
-
-A discrete pattern is a bank of flanged **hairpin (U-shaped) elements** with a
-Ø12 mm stainless sheath, an active length in the sand and a cold shank through the
-insulation (`src/core/heaters.py`).  Whatever the pattern, $\sum Q V$ equals the
-total power exactly, and layouts the mesh cannot represent are refused (see
-[docs/03](docs/03_GEOMETRY.md) §3).
-
-### Tube Patterns
-
-Six patterns, all painted inside the storage band with the shell material and the
-internal convection of `h_fluid` / `t_fluid` ([docs/03](docs/03_GEOMETRY.md) §4):
-
-| Pattern | Description | Notes |
-|---------|-------------|-------|
-| **Central cluster** | Group at the centre | small units |
-| **Radial array** (default) | Rings of `n_tubes` tubes | large units |
-| **Grid** | `grid_rows` x `grid_cols`, spacing `grid_spacing` | regular layouts |
-| **Hexagonal** | Dense triangular packing | maximum wetted area |
-| **Single central** | One central tube | check runs |
-| **Custom** | Explicit positions | scripted studies |
+The resistors are not in the bed: they heat the gas of a closed circuit, the gas runs
+through the buried network and hands the heat to the sand across the pipe walls, and
+on discharge an exchanger on the same circuit takes it back out.  The *Gas circuit* tab
+holds the circuit (power, gas, mass flow, pressure, blower, roughness) and reports the
+**surface power** of the tube wall - the total power over the network's wetted area -
+against the 3-8 W/cm² window of a heated tube.  The film of every pipe cell is computed
+by the loop from the flow, the gas and the bore, in every analysis.
 
 ### Mesh
 
-The *Mesh* sub-tab builds the grid from **physical targets** (cells across the
-storage radius, the insulation and the sheath; far-field size; growth ratio; cell
-budget) and summarises the realised grid live.  *Find the mesh* runs the automatic
-search: the same steady solve on progressively finer grids, stopping when the
-storage mean temperature and the heat leaving the battery move by less than the
-tolerances.  The uniform mode (one cell size everywhere) is still available and is
-what the legacy comparisons use.
+The *Mesh* sub-tab builds an **octree** from physical targets (cells across the storage
+radius, the insulation and the tube; the cell budget sets the finest leaf) and each
+region takes the finer of that count and the a priori plan (`thickness/N`, `2k/h`).  Only
+the active model is refined; the air around the vessel is excluded.  *Find the mesh*
+runs the automatic search: the coupled steady solve on progressively finer trees,
+stopping when the storage mean temperature and the heat leaving the battery move by less
+than the tolerances.
 
 ### Buried pipes
 
@@ -385,7 +363,7 @@ checked - is in **[docs/12_METHODS.md](docs/12_METHODS.md)**.  The short version
 ### Why is simulation slow?
 
 Computation time depends on:
-- **Number of cells**: $N = N_x \times N_y \times N_z$ (100×100×100 = 1 million cells!)
+- **Number of cells**: the leaves of the octree (the cell budget bounds them)
 - **Solver method**: Direct methods are O(N^1.5), iterative are O(N)
 - **Tolerance**: Tighter tolerances require more iterations
 
@@ -398,21 +376,20 @@ for measured numbers on this repository's development machine).
 
 | Scenario | Method | Preconditioner | Tolerance |
 |----------|--------|----------------|-----------|
-| Quick test | `bicgstab` | `jacobi` | 1e-4 |
-| Visualization | `bicgstab` | `jacobi` | 1e-6 |
-| Standard precision | `bicgstab` | `jacobi` | 1e-8 (GUI default) |
-| Large graded meshes | `cg` | `amg_rs` (PyAMG) | 1e-8 |
+| Every GUI analysis | `cg` | `amg_rs` (PyAMG) | 1e-8 (GUI default) |
+| Scripts without PyAMG | `cg` | `jacobi` | 1e-8 |
 | Reference answers, small meshes | `direct` | - | - |
 
-The GUI opens at **BiCGSTAB + Jacobi, tolerance 1e-8, threads "All - 1"**; the
-automatic mesh search solves with **CG + AMG Ruge-Stuben** because the graded operator
-is symmetrised before the solve.
+The GUI solves every analysis with **CG + AMG Ruge-Stuben, tolerance 1e-8, threads
+"All - 1"**: the operator is symmetrised by the cell volumes before the solve.  Measured
+on the default model (143 396 leaves, steady): CG + AMG RS 1.8 s, CG + Jacobi 2.8 s,
+CG + AMG SA 5.6 s, BiCGSTAB + Jacobi 6.3 s, all within 1e-4 K of a direct solve.
 
 ### Solver Methods
 
 | Method | Description | When to Use |
 |--------|-------------|-------------|
-| **bicgstab** | BiCGSTAB | the GUI default; robust on the general (non-symmetric) operator |
+| **bicgstab** | BiCGSTAB | robust on a general (non-symmetric) operator; the automatic fallback of CG |
 | **cg** | Conjugate Gradient | symmetric systems only - refused with a note on anything else |
 | **gmres** | GMRES | alternative for difficult systems, more memory per iteration |
 | **direct** | Sparse LU | reference answers and small meshes; memory grows fast (see `scripts/benchmark.py`) |
@@ -426,10 +403,10 @@ is symmetrised before the solve.
 
 | Precond. | Description | Performance |
 |----------|-------------|-------------|
-| **jacobi** | Diagonal | the GUI default: multi-threaded and cheap |
+| **jacobi** | Diagonal | multi-threaded and cheap; the fallback without PyAMG |
 | **none** | None | pure CG, often surprisingly fast |
 | **ilu** | Incomplete LU | single-threaded (SuperLU), can be slow |
-| **amg_rs** | AMG Ruge-Stuben (PyAMG) | best for large systems; the hierarchy is cached while the matrix is unchanged |
+| **amg_rs** | AMG Ruge-Stuben (PyAMG) | the GUI's choice: a handful of iterations at any size; the hierarchy is cached while the matrix is unchanged |
 | **amg_sa** | AMG smoothed aggregation (PyAMG) | alternative coarse-grid choice |
 
 > **Important**: the AMG hierarchy is the dominant setup cost.  It is rebuilt only when
@@ -460,8 +437,9 @@ is symmetrised before the solve.
 
 ### Practical Tips
 
-1. **Start with small meshes** for quick tests
-2. **Use BiCGSTAB + Jacobi** (the default) unless you know the system is symmetric
+1. **Start with a small cell budget** for quick tests
+2. **The time step is an accuracy choice, not a stability limit**: the gas-bed coupling
+   is implicit, so an hour-long step is stable; halve it to see whether the answer moves
 3. **Refine the mesh** only for final results - the automatic mesh search does it for you
 4. **Tolerance 1e-6** is sufficient for visualization
 5. **Check the energy balance** to validate results
@@ -509,8 +487,7 @@ battery_simulation/
 │   │   ├── grid.py            # GridIndex: neighbour tables and cached face factors
 │   │   ├── physics.py         # harmonic mean, half-cell film, radiation coefficient
 │   │   ├── materials.py       # material database + packed-bed model
-│   │   ├── geometry.py        # cylinder/heater/tube config + voxel painting
-│   │   ├── heaters.py         # hairpin bank, rasteriser, surface-power check
+│   │   ├── geometry.py        # vessel config, voxel painting, outer film
 │   │   ├── refinement.py      # bands -> graded grid (ramp + density equidistribution)
 │   │   ├── octree.py          # balanced octree, conservative faces, its own Laplacian
 │   │   ├── pipes.py           # pipe runs, rasterisation, bank layouts
@@ -609,17 +586,15 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # Run the test suite (no display, no GPU needed)
-python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # the fast suite (300 cases)
-python -m pytest tests/ -q                                    # + the GUI control sweep (311)
+python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # without the GUI sweep (375 cases)
+python -m pytest tests/ -q                                    # + the GUI control sweep (386)
 python -m ruff check src tests gui --select F,E9,B,SIM,UP      # lint
 ```
 
-Measured on this working tree (2026-09-20, `python -m pytest tests/ --collect-only -q`):
-**300 tests** without `tests/test_gui_sweep.py` and **311** in total, the sweep
-contributing 11.  The suite runs head-less; `tests/test_gui_sweep.py` is the slow one.
-The count moves while work is in flight: the same command said 270/259 earlier in the same
-session and 295/284 in between, as the octree solver, the pipe-network extension and the cycle
-completion landed.  Re-run the command instead of trusting the number.
+Measured on this working tree (2026-09-23, `python -m pytest tests/ --collect-only -q`):
+**375 tests** without `tests/test_gui_sweep.py` and **386** in total; the whole suite
+passes in about two minutes, head-less.  The count moves while work is in flight:
+re-run the command instead of trusting the number.
 
 One case is a **machine-speed assertion** rather than a physics test
 (`tests/test_octree.py::test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_under_a_second`,
@@ -630,8 +605,8 @@ while everything else passes.
 - [ ] Additional export formats
 - [ ] Editable material database in GUI
 - [ ] 2D temporal evolution plots
-- [ ] The octree solver as the mesh of the main solver (`src/core/octree.py` is
-      standalone today - see [docs/13](docs/13_REDESIGN.md))
+- [ ] Gas properties that follow the gas temperature along the loop (they are evaluated
+      once today - see [docs/12](docs/12_METHODS.md) §11)
 
 ---
 

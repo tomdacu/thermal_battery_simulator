@@ -67,11 +67,8 @@ def window(app):
     from gui.main_window import ThermalBatteryGUI
 
     win = ThermalBatteryGUI()
-    win.geometry_panel.refined.setChecked(False)   # small uniform mesh
-    # the automatic mesh search is the GUI default but it is a background
-    # solve: the tests build the grid they configure, not the one it finds
-    win.geometry_panel.auto_first.setChecked(False)
-    win.geometry_panel.spacing.setValue(0.5)
+    # the smallest budget the Mesh tab offers: the coarsest tree the GUI can build
+    win.geometry_panel.max_cells.setValue(10_000)
     win.build_mesh()
     yield win
     win.close()
@@ -79,8 +76,6 @@ def window(app):
 
 def widgets(panel):
     for name in sorted(vars(panel)):
-        if name == "auto_first":
-            continue        # sweeping it would launch the background mesh search
         widget = getattr(panel, name)
         if isinstance(widget, (QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QRadioButton)):
             yield name, widget
@@ -127,10 +122,9 @@ def test_every_panel_getter_survives_extreme_widget_values(window):
     _sweep_all_widgets(window)
     # the sweep drives every spin box to its maximum: keep the mesh affordable so the
     # run kinds below stay a smoke test
-    window.geometry_panel.max_cells.setValue(200_000)
+    window.geometry_panel.max_cells.setValue(10_000)
     window.geometry_panel.cells_storage.setValue(6)
     window.geometry_panel.cells_sheath.setValue(1)
-    window.geometry_panel.refined.setChecked(False)
     for panel in (window.geometry_panel, window.materials_panel,
                   window.analysis_panel, window.solver_panel):
         try:
@@ -138,7 +132,7 @@ def test_every_panel_getter_survives_extreme_widget_values(window):
                 panel.domain(), panel.cylinder(), panel.heaters()
             elif panel is window.materials_panel:
                 (panel.storage_key(), panel.insulation_key(), panel.shell_key(),
-                 panel.packing_fraction(), panel.conditions(), panel.radiation_enabled())
+                 panel.packing_fraction(), panel.conditions())
             elif panel is window.analysis_panel:
                 panel.analysis_type(), panel.initial_condition()
                 panel.power_profile(), panel.extraction_profile()
@@ -161,8 +155,7 @@ def restore_sane_configuration(window) -> None:
     """Put the panels back into a configuration that must assemble without errors."""
     geometry, analysis, materials = (window.geometry_panel, window.analysis_panel,
                                      window.materials_panel)
-    geometry.refined.setChecked(False)
-    geometry.spacing.setValue(0.5)
+    geometry.max_cells.setValue(10_000)
     geometry.domain_lx.setValue(6.0)
     geometry.domain_ly.setValue(6.0)
     geometry.domain_lz.setValue(5.6)
@@ -171,8 +164,9 @@ def restore_sane_configuration(window) -> None:
     geometry.base_z.setValue(0.3)
     geometry.insulation_thickness.setValue(0.3)
     geometry.power.setValue(50.0)
+    geometry.flow.setValue(0.5)
     analysis.power_constant.setChecked(True)
-    analysis.power_value.setValue(10000.0)
+    analysis.power_value.setValue(10.0)
     analysis.power_unit.setCurrentIndex(1)
     analysis.radio_uniform.setChecked(True)
     analysis.extract_off.setChecked(True)
@@ -206,18 +200,17 @@ def test_every_profile_mode_builds_or_explains_itself(window):
             # an incomplete mode must say *what* is missing, never fail silently
             message = str(exc).lower()
             assert "schedule" in message or "csv" in message
-    for radio in (panel.extract_off, panel.extract_power, panel.extract_flow):
+    for radio in (panel.extract_off, panel.extract_power, panel.extract_return):
         radio.setChecked(True)
-        profile = panel.extraction_profile()
-        assert profile.validate() == [] or radio is panel.extract_flow
-    for radio in (panel.radio_uniform, panel.radio_by_material, panel.radio_from_file,
+        assert panel.extraction_profile().validate() == []
+    for radio in (panel.radio_uniform, panel.radio_by_material, panel.radio_current,
                   panel.radio_from_steady):
         radio.setChecked(True)
-        if radio is panel.radio_from_file:
-            with pytest.raises((ValueError, FileNotFoundError)):
-                panel.initial_condition().apply_to_mesh(window.mesh)
-        else:
-            panel.initial_condition()
+        condition = panel.initial_condition()
+        assert condition.validate(window.mesh) == []
+        if radio is panel.radio_current:
+            # the current field: the transient starts from what the mesh holds
+            assert condition.apply_to_mesh(window.mesh) is None
     panel.radio_uniform.setChecked(True)
     panel.power_constant.setChecked(True)
     panel.extract_off.setChecked(True)
@@ -251,7 +244,6 @@ def test_three_d_view_renders_every_field_with_a_headless_plotter(window):
 
 
 def test_action_buttons_do_not_raise(window):
-    window.geometry_panel.auto_first.setChecked(False)
     window.build_mesh()
     window.preview_geometry()
     window._update_mesh_info()
@@ -261,21 +253,18 @@ def test_action_buttons_do_not_raise(window):
     window.results.log("sweep")
 
 
-def test_the_refined_mesh_mode_builds_a_graded_grid(window):
-    """The panel targets become the grid: fine storage, a coarse cap outside."""
+def test_the_mesh_tab_builds_a_refined_tree(window):
+    """The panel targets become the tree: fine leaves in the vessel, coarse ones outside."""
     panel = window.geometry_panel
-    panel.refined.setChecked(True)
     panel.cells_storage.setValue(6)
     panel.cells_insulation.setValue(2)
     panel.cells_sheath.setValue(1)
-    panel.max_cells.setValue(60_000)
+    panel.max_cells.setValue(10_000)
     mesh = panel.build_mesh()
-    assert not mesh.uniform
-    assert mesh.dx.min() < mesh.dx.max()
-    # the summary describes the grid that was built, whatever it says
-    assert str(mesh.N_total)[:2] in panel.mesh_info.text().replace(",", "")
-    panel.refined.setChecked(False)
-    assert panel.build_mesh().uniform
+    assert len(mesh.level_histogram()) > 1
+    assert mesh.sizes.min() < mesh.sizes.max()
+    # the summary describes the tree that was built
+    assert f"{mesh.n_cells:,}" in panel.mesh_info.text()
 
 
 def test_every_run_kind_executes_through_the_controller(window):

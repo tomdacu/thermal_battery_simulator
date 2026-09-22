@@ -320,6 +320,21 @@ The GUI now shows the architecture of §1 and not the one of the old code:
   actor built from the centrelines, so the pipes that carry the heat are visible next to
   the vessel they are buried in.
 
+## 5c. Every analysis runs the plant (2026-09-23)
+
+* **The coupling is implicit and exact.**  The loop hands every pipe cell its exact
+  exchange as a film `G (T_gas - T_wall)`, `G = m_dot c_p (1 - e^-NTU)`, and the loop
+  inlet is solved with the field, so a step (or a steady sweep) deposits exactly the
+  external power ([12](12_METHODS.md) §11).  The explicit coupling it replaces was the
+  source of the sub-100 K beds of the earlier cycle runs.
+* **Steady and losses couple the loop** (`SteadyStateSolver(fluid_loop=...)`): the power
+  enters through the pipe walls.  The fixed pipe film of the paint is gone.
+* **The GUI shows the plant only**: octree mesh, Gas circuit, Pipes, an exchanger with a
+  set power or a set return temperature; the controls of the old models are removed
+  (list in `CHANGELOG.md`).
+* **The linear solver is CG + AMG Ruge-Stuben** everywhere in the GUI (measurements in
+  [12](12_METHODS.md) §3).
+
 ## 6. Migration order
 
 | # | Step | State |

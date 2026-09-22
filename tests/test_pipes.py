@@ -616,8 +616,9 @@ def test_the_paint_marks_the_pipes_inside_the_vessel_and_keeps_the_area():
     assert mesh.bc_h[tubes].max() == pytest.approx(350.0, rel=1e-12)
     assert np.all(mesh.bc_T_inf[tubes] == pytest.approx(333.15, rel=1e-12))
     assert mesh.boundary_type[tubes].max() == int(BoundaryType.CONVECTION)
+    # the cell stays what it was (a thin pipe in the bed): the box is air here
     assert mesh.rho[tubes].min() == pytest.approx(
-        MaterialManager().get(config.material).rho, rel=1e-12)
+        MaterialManager().get("air").rho, rel=1e-12)
     assert float(np.abs(mesh.Q_source[tubes]).sum()) == 0.0
     assert not mesh.source_mask[tubes].any()
     assert report.material == config.material
@@ -652,8 +653,9 @@ def test_the_paint_marks_the_pipes_of_a_tree_inside_the_vessel_and_keeps_the_are
     assert mesh.bc_h[tubes].max() == pytest.approx(350.0, rel=1e-12)
     assert np.all(mesh.bc_T_inf[tubes] == pytest.approx(333.15, rel=1e-12))
     assert mesh.boundary_type[tubes].max() == int(BoundaryType.CONVECTION)
+    # the cell stays what it was (a thin pipe in the bed): the box is air here
     assert mesh.rho[tubes].min() == pytest.approx(
-        MaterialManager().get(config.material).rho, rel=1e-12)
+        MaterialManager().get("air").rho, rel=1e-12)
     assert float(np.abs(mesh.Q_source[tubes]).sum()) == 0.0
     assert not mesh.source_mask[tubes].any()
     assert report.material == config.material

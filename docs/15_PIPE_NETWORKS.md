@@ -246,15 +246,17 @@ collection the path-weighted split *is* the equal one - see section 4.
 
 * the centrelines are re-rasterised on `mesh` (the same accounting as `voxelize`) and
   every cell whose **centre** is inside the vessel - `r <= radius`,
-  `base_z <= z <= roof_z` - becomes `MaterialID.TUBES`.  That entry of the material
-  table is the pipe one and the lumped tube bank uses it too, so a mesh never carries
-  two kinds of tube, and the thermal properties written there are the tube material's;
+  `base_z <= z <= roof_z` - becomes `MaterialID.TUBES` and **keeps the properties it
+  had** (the bed's): a pipe of a few centimetres is a thin wall inside a cell of sand.
+  Until 2026-09-23 the whole cell was painted with the tube material, which put ~30 times
+  the real steel of the default network into the bed (1.6 m³ for 0.05 m³ of wall);
 * a tube cell is never a heater: its volumetric source is cleared and its
   `source_mask` bit dropped;
-* every cell that exchanges gets the convective link to the gas
-  (`mesh.set_internal_convection`): the risers always, the headers and the ducts only
-  when they are not lagged, so `insulated_headers=True` leaves the header cells as
-  bare steel in the sand with no film;
+* every cell that exchanges is marked convective, and the gas loop writes its film per
+  cell in every analysis ([12](12_METHODS.md) §11): the risers always, the headers and
+  the ducts only when they are not lagged, so `insulated_headers=True` leaves the header
+  cells with no film.  The paint writes no film value by default (`h_fluid=0`); a fixed
+  `h_fluid`/`t_fluid` is the lumped tube model and is kept only for a caller that asks;
 * the report says what happened and keeps the area honest:
 
 ```text
@@ -588,9 +590,10 @@ Reading it:
   `1 / n_sectors` of the flow and the `ring` mode every ring main
   `1 / n_groups`, with the taps of a ring dividing that share - and an empty sector is
   refused with the parameter to change;
-* `paint()` marks only cells whose centre is inside the vessel, writes `TUBES` with the
-  tube material's properties, clears the sources, gives the riser cells the film and
-  the lagged header cells none, and keeps `painted + dropped = total_area`;
+* `paint()` marks only cells whose centre is inside the vessel, writes `TUBES` and keeps
+  the bed's properties, clears the sources (rescaling the lumped source over the rest),
+  marks the riser cells convective and the lagged header cells not, and keeps
+  `painted + dropped = total_area`;
 * `hydraulics()` adds the tube to the arcs and the ducts, prices the shared pipes with
   the bore, and its `mean_drop` is exactly the loop's `delta_p` (fittings included);
 * `fluid_loop()` marches one run per branch with the network's split and the bore's

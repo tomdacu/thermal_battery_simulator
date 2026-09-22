@@ -22,6 +22,7 @@ import numpy as np
 
 from ..core.mesh import Mesh3D
 from ..units import check_kelvin
+from .fluid import hold_loop_balance
 from .linear import LinearConfig, PreconditionerCache, set_num_threads, solve_linear
 from .matrix import GridIndex, build_steady_matrix
 
@@ -148,17 +149,36 @@ class SteadyStateSolver:
             self.index = GridIndex.from_mesh(self.mesh)
 
     def _sweep(self, x: np.ndarray, notes: list) -> tuple[np.ndarray, float, bool]:
-        """One assembly + linear solve of the current state, on either mesh."""
+        """One assembly + linear solve of the current state, on either mesh.
+
+        Both meshes go through the same linear layer with the solver's own cache, so a
+        sweep that leaves the operator unchanged (the gas loop only moves the film
+        temperatures, on the right-hand side) reuses the AMG hierarchy.  With a loop whose
+        inlet follows its balance, the sweep deposits exactly the loop's external power
+        (:func:`~src.solver.fluid.hold_loop_balance`), so the Picard iteration only has to
+        settle how the gas distributes it along the pipes.
+        """
         if self.adaptive:
-            step = self.mesh.solve_steady(self.config, x0=x)
-            notes.extend(n for n in step.notes if n not in notes)
-            return np.asarray(step.T, dtype=float), float(step.residual), bool(step.converged)
-        matrix, rhs = build_steady_matrix(self.mesh, index=self.index,
-                                          radiation=self.config.radiation)
+            matrix, rhs = self.mesh.assemble(radiation=self.config.radiation)
+            scale = self.mesh.volume_scale()
+        else:
+            matrix, rhs = build_steady_matrix(self.mesh, index=self.index,
+                                              radiation=self.config.radiation)
+            scale = self._scale
         result = solve_linear(matrix, rhs, self.config, x0=x, cache=self._cache,
-                              scale=self._scale)
+                              scale=scale)
         notes.extend(n for n in result.notes if n not in notes)
-        return result.T, result.residual, result.converged
+        field = np.asarray(result.T, dtype=float)
+        if self.fluid_result is not None:
+            # imported here: the analysis package imports this module
+            from ..analysis.fluxes import pinned_cells
+
+            field = hold_loop_balance(
+                self.fluid_result, self.mesh, field,
+                lambda e: solve_linear(matrix, e, self.config, cache=self._cache,
+                                       scale=scale).T,
+                pinned_cells(self.mesh, self.index))
+        return field, result.residual, result.converged
 
     def temperature_stats(self, T_flat: np.ndarray = None) -> dict[str, float]:
         values = np.asarray(self.mesh.T if T_flat is None else T_flat, dtype=float)

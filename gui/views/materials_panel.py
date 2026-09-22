@@ -48,13 +48,15 @@ class MaterialsPanel(QWidget):
         conditions = FormPanel()
         self.t_ambient = conditions.add("Ambient [°C]", double_spin(20.0, -40.0, 80.0, 1.0, 1))
         self.t_ground = conditions.add("Ground [°C]", double_spin(10.0, -20.0, 60.0, 1.0, 1))
-        self.h_top = conditions.add("h top [W/(m²·K)]", double_spin(10.0, 0.0, 200.0, 1.0, 1))
-        self.h_lateral = conditions.add("h lateral [W/(m²·K)]",
-                                        double_spin(5.0, 0.0, 200.0, 1.0, 1))
-        self.radiation = conditions.add("Radiation", combo((("Model off", False),
-                                                            ("Model on (linearised)", True))))
+        self.wind = conditions.add("Wind speed [m/s]", double_spin(
+            0.0, 0.0, 30.0, 0.5, 1,
+            tooltip="Forced part of the outer film, 4 + 4 v (ISO 6946), added to the "
+                    "natural convection of the vessel (Churchill-Chu)"))
         conditions.add_hint("These are the only ambient/ground values used: they feed "
-                            "BatteryGeometry and every analysis, including the losses run.")
+                            "BatteryGeometry and every analysis.  The outer surface of the "
+                            "vessel exchanges with the ambient through a film computed "
+                            "from the correlations (the log reports it after a build); "
+                            "the radiative share is switched on in Tools > Solver.")
         self.tabs.addTab(conditions, "Conditions")
         self.refresh_info()
 
@@ -81,13 +83,9 @@ class MaterialsPanel(QWidget):
     def packing_fraction(self) -> float:
         return self.packing.value() / 100.0
 
-    def radiation_enabled(self) -> bool:
-        return bool(self.radiation.currentData())
-
     def conditions(self) -> dict[str, float]:
         return {
             "t_ambient": c_to_k(self.t_ambient.value()),
             "t_ground": c_to_k(self.t_ground.value()),
-            "h_top": self.h_top.value(),
-            "h_lateral": self.h_lateral.value(),
+            "wind_speed": self.wind.value(),
         }

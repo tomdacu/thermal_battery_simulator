@@ -133,6 +133,48 @@ def test_the_energy_balance_closes_with_the_loop_driving():
     # here: it equals p_input while the bed is heating up)
 
 
+def test_a_return_temperature_discharge_delivers_what_the_bed_loses():
+    """The exchanger returns the gas at a set temperature: it gets what the bed gives.
+
+    An adiabatic bed has nowhere else to put its heat, so the energy the exchanger
+    received is the drop of the stored energy - on a long step too, where the march's
+    own estimate (explicit in the wall temperature) would overstate a hot start.
+    """
+    from src.analysis.balance import compute_balance
+
+    mesh, _, loop = bed_with_loop()
+    config = TransientConfig(t_final=6 * 3600.0, dt=3600.0,
+                             power_profile=PowerProfile(mode="off"),
+                             extraction_profile=ExtractionProfile(
+                                 mode="return_temperature", t_inlet=330.0),
+                             fluid_loop=loop,
+                             initial_condition=InitialCondition(mode="uniform",
+                                                                t_uniform=600.0))
+    solver = TransientSolver(mesh, config, SOLVER_CONFIG)
+    solver.run()
+    # the bed starts uniform, so its stored energy is its capacity times the rise
+    stored_start = float(np.sum(mesh.rho * mesh.cp * mesh.V)) * (600.0 - T_AMBIENT_DEFAULT)
+    stored_end = compute_balance(mesh, index=solver.index).e_stored
+    assert solver.fluid_delivered > 0.0
+    assert solver.fluid_delivered == pytest.approx(stored_start - stored_end, rel=1e-3)
+
+
+def test_the_exchanger_delivers_its_power_while_the_resistors_run():
+    """Charging and discharging at once: the exchanger still takes what it asked for."""
+    mesh, _, loop = bed_with_loop()
+    config = TransientConfig(t_final=1800.0, dt=600.0,
+                             power_profile=PowerProfile(mode="constant",
+                                                        constant_power=20_000.0),
+                             extraction_profile=ExtractionProfile(mode="power",
+                                                                  power=5_000.0),
+                             fluid_loop=loop,
+                             initial_condition=InitialCondition(mode="uniform",
+                                                                t_uniform=500.0))
+    solver = TransientSolver(mesh, config, SOLVER_CONFIG)
+    solver.run()
+    assert solver.fluid_delivered == pytest.approx(5_000.0 * 1800.0, rel=1e-9)
+
+
 # --------------------------------------------------------------------- the cycle
 
 

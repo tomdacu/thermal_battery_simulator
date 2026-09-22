@@ -112,7 +112,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .materials import MaterialManager
 from .mesh import BoundaryType, MaterialID, Mesh3D
 from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULAR,
                     PITCH_VERTICAL, PipeRun, box_size, cell_centres, flat_cells,
@@ -1201,9 +1200,10 @@ class PipeNetwork:
 
         The cells the centrelines cross and whose centre falls inside the vessel become
         :data:`~src.core.mesh.MaterialID.TUBES` - the entry of the material table that
-        *is* a pipe, the same one the lumped tube bank uses, so a mesh never carries
-        two kinds of tube - with the thermal properties of the tube material of the
-        configuration and no volumetric source.  Every cell that exchanges then carries
+        *is* a pipe - with no volumetric source, and **with the thermal properties they
+        had**: a pipe of a few centimetres is a thin wall inside a cell of the bed, so the
+        cell stays bed (its capacity and conductivity are the sand's) and carries the
+        pipe's exchange with the gas.  Every cell that exchanges then carries
         the convective link to the gas (``h_fluid``, ``t_fluid``): the risers always,
         the headers and the ducts only when they are not lagged.
 
@@ -1231,9 +1231,12 @@ class PipeNetwork:
         painted = cells[inside]
         mask = self._cell_mask(mesh, painted)
         riser_mask = self._cell_mask(mesh, riser_cells[riser_inside])
-        props = MaterialManager().get(self.config.material)
+        # the cell keeps the bed's k, rho and cp: a pipe is a thin wall inside a cell of
+        # sand, not a cell of steel.  Painting the whole cell with the tube material put
+        # ~30 times the real steel of the default network into the bed (1.6 m3 of
+        # "pipe" for 0.05 m3 of wall), which soaked up the charge and conducted along the
+        # risers; the wall's own capacity is a few percent of the cell's and is dropped
         mesh.material_id[mask] = int(MaterialID.TUBES)
-        mesh.k[mask], mesh.rho[mask], mesh.cp[mask] = props.k, props.rho, props.cp
         power = float(np.sum(mesh.Q_source * mesh.V))
         mesh.Q_source[mask] = 0.0
         mesh.source_mask[mask] = False
