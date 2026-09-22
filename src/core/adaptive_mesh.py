@@ -59,12 +59,11 @@ from ..constants import (CP_AIR, EPS, K_AIR, RHO_AIR, T_AMBIENT_DEFAULT,
                          T_GROUND_DEFAULT, T_INITIAL_DEFAULT)
 from ..solver.linear import LinearConfig, LinearResult, solve_linear
 from ..solver.matrix import apply_dirichlet, environment_film, face_conductance
-from ..solver.octree_solver import (_NOISE_FLOOR, OctreeSteadySolver, _mark,
-                                     wall_cells)
+from ..solver.octree_solver import _NOISE_FLOOR, OctreeSteadySolver, _mark
 from ..units import check_kelvin
 from .mesh import FACES, BoundaryType, FaceBC
 from .mesh_api import FaceRow, is_interior_tube
-from .octree import Leaf, Octree, uniform_tree
+from .octree import FACE_AXIS, FACE_SIGN, Leaf, Octree, uniform_tree
 from .physics import half_cell_h
 
 #: the per-leaf fields :meth:`AdaptiveMesh.refine` carries to the new leaves
@@ -454,13 +453,9 @@ class AdaptiveMesh:
         excluded leaf carries no physics, so where the two rules meet the placeholder
         wins and both meshes hold the same field.
         """
-        fixed = {int(position): float(bc.value)
-                 for face, bc in self.face_bc.items()
-                 if bc.kind == BoundaryType.DIRICHLET
-                 for position in self.wall_indices(face)}
-        fixed.update({int(position): float(self.t_ambient)
-                      for position in np.flatnonzero(self.excluded)})
-        return fixed
+        mask, values = self._fixed_arrays()
+        return {int(position): float(values[position])
+                for position in np.flatnonzero(mask)}
 
     def fixed_mask(self) -> np.ndarray:
         """``(n_cells,)`` mask of the leaves the Dirichlet elimination pins.
@@ -470,9 +465,7 @@ class AdaptiveMesh:
         exchange with it - a film on it, a source deposited in it - never reaches the
         solution and the reports must not count it.
         """
-        mask = np.zeros(self.tree.n_cells, dtype=bool)
-        mask[list(self.fixed_leaves())] = True
-        return mask
+        return self._fixed_arrays()[0]
 
     def _fixed_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         """``(mask, values)`` of the pinned leaves, in the form the elimination takes.
@@ -483,9 +476,14 @@ class AdaptiveMesh:
         """
         mask = np.zeros(self.tree.n_cells, dtype=bool)
         values = np.zeros(self.tree.n_cells)
-        for position, value in self.fixed_leaves().items():
-            mask[position] = True
-            values[position] = value
+        for face, bc in self.face_bc.items():
+            if bc.kind == BoundaryType.DIRICHLET:
+                positions = self.wall_indices(face)
+                mask[positions] = True
+                values[positions] = float(bc.value)
+        # the excluded leaves are applied last: where the two rules meet the ambient wins
+        mask |= self.excluded
+        values[self.excluded] = float(self.t_ambient)
         return mask, values
 
     def wall_indices(self, face: str) -> np.ndarray:
@@ -494,9 +492,39 @@ class AdaptiveMesh:
         The leaves are the ones :func:`src.solver.octree_solver.wall_cells` names - the set
         a face condition drives - and the positions are what the flat per-leaf arrays use.
         """
-        positions = {leaf: index for index, leaf in enumerate(self.tree.leaves)}
-        return np.array([positions[leaf] for leaf in wall_cells(self.tree, face)],
-                        dtype=int)
+        self._check_face(face)
+        return self._tree_tables()["walls"][face]
+
+    def _tree_tables(self) -> dict:
+        """Per-tree tables every assembly reads: the wall leaves and the face geometry.
+
+        They depend on the leaves alone, so they are built once per tree state (keyed on
+        :attr:`Octree.version`, which every mutation bumps) instead of once per call: a
+        transient step asks for them several times, and rebuilding the face list each
+        time was what made a step cost seconds on a tree of a few ten thousand leaves.
+        """
+        cache = getattr(self, "_tables", None)
+        if cache is not None and cache["version"] == self.tree.version:
+            return cache
+        n = self.tree.n
+        corners = np.array([(leaf.x, leaf.y, leaf.z) for leaf in self.tree.leaves],
+                           dtype=np.int64).reshape(-1, 3)
+        edge = self.tree.cell_sizes().astype(np.int64)
+        walls = {}
+        for face in FACES:
+            axis = FACE_AXIS[face]
+            touching = (corners[:, axis] == 0 if FACE_SIGN[face] < 0
+                        else corners[:, axis] + edge == n)
+            walls[face] = np.flatnonzero(touching).astype(int)
+        faces = self.tree.face_array()
+        i = faces[:, 0].astype(int)
+        j = faces[:, 1].astype(int)
+        cache = {"version": self.tree.version, "walls": walls, "i": i, "j": j,
+                 "axis": faces[:, 2].astype(int),
+                 "area": faces[:, 3] * self.physical_size ** 2,
+                 "distance": faces[:, 4] * self.physical_size}
+        self._tables = cache
+        return cache
 
     def centre(self, position: int) -> tuple[float, float, float]:
         """Centre of one leaf in physical coordinates [m]."""
@@ -641,11 +669,9 @@ class AdaptiveMesh:
         else ``g == g_base``, which is what keeps this mesh's flux report equal to the
         octree solver's.
         """
-        faces = np.asarray(self.tree.faces(), dtype=float).reshape(-1, 5)
-        i = faces[:, 0].astype(int)
-        j = faces[:, 1].astype(int)
-        area = faces[:, 3] * self.physical_size ** 2
-        distance = faces[:, 4] * self.physical_size
+        tables = self._tree_tables()
+        i, j = tables["i"], tables["j"]
+        area, distance = tables["area"], tables["distance"]
         g_base = face_conductance(self.k[i], self.k[j], area, distance,
                                   size_a=self.sizes[i], size_b=self.sizes[j],
                                   material_a=self.material_id[i],
@@ -655,7 +681,7 @@ class AdaptiveMesh:
                              size_a=self.sizes[i], size_b=self.sizes[j],
                              material_a=self.material_id[i], material_b=self.material_id[j],
                              h_contact=self.h_contact, excluded_b=excluded)
-        return _FaceTable(i=i, j=j, axis=faces[:, 2].astype(int), area=area,
+        return _FaceTable(i=i, j=j, axis=tables["axis"], area=area,
                           distance=distance, g_base=g_base, g=g)
 
     def face_conductances(self, faces: _FaceTable | None = None) -> np.ndarray:

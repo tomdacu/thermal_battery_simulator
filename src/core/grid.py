@@ -56,7 +56,7 @@ class GridIndex:
     flat: np.ndarray                     # (N,) node ids in Fortran order
     neighbours: tuple[np.ndarray, ...]   # (W, E, S, N, D, U) node ids
     on_face: dict[str, np.ndarray]       # bool mask per domain face
-    interior_tube: np.ndarray            # CONVECTION cells strictly inside the box
+    interior_tube: np.ndarray            # CONVECTION cells (the fluid film), box faces included
     #: cell size along each axis broadcast to every node and flattened (Fortran):
     #: the assembly and the flux integrals need it on every face, so it is built once
     sizes: tuple[np.ndarray, np.ndarray, np.ndarray]
@@ -140,11 +140,10 @@ class GridIndex:
             "y_min": jj == 0, "y_max": jj == ny - 1,
             "z_min": kk == 0, "z_max": kk == nz - 1,
         }
-        exposed = np.logical_or.reduce(list(on_face.values()))
         tube = mesh.boundary_type.ravel(order="F") == BoundaryType.CONVECTION
         sizes = tuple(mesh.axis_size(axis).ravel(order="F") for axis in range(3))
         areas = tuple((mesh.Ax, mesh.Ay, mesh.Az)[axis].ravel(order="F")
                       for axis in range(3))
         return cls(flat=flat, neighbours=neighbours, on_face=on_face,
-                   interior_tube=tube & ~exposed, sizes=sizes, areas=areas,
+                   interior_tube=tube, sizes=sizes, areas=areas,
                    volume=mesh.V.ravel(order="F"))

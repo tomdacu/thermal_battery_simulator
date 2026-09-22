@@ -310,7 +310,7 @@ def apply_dirichlet(a: sparse.csr_matrix, b: np.ndarray, mask: np.ndarray,
                     values: np.ndarray) -> sparse.csr_matrix:
     """Impose ``T = value`` on the rows selected by ``mask``.
 
-    Returns the modified matrix (``to_csc``/``tocsr`` copy, so the caller must
+    Returns a new CSR matrix (the input is not modified, so the caller must
     keep the result).
 
     Symmetric elimination: the known contribution is moved to the right-hand side
@@ -321,28 +321,27 @@ def apply_dirichlet(a: sparse.csr_matrix, b: np.ndarray, mask: np.ndarray,
     mask = np.asarray(mask, dtype=bool)
     if not mask.any():
         return a.tocsr()
-    a_csc = a.tocsc()
-    indptr, indices, data = a_csc.indptr, a_csc.indices, a_csc.data
-    for col in np.flatnonzero(mask):
-        start, stop = indptr[col], indptr[col + 1]
-        rows = indices[start:stop]
-        keep = rows != col
-        if keep.any():
-            b[rows[keep]] -= data[start:stop][keep] * values[col]
-        data[start:stop] = 0.0
-
-    a_csr = a_csc.tocsr()
+    values = np.asarray(values, dtype=float)
+    a_csr = a.tocsr(copy=True)
     a_csr.sort_indices()
-    row_ptr, row_idx, row_data = a_csr.indptr, a_csr.indices, a_csr.data
-    for row in np.flatnonzero(mask):
-        start, stop = row_ptr[row], row_ptr[row + 1]
-        row_data[start:stop] = 0.0
-        pos = start + int(np.searchsorted(row_idx[start:stop], row))
-        if pos < stop and row_idx[pos] == row:
-            row_data[pos] = 1.0
-        else:
-            a_csr[row, row] = 1.0
-    b[mask] = np.asarray(values, dtype=float)[mask]
+    row = np.repeat(np.arange(a_csr.shape[0]), np.diff(a_csr.indptr))
+    col, data = a_csr.indices, a_csr.data
+    # the known columns move to the right-hand side of the free rows
+    moved = mask[col] & ~mask[row]
+    if moved.any():
+        np.subtract.at(b, row[moved], data[moved] * values[col[moved]])
+    # pinned rows and columns are zeroed *in place*: the sparsity pattern is kept, so a
+    # direct factorisation orders the matrix exactly as before the elimination
+    data[mask[row] | mask[col]] = 0.0
+    on_diagonal = (row == col) & mask[row]
+    data[on_diagonal] = 1.0
+    missing = np.setdiff1d(np.flatnonzero(mask), row[on_diagonal])
+    if missing.size:
+        # a pinned row without a stored diagonal: add it
+        a_csr = (a_csr + sparse.csr_matrix((np.ones(missing.size), (missing, missing)),
+                                           shape=a_csr.shape)).tocsr()
+        a_csr.sort_indices()
+    b[mask] = values[mask]
     return a_csr
 
 

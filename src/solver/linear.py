@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import weakref
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -24,6 +23,11 @@ try:
 except Exception:  # pragma: no cover
     pyamg = None
     HAS_PYAMG = False
+
+try:
+    from threadpoolctl import threadpool_limits
+except Exception:  # pragma: no cover
+    threadpool_limits = None
 
 METHODS = ("direct", "cg", "bicgstab", "gmres")
 PRECONDITIONERS = ("none", "jacobi", "ilu", "amg", "amg_rs", "amg_sa")
@@ -70,7 +74,12 @@ class LinearResult:
 
 
 def set_num_threads(n_threads: int) -> int:
-    """Set the BLAS/OMP thread budget; 0 = all cores, -1 = all but one."""
+    """Set the BLAS/OMP thread budget; 0 = all cores, -1 = all but one.
+
+    The environment variables only reach a library that has not been loaded yet; NumPy's
+    BLAS is loaded by the time a solver runs, so the running pools are limited through
+    ``threadpoolctl`` as well - without it the setting did nothing.
+    """
     n_cpu = os.cpu_count() or 1
     if n_threads == 0:
         actual = n_cpu
@@ -81,6 +90,8 @@ def set_num_threads(n_threads: int) -> int:
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS"):
         os.environ[var] = str(actual)
+    if threadpool_limits is not None:
+        threadpool_limits(limits=actual)
     return actual
 
 
@@ -108,7 +119,6 @@ class PreconditionerCache:
 
     def __init__(self) -> None:
         self._key: str | None = None
-        self._matrix_ref = None
         self._object = None
 
     def get(self, a: sparse.csr_matrix, cfg: LinearConfig, notes: list[str]):
@@ -124,13 +134,16 @@ class PreconditionerCache:
             notes.append("pyamg not installed: falling back to Jacobi preconditioner")
             return PreconditionerCache.get(self, a, _jacobi_cfg(cfg), notes)
 
+        # the key is the *content* of the matrix: the symmetrised operator of a graded
+        # mesh is a new object at every call, and keying on the object rebuilt the
+        # hierarchy - the dominant cost - at every step of a transient
         key = f"{cfg.preconditioner}:{fingerprint(a)}"
-        if key == self._key and self._matrix_ref is not None and self._matrix_ref() is a:
+        if key == self._key:
             notes.append("reusing cached AMG hierarchy")
             return self._object
         kind = "smoothed_aggregation_solver" if cfg.preconditioner == "amg_sa" else "ruge_stuben_solver"
         solver = getattr(pyamg, kind)(a, max_coarse=500, max_levels=10)
-        self._key, self._matrix_ref, self._object = key, weakref.ref(a), solver.aspreconditioner()
+        self._key, self._object = key, solver.aspreconditioner()
         return self._object
 
 
@@ -220,7 +233,12 @@ def _solve_iterative(a, b, cfg: LinearConfig, x0, cache, notes, scale=None) -> L
                      "switched to bicgstab")
         method = "bicgstab"
     m = (cache or PreconditionerCache()).get(a, cfg, notes)
-    kwargs = dict(rtol=cfg.tolerance, maxiter=cfg.max_iterations, M=m)
+    count = [0]
+
+    def counter(*_args) -> None:
+        count[0] += 1
+
+    kwargs = dict(rtol=cfg.tolerance, maxiter=cfg.max_iterations, M=m, callback=counter)
     if x0 is not None:
         kwargs["x0"] = x0
     if method == "cg":
@@ -228,7 +246,7 @@ def _solve_iterative(a, b, cfg: LinearConfig, x0, cache, notes, scale=None) -> L
     elif method == "bicgstab":
         x, info = splinalg.bicgstab(a, b, **kwargs)
     else:
-        x, info = splinalg.gmres(a, b, **kwargs)
+        x, info = splinalg.gmres(a, b, callback_type="pr_norm", **kwargs)
     residual = _relative_residual(a, b, x)
     converged = info == 0 and np.isfinite(residual) and residual <= max(cfg.tolerance * 20, 1e-6)
     if not converged and not np.isfinite(residual):
@@ -237,8 +255,8 @@ def _solve_iterative(a, b, cfg: LinearConfig, x0, cache, notes, scale=None) -> L
     elif not converged:
         notes.append(f"{method} reached info={info} after {cfg.max_iterations} iterations "
                      f"(residual {residual:.2e})")
-    return LinearResult(x, converged, int(cfg.max_iterations if not converged else 0),
-                        residual, f"{method} + {cfg.preconditioner}", notes)
+    return LinearResult(x, converged, int(count[0]), residual,
+                        f"{method} + {cfg.preconditioner}", notes)
 
 
 def _relative_residual(a, b, x) -> float:

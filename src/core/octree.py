@@ -153,6 +153,14 @@ class Octree:
         """
         self.leaves = sorted(set(leaves))
         self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
+        #: bumped by every mutation: consumers key their per-tree caches on it
+        self.version = getattr(self, "version", 0) + 1
+        # the face list is a function of the leaves alone: computed once per tree state
+        # (every mutation ends here), because a transient asks for it several times a step
+        self._faces: list[tuple[int, int, int, float, float]] | None = None
+        self._face_array: np.ndarray | None = None
+        self._sizes: np.ndarray | None = None
+        self._centres: np.ndarray | None = None
         by_level: list[dict[tuple[int, int, int], int]] = [
             {} for _ in range(self.max_level + 1)]
         for index, leaf in enumerate(self.leaves):
@@ -340,11 +348,16 @@ class Octree:
     # ------------------------------------------------------------------ view
     def cell_centres(self) -> np.ndarray:
         """(n_cells, 3) centres in finest-cell units."""
-        return np.array([leaf.centre for leaf in self.leaves], dtype=float)
+        if self._centres is None:
+            self._centres = np.array([leaf.centre for leaf in self.leaves],
+                                     dtype=float).reshape(-1, 3)
+        return self._centres.copy()
 
     def cell_sizes(self) -> np.ndarray:
         """Edge length of every leaf, in finest-cell units."""
-        return np.array([leaf.size for leaf in self.leaves], dtype=float)
+        if self._sizes is None:
+            self._sizes = np.array([leaf.size for leaf in self.leaves], dtype=float)
+        return self._sizes.copy()
 
     def level_histogram(self) -> dict[int, int]:
         counts: dict[int, int] = {}
@@ -371,6 +384,8 @@ class Octree:
         units, so the caller multiplies by the physical cell size to get metres.  The tree
         must be 2:1 balanced - every mutation in this class ends in `balance`.
         """
+        if self._faces is not None:
+            return self._faces
         out: list[tuple[int, int, int, float, float]] = []
         for index, leaf in enumerate(self.leaves):
             for face in FACES:
@@ -384,7 +399,19 @@ class Octree:
                     side = min(leaf.size, neighbour.size)
                     out.append((index, other, axis, float(side * side),
                                 0.5 * (leaf.size + neighbour.size)))
+        self._faces = out
         return out
+
+    def face_array(self) -> np.ndarray:
+        """:meth:`faces` as one ``(n_faces, 5)`` float array, cached with the list.
+
+        Columns ``i, j, axis, area, distance`` in finest-cell units.  The array is shared
+        and read-only: callers index it and never write into it.
+        """
+        if self._face_array is None:
+            self._face_array = np.asarray(self.faces(), dtype=float).reshape(-1, 5)
+            self._face_array.setflags(write=False)
+        return self._face_array
 
     # ------------------------------------------------------------------ assembly  # noqa: E501
     def diffusion_matrix(self, conductivity: np.ndarray | None = None,
@@ -398,25 +425,26 @@ class Octree:
         """
         n = self.n_cells
         k = np.ones(n) if conductivity is None else np.asarray(conductivity, dtype=float)
-        rows, cols, vals = [], [], []
+        faces = self.face_array()
+        i = faces[:, 0].astype(np.int64)
+        j = faces[:, 1].astype(np.int64)
+        k_face = 2.0 * k[i] * k[j] / (k[i] + k[j] + EPS)
+        # area in metres^2, distance in metres, volume in metres^3
+        a_face = faces[:, 3] * physical_size ** 2
+        d_centers = faces[:, 4] * physical_size
+        volume = (self.cell_sizes() * physical_size) ** 3
+        coeff_i = k_face * a_face / (d_centers * volume[i])
+        coeff_j = k_face * a_face / (d_centers * volume[j])
+        # face by face, (i, j) interleaved: the summation order of the per-face loop this
+        # replaced, so the operator is the same to the last bit
+        pair_rows = np.column_stack((i, j)).ravel()
+        pair_cols = np.column_stack((j, i)).ravel()
+        pair_vals = np.column_stack((coeff_i, coeff_j)).ravel()
         diagonal = np.zeros(n)
-        for i, j, _axis, area, distance in self.faces():
-            k_face = 2.0 * k[i] * k[j] / (k[i] + k[j] + EPS)
-            # area in metres^2, distance in metres, volume in metres^3
-            a_face = area * physical_size ** 2
-            d_centers = distance * physical_size
-            v_i = (float(self.leaves[i].size) * physical_size) ** 3
-            v_j = (float(self.leaves[j].size) * physical_size) ** 3
-            coeff_i = k_face * a_face / (d_centers * v_i)
-            coeff_j = k_face * a_face / (d_centers * v_j)
-            rows.extend((i, j))
-            cols.extend((j, i))
-            vals.extend((-coeff_i, -coeff_j))
-            diagonal[i] += coeff_i
-            diagonal[j] += coeff_j
-        rows.extend(range(n))
-        cols.extend(range(n))
-        vals.extend(diagonal)
+        np.add.at(diagonal, pair_rows, pair_vals)
+        rows = np.concatenate((pair_rows, np.arange(n)))
+        cols = np.concatenate((pair_cols, np.arange(n)))
+        vals = np.concatenate((-pair_vals, diagonal))
         return sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
 
     def solve(self, source: np.ndarray, conductivity: np.ndarray | None = None,

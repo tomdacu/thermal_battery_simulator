@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..core.mesh import Mesh3D
+from ..core.mesh import BoundaryType, MaterialID, Mesh3D
 from ..core.pipes import PipeRun
 
 
@@ -85,7 +85,8 @@ class Fluid:
         return Fluid(name=self.name, cp=self.cp, rho=self.rho * t_ref / t,
                      mu=self.mu * (t / t_ref) ** 1.5 * (t_ref + sutherland)
                      / (t + sutherland),
-                     k=self.k * (t / t_ref) ** 0.8, pr=self.pr)
+                     k=self.k * (t / t_ref) ** 0.8, pr=self.pr,
+                     molar_mass=self.molar_mass)
 
 
 def pipe_h(mass_flow: float, diameter: float, fluid: Fluid) -> float:
@@ -177,6 +178,16 @@ class FluidResult:
     power: float = 0.0                  # [W] into the solid
     external_power: float = 0.0         # [W] from the resistors (+) / to the exchanger (-)
     q_fluid: np.ndarray | None = None   # [W/m^3] source term for the solid, + = in
+    #: per cell, the exchange as the solid solver takes it: ``q = G (T_gas - T_wall)``
+    #: with ``G = m_dot c_p (1 - e^-NTU)`` [W/K] summed over the runs that cross the cell
+    #: and ``T_gas`` the conductance-weighted temperature the gas *enters* the cell at
+    conductance: np.ndarray | None = None
+    t_gas: np.ndarray | None = None
+    #: ``d T_gas / d T_in`` per cell (conductance-weighted): how the gas entering a cell
+    #: follows the loop inlet, which is what lets a solver hold the loop balance exactly
+    gas_slope: np.ndarray | None = None
+    #: True when ``t_in`` was solved from the loop balance (not prescribed)
+    balanced: bool = False
     delta_p: float = 0.0                # [Pa] pressure drop of the circuit
     fan_power: float = 0.0              # [W] shaft power of the blower
     pressure: float = 101325.0          # [Pa] loop pressure
@@ -205,6 +216,46 @@ class FluidResult:
     @property
     def ntu(self) -> float:
         return float(np.mean([run.ntu for run in self.runs])) if self.runs else 0.0
+
+    def apply(self, mesh) -> np.ndarray:
+        """Write the exchange onto the mesh as an implicit film on the pipe cells.
+
+        The march gives every crossed cell the exact exchange
+        ``q = G (T_gas - T_wall)``: ``T_gas`` depends on the cells *upstream*, the local
+        term on the cell's own wall.  Handing the solid solver ``G`` and ``T_gas`` as a
+        convective film - ``bc_h = G V^(1/3) / V`` so that the assembled coefficient is
+        ``G / V`` - keeps the local exchange implicit in the wall temperature, which is
+        what makes the coupling stable at any time step; depositing the marched ``q`` as
+        a fixed source (the explicit coupling it replaces) let a cell with a large
+        ``G`` over its heat capacity overshoot and oscillate, down to below 100 K on a
+        long step.  At a converged coupling (the steady Picard loop) the two are the same
+        number.
+
+        The pipe cells the march does not cross (the headers) keep no film, and the lumped
+        bed source is cleared: with the loop, the gas is the only heat path.  Returns the
+        mask of the cells that carry the film.
+        """
+        if self.conductance is None:
+            raise ValueError("the loop result carries no per-cell exchange")
+        shape = np.shape(mesh.T)
+        volume = np.asarray(mesh.V, dtype=float).ravel(order="F")
+        h_char = np.asarray(mesh.h_char, dtype=float).ravel(order="F")
+        bc_h = np.asarray(mesh.bc_h, dtype=float).ravel(order="F").copy()
+        bc_t = np.asarray(mesh.bc_T_inf, dtype=float).ravel(order="F").copy()
+        kind = np.asarray(mesh.boundary_type).ravel(order="F").copy()
+        tube = np.asarray(mesh.material_id).ravel(order="F") == int(MaterialID.TUBES)
+        active = self.conductance > 0.0
+        bc_h[tube] = 0.0
+        bc_h[active] = self.conductance[active] * h_char[active] / volume[active]
+        bc_t[active] = self.t_gas[active]
+        kind[active] = int(BoundaryType.CONVECTION)
+        mesh.bc_h = bc_h.reshape(shape, order="F")
+        mesh.bc_T_inf = bc_t.reshape(shape, order="F")
+        mesh.boundary_type = kind.reshape(shape, order="F").astype(
+            np.asarray(mesh.boundary_type).dtype)
+        mesh.Q_source = np.zeros(shape)
+        mesh.Q_sink = np.zeros(shape)
+        return active.reshape(shape, order="F")
 
     def summary(self) -> str:
         return (f"loop: T_in {self.t_in:.1f} K -> T_out {self.t_out:.1f} K, "
@@ -281,8 +332,8 @@ class FluidLoop:
                 continue
             mc = m_dot * fluid.cp
             count = run.cells.size
-            # columns: in_a, in_b, out_a, out_b, mean_a, mean_b
-            coeff = np.empty((count, 6), dtype=float)
+            # columns: in_a, in_b, out_a, out_b, mean_a, mean_b, decay
+            coeff = np.empty((count, 7), dtype=float)
             a, b = 1.0, 0.0
             for index in range(count):
                 t_wall = float(wall_flat[run.cells[index]])
@@ -290,7 +341,7 @@ class FluidLoop:
                 decay = float(np.exp(-ntu))
                 mean_factor = (1.0 - decay) / ntu if ntu > 0.0 else 1.0
                 coeff[index] = (a, b, decay * a, t_wall + (b - t_wall) * decay,
-                                a * mean_factor, t_wall + (b - t_wall) * mean_factor)
+                                a * mean_factor, t_wall + (b - t_wall) * mean_factor, decay)
                 a, b = decay * a, t_wall + (b - t_wall) * decay
             marches.append((m_dot, h, coeff, a, b))
             slope += mc * (a - 1.0)
@@ -315,6 +366,9 @@ class FluidLoop:
         result.t_in = t_in
 
         q_fluid = np.zeros(wall_flat.shape, dtype=float)
+        conductance = np.zeros(wall_flat.shape, dtype=float)
+        weighted_gas = np.zeros(wall_flat.shape, dtype=float)
+        weighted_slope = np.zeros(wall_flat.shape, dtype=float)
         total_power = 0.0
         weighted_out = 0.0
         weight = 0.0
@@ -329,6 +383,11 @@ class FluidLoop:
             t_mean = coeff[:, 4] * t_in + coeff[:, 5]
             q_cell = m_dot * fluid.cp * (t_in_cell - t_out_cell)          # [W]
             q_fluid[run.cells] += q_cell / volume[run.cells]              # [W/m^3]
+            # q = G (T_gas,in - T_wall) exactly: G = m c (1 - e^-NTU) of the piece
+            g_cell = m_dot * fluid.cp * (1.0 - coeff[:, 6])
+            np.add.at(conductance, run.cells, g_cell)
+            np.add.at(weighted_gas, run.cells, g_cell * t_in_cell)
+            np.add.at(weighted_slope, run.cells, g_cell * coeff[:, 0])
             run_power = float(np.sum(q_cell))
             total_power += run_power
             result.runs.append(RunResult(
@@ -355,6 +414,19 @@ class FluidLoop:
                 f"pressure: the gas is no longer incompressible, the density varies "
                 f"along the loop and this pressure-drop model loses validity")
         result.q_fluid = q_fluid
+        result.conductance = conductance
+        result.t_gas = np.divide(weighted_gas, conductance,
+                                 out=np.zeros_like(weighted_gas), where=conductance > 0.0)
+        result.gas_slope = np.divide(weighted_slope, conductance,
+                                     out=np.zeros_like(weighted_slope),
+                                     where=conductance > 0.0)
+        result.balanced = self.t_in is None
         result.power = total_power
+        if self.t_in is not None:
+            # a prescribed inlet fixes the gas, and the power the external device has to
+            # supply (+) or takes (-) is what the loop's enthalpy balance leaves over
+            result.external_power = -float(np.sum(
+                [run.mass_flow * fluid.cp * (run.t_out - t_in) for run in result.runs
+                 if run.mass_flow > 0.0]))
         result.t_out = weighted_out / weight if weight > 0 else float("nan")
         return result

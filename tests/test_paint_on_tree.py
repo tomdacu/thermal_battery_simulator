@@ -220,7 +220,9 @@ def test_a_lagged_header_is_painted_without_a_film_on_a_tree(box_pair):
 
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
     tubes = tree.material_id == int(MaterialID.TUBES)
-    film = tubes & (tree.bc_h > 0.0)
+    # the paint writes no film value (the gas loop does, per cell): an exchanging cell is
+    # one the assembly lists as convective, a lagged one is not
+    film = tubes & (tree.boundary_type == int(BoundaryType.CONVECTION))
     assert 0 < int(film.sum()) < int(tubes.sum())   # the headers have cells of their own
     # the lagged surface is what the report says is left without a film
     assert report.insulated == pytest.approx(net.total_area - net.exchange_area,

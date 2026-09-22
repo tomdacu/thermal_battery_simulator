@@ -5,10 +5,12 @@ The iterative solver used to live inside the GUI thread (with
 and is driven by the GUI controller in a worker thread.
 
 Iteration: secant/Newton on the mean storage temperature, with an
-under-relaxation factor and a bounded power floor.  The ground loss path is
-applied explicitly (:meth:`LossesConfig.h_ground`), which is what the GUI used
-to write by poking ``mesh.bc_h`` without changing the boundary type - and was
-therefore silently ignored by the assembly.
+under-relaxation factor and a bounded power floor.  With a gas loop the power is
+the resistors' and it reaches the bed through the pipe walls (the coupled steady
+state of :class:`~src.solver.steady.SteadyStateSolver`); without one it is a
+uniform source over the sand.  The model is the mesh's as built - the same ground,
+the same envelope the steady run sees - unless ``h_ground`` asks for a convective
+ground explicitly, which then stays on the mesh.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ class LossesConfig:
     t_target: float = 873.15            # [K] mean storage temperature to hold
     t_ambient: float = T_AMBIENT_DEFAULT
     t_ground: float = T_GROUND_DEFAULT
-    h_ground: float = 5.0               # [W/(m^2*K)]; 0 keeps the mesh BC as-is
+    h_ground: float = 0.0               # [W/(m^2*K)]; 0 keeps the mesh BC as-is
     tolerance: float = 1.0              # [K]
     max_iterations: int = 20
     relaxation: float = 0.7             # 0..1 under-relaxation on the power update
@@ -66,8 +68,13 @@ class LossesResult:
 
 def solve_losses(mesh: Mesh3D, config: LossesConfig, solver_config: SolverConfig = None,
                  progress: Callable[[int, str], None] | None = None,
-                 should_stop: Callable[[], bool] | None = None) -> LossesResult:
-    """Find the heater power that keeps the sand at ``config.t_target``."""
+                 should_stop: Callable[[], bool] | None = None,
+                 fluid_loop=None) -> LossesResult:
+    """Find the heater power that keeps the sand at ``config.t_target``.
+
+    ``fluid_loop`` is the plant's gas circuit: when given, the power under iteration is
+    its external power and every steady solve is the coupled one.
+    """
     problems = config.validate()
     if problems:
         raise ValueError("invalid losses configuration: " + "; ".join(problems))
@@ -89,11 +96,15 @@ def solve_losses(mesh: Mesh3D, config: LossesConfig, solver_config: SolverConfig
     for iteration in range(1, config.max_iterations + 1):
         if should_stop is not None and should_stop():
             break
-        mesh.Q_source.fill(0.0)
-        mesh.source_mask.fill(False)
-        mesh.source_mask[sand] = True
-        mesh.Q_source[sand] = q_current / v_sand
-        result = SteadyStateSolver(mesh, solver_config).solve()
+        if fluid_loop is not None:
+            fluid_loop.external_power = q_current
+            result = SteadyStateSolver(mesh, solver_config, fluid_loop=fluid_loop).solve()
+        else:
+            mesh.Q_source.fill(0.0)
+            mesh.source_mask.fill(False)
+            mesh.source_mask[sand] = True
+            mesh.Q_source[sand] = q_current / v_sand
+            result = SteadyStateSolver(mesh, solver_config).solve()
         t_mean = float(mesh.T[sand].mean())
         error = t_mean - config.t_target
         history.append({"iteration": iteration, "power": q_current,

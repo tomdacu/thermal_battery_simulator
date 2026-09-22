@@ -9,9 +9,11 @@ Key correctness points (each one was wrong in the previous implementation):
 * The power profile drives ``mesh.Q_source`` on the cells flagged in
   ``mesh.source_mask``; a run whose profile asks for power with no source cell
   raises instead of silently heating nothing.
-* The extraction profile is applied to the physics (tube-side convection or a
-  capped volumetric sink on the tube cells) and the removed power is measured,
-  not assumed.
+* With a gas loop the profiles drive the loop, never the sand: the resistors add
+  ``power`` to the gas, the exchanger takes the extraction out of it (or returns the gas
+  at a fixed temperature), and the march is handed to the solid as an *implicit* film
+  on the pipe cells (:meth:`~src.solver.fluid.FluidResult.apply`), which is stable at
+  any step.  Without a loop the extraction is the legacy tube film or a capped sink.
 * One march, either mesh: the operators and the right-hand side are asked of the
   mesh (``build_transient_operators``/``transient_rhs`` dispatch to the tree's own
   assembly), and the driver is left with what the two have in common - the profiles,
@@ -29,6 +31,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..analysis.balance import compute_balance
+from ..analysis.fluxes import pinned_cells
 from ..constants import T_AMBIENT_DEFAULT
 from ..core.mesh import MaterialID, Mesh3D
 from ..core.profiles import ExtractionProfile, InitialCondition, PowerProfile
@@ -131,14 +134,14 @@ class TransientSolver:
     def _tube_film(self) -> tuple[float, float]:
         """Signature of the tube film the operator must be built with.
 
-        Sum of the film coefficients on the tube cells and of their ``h * T_fluid``
-        products: cheap, and enough to notice that a fluid loop changed the exchange.
+        Only the coefficients enter the matrix (the film temperatures are on the
+        right-hand side, rebuilt every step), so the signature is two moments of
+        ``bc_h`` on the tube cells: cheap, and enough to notice a changed exchange.
         """
         if getattr(self, "_n_tube", 0) == 0:
             return (0.0, 0.0)
         h = self.mesh.bc_h[self._tube]
-        t_inf = self.mesh.bc_T_inf[self._tube]
-        return (float(np.sum(h)), float(np.sum(h * t_inf)))
+        return (float(np.sum(h)), float(np.sum(h * h)))
 
     def _source_masks(self) -> None:
         mask = self.mesh.source_mask
@@ -151,27 +154,36 @@ class TransientSolver:
         self._tube_area_over_v = float(np.sum(self.mesh.V[self._tube]
                                               / self.mesh.h_char[self._tube]))
 
-    def _set_fluid_loop(self, power: float, extraction: float) -> bool:
-        """March the loop and deposit its power; True when the loop did the work.
+    def _set_fluid_loop(self, power: float, t: float) -> bool:
+        """March the loop and hand it to the solid; True when the loop did the work.
 
-        The external power of the loop is what the resistors inject (``power``) plus
-        what the exchanger takes out (``extraction``): the gas carries the heat, the
-        sand sees the pipes, and the fan power is reported with the cycle.
+        The external power of the loop is what the resistors inject (``power``) minus
+        what the exchanger takes out (the extraction request): the gas carries the heat,
+        the sand sees the pipes, and the fan power is reported with the cycle.  With the
+        ``return_temperature`` extraction the exchanger returns the gas at a fixed
+        temperature instead, and the power it takes is whatever the bed gives the gas.
         """
         loop = self.config.fluid_loop
         if loop is None:
             return False
-        # the resistors add to the gas, the exchanger takes from it
-        loop.external_power = float(power) - float(extraction)
+        profile = self.config.extraction_profile
+        if profile.mode == "return_temperature":
+            loop.t_in = float(profile.t_inlet)
+            loop.external_power = 0.0
+        else:
+            loop.t_in = self._loop_t_in
+            # the resistors add to the gas, the exchanger takes from it
+            loop.external_power = float(power) - profile.power_request(t)
         result = loop.solve(self.mesh)
         self.fluid_result = result
-        flat = result.q_fluid
-        if flat is None:
+        if result.conductance is None:
             return False
-        q = flat.reshape(self.mesh.T.shape, order="F")
-        self.mesh.Q_source = np.where(q > 0.0, q, 0.0)
-        self.mesh.Q_sink = np.where(q < 0.0, q, 0.0)
-        self.mesh.bc_h[self._tube] = 0.0
+        active = result.apply(self.mesh)
+        if self.index is not None and np.any(np.asarray(active).ravel(order="F")
+                                             & ~self.index.interior_tube):
+            # the structured index lists the film cells once: rebuild it when the loop
+            # reaches a cell it did not list, or that exchange would be dropped
+            self.index = GridIndex.from_mesh(self.mesh)
         return True
 
     def _set_power(self, power: float) -> None:
@@ -190,6 +202,9 @@ class TransientSolver:
     def _set_extraction(self, t: float) -> None:
         profile = self.config.extraction_profile
         self.mesh.Q_sink.fill(0.0)
+        if profile.mode == "return_temperature":
+            raise ValueError("the return-temperature extraction drives the gas loop: build "
+                             "and paint the pipe network first")
         if profile.mode == "off" or self._n_tube == 0:
             if profile.mode != "off" and self._n_tube == 0:
                 raise ValueError("extraction is enabled but the mesh has no tube cells")
@@ -209,6 +224,44 @@ class TransientSolver:
         if power > 0:
             self.mesh.Q_sink[self._tube] = -power / float(self.mesh.V[self._tube].sum())
 
+    def _hold_loop_balance(self, a, linear) -> None:
+        """Make the step deposit exactly the loop's external power (in place).
+
+        The march fixes the gas entering every cell from the walls of the previous
+        step, so the implicit film alone would deposit ``sum G (T_gas - T_new)``, which
+        drifts from the power the resistors put in as the bed warms within the step.
+        The loop inlet is therefore solved *with* the field: every ``T_gas`` moves with
+        ``T_in`` by its slope ``alpha``, the field by ``delta * y`` with ``A y = G alpha / V``,
+        and the one scalar ``delta`` that makes the deposit equal the external power closes
+        the loop's enthalpy balance on the new field - a Schur complement of one row, at
+        the cost of a second solve with the same (cached) operator.
+        """
+        result = self.fluid_result
+        if result is None or not result.balanced or result.conductance is None:
+            return
+        g = result.conductance
+        pinned = pinned_cells(self.mesh, self.index)
+        cells = (g > 0.0) & ~pinned
+        if not cells.any():
+            return
+        volume = np.asarray(self.mesh.V, dtype=float).ravel(order="F")
+        alpha = result.gas_slope
+        e = np.zeros(g.size)
+        e[cells] = g[cells] * alpha[cells] / volume[cells]
+        y = solve_linear(a, e, self.solver_config, cache=self._cache, scale=self._scale).T
+        x = np.asarray(linear.T, dtype=float)
+        deposit = float(np.sum(g[cells] * (result.t_gas[cells] - x[cells])))
+        slope = float(np.sum(g[cells] * (alpha[cells] - y[cells])))
+        if slope <= 0.0:
+            return
+        delta = (float(result.external_power) - deposit) / slope
+        linear.T = x + delta * y
+        result.t_in += delta
+        result.t_gas = result.t_gas + np.where(cells, alpha * delta, 0.0)
+        t_inf = np.asarray(self.mesh.bc_T_inf, dtype=float).ravel(order="F").copy()
+        t_inf[cells] = result.t_gas[cells]
+        self.mesh.bc_T_inf = t_inf.reshape(np.shape(self.mesh.T), order="F")
+
     # -------------------------------------------------------------------- run
     def run(self, progress_callback: Callable[[int, str], None] | None = None,
             should_stop: Callable[[], bool] | None = None) -> TransientResults:
@@ -224,6 +277,15 @@ class TransientSolver:
         self.mesh.validate()
         self.apply_initial_condition()
         self._source_masks()
+        loop = self.config.fluid_loop
+        self._loop_t_in = None if loop is None else loop.t_in
+        if loop is not None:
+            # the loop is the only heat path: its film is on the operator from step one,
+            # so the matrix is built with it and reused while the film does not change
+            try:
+                self._set_fluid_loop(self.config.power_profile.power_at(0.0), 0.0)
+            except ValueError as exc:
+                raise ValueError(f"the gas loop cannot start: {exc}") from exc
 
         cfg = self.config
         dt = cfg.dt
@@ -251,9 +313,13 @@ class TransientSolver:
                 break
             step_dt = min(dt, cfg.t_final - t)
             power = cfg.power_profile.power_at(t)
-            extraction = cfg.extraction_profile.power_request(t)
-            loop_used = self._set_fluid_loop(power, extraction)
-            if loop_used and self.fluid_result is not None:
+            # the loop was marched on the field the previous step left behind (at the end
+            # of that step, or before the first one): its film is already on the mesh
+            loop_used = loop is not None and self.fluid_result is not None
+            if loop_used:
+                if cfg.extraction_profile.mode == "return_temperature":
+                    # the resistors are off: the gas comes back at a fixed temperature
+                    power = max(self.fluid_result.external_power, 0.0)
                 self.fluid_fan_energy += self.fluid_result.fan_power * step_dt
                 self.fluid_delivered += max(-self.fluid_result.external_power, 0.0) * step_dt
             if not loop_used:
@@ -273,6 +339,8 @@ class TransientSolver:
                                 radiation=self.solver_config.radiation)
             linear = solve_linear(a, rhs, self.solver_config, x0=x, cache=self._cache,
                                   scale=self._scale)
+            if loop_used:
+                self._hold_loop_balance(a, linear)
             if not linear.converged:
                 self.notes.append(f"t={t:.0f}s: linear solve did not converge "
                                   f"(residual {linear.residual:.2e})")
@@ -310,6 +378,18 @@ class TransientSolver:
             if progress_callback:
                 progress_callback(int(100 * min(t, cfg.t_final) / cfg.t_final),
                                   f"t = {t:.0f} s / {cfg.t_final:.0f} s")
+
+            if loop is not None and t < cfg.t_final - 1e-9:
+                # march the gas on the new field for the next step: the loop state a
+                # caller reads between steps (the delivery temperature a cycle stops on)
+                # is then the one of the field it sees, not one step behind it
+                try:
+                    self._set_fluid_loop(cfg.power_profile.power_at(t), t)
+                except ValueError as exc:
+                    # an operating point the loop cannot carry (a discharge that has
+                    # drained the bed): stop on the last good state, keep the samples
+                    self.notes.append(f"t={t:.0f}s: stopped - {exc}")
+                    break
 
         results.wall_time = time.perf_counter() - t_start
         return results

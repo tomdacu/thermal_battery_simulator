@@ -121,9 +121,13 @@ def test_the_energy_balance_closes_with_the_loop_driving():
                                                                 t_uniform=400.0))
     solver = TransientSolver(mesh, config, solver_config)
     solver.run()
-    # the loop deposits exactly what the resistors inject (minus the fan, which is
-    # electric and outside the thermal problem), and the balance of that state closes
-    deposited = float(np.sum(mesh.Q_source * mesh.V))
+    # the loop deposits what the resistors inject (minus the fan, which is electric and
+    # outside the thermal problem): the pipe film is the balance's input, and the lumped
+    # bed source is empty because the gas is the only heat path
+    from src.analysis.balance import compute_balance
+
+    assert float(np.sum(mesh.Q_source * mesh.V)) == 0.0
+    deposited = compute_balance(mesh, index=solver.index).p_input
     assert deposited == pytest.approx(loop.external_power, rel=0.02)
     # (the imbalance of a *transient* state is the storage rate, so it is not zero
     # here: it equals p_input while the bed is heating up)

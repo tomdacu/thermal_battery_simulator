@@ -2,11 +2,11 @@
 
 Definitions used here (documented once, used everywhere):
 
-* ``p_input``      total power injected by the volumetric sources [W] - taken
-                   from ``Q_source``, so it does not depend on which material
-                   happens to host the heaters.
-* ``p_extracted``  power removed by the heat-transfer fluid [W] (volumetric
-                   sinks plus the tube-side convection).
+* ``p_input``      total power injected [W]: the volumetric sources (``Q_source``)
+                   plus the net film of the heat-transfer fluid when it heats the
+                   solid - the gas loop charging through the pipe walls.
+* ``p_extracted``  power removed [W]: the volumetric sinks plus the net fluid film
+                   when it cools the solid.
 * ``q_domain``     power leaving through the six box faces [W].  It is computed
                    with the faces and the conductances the assembly used - the mesh's
                    own face list for a tree, the ``GridIndex`` tables for ``Mesh3D``
@@ -129,9 +129,11 @@ def compute_balance(mesh: Mesh3D | AdaptiveMesh, t_ambient: float = T_AMBIENT_DE
     q_source = fluxes.as_flat(mesh.Q_source)
     q_sink = fluxes.as_flat(mesh.Q_sink)
     volume = fluxes.as_flat(mesh.V)
-    p_input = float(np.sum(q_source[free] * volume[free]))
-    p_extracted = (float(-np.sum(q_sink[free] * volume[free]))
-                   + fluxes.tube_flux(mesh, index))
+    # the fluid film counts where its net rate goes: into the solid it is input (the
+    # gas loop charging through the pipe walls), out of it extraction
+    fluid = fluxes.tube_flux(mesh, index)
+    p_input = float(np.sum(q_source[free] * volume[free])) + max(-fluid, 0.0)
+    p_extracted = float(-np.sum(q_sink[free] * volume[free])) + max(fluid, 0.0)
 
     e_stored = fluxes.stored_energy(mesh, t_ambient)
     ex_stored = fluxes.stored_exergy(mesh, t_ambient)

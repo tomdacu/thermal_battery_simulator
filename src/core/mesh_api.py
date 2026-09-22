@@ -168,14 +168,13 @@ def missing_members(mesh: object) -> list[str]:
 
 
 def is_interior_tube(boundary_type: np.ndarray, on_box_face: np.ndarray) -> np.ndarray:
-    """Cells exchanging with a fluid that are *not* on a box face.
+    """Cells exchanging with a fluid (``boundary_type == CONVECTION``).
 
-    The structured index excludes the exposed cells from the tube film
-    (``GridIndex.interior_tube``, used by ``src/solver/matrix.py:157`` and
-    ``src/analysis/fluxes.py:137``), because a cell on the box face has a face boundary
-    condition of its own.  A mesh of either kind can answer this from
-    ``boundary_type`` plus "does this cell touch a box face", which is exactly what the
-    adaptive mesh keeps.
+    The film of a pipe is a *volumetric* exchange and adds to whatever a box face does
+    to the same cell, so a pipe cell on a box face keeps it.  (The lumped tube model used
+    to drop it there, which silently lost the ends of a riser that reaches the wall.)  A
+    cell the Dirichlet elimination pins drops it on its own: its row is the identity.
+    ``on_box_face`` is kept in the signature for the callers that pass it.
     """
-    tube = np.asarray(boundary_type) == int(BoundaryType.CONVECTION)
-    return tube & ~np.asarray(on_box_face, dtype=bool)
+    del on_box_face
+    return np.asarray(boundary_type) == int(BoundaryType.CONVECTION)

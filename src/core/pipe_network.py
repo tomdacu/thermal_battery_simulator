@@ -113,7 +113,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .materials import MaterialManager
-from .mesh import MaterialID, Mesh3D
+from .mesh import BoundaryType, MaterialID, Mesh3D
 from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULAR,
                     PITCH_VERTICAL, PipeRun, box_size, cell_centres, flat_cells,
                     rasterize_pipe)
@@ -1195,7 +1195,7 @@ class PipeNetwork:
         flat[cells] = True
         return flat.reshape(mesh.T.shape, order="F")
 
-    def paint(self, mesh: Mesh3D | AdaptiveMesh, h_fluid: float = 500.0,
+    def paint(self, mesh: Mesh3D | AdaptiveMesh, h_fluid: float = 0.0,
               t_fluid: float = 300.0) -> PaintReport:
         """Mark the pipes of the network on ``mesh`` and give them a gas film.
 
@@ -1214,11 +1214,15 @@ class PipeNetwork:
         centrelines cross, and the two roads mark the same cells wherever a leaf and a
         cell are the same one.
 
-        The film is what a *lumped* model needs (a steady or losses run sees the pipes
-        where they are).  A transient driven by a
-        :class:`~src.solver.fluid.FluidLoop` does not use it: the loop marches the gas
-        and deposits its own ``q_fluid`` in these very cells, and the solver rebuilds
-        its operators when the film changes, so the two models never run together.
+        The film defaults to **none** (``h_fluid = 0``): the exchanging cells are marked
+        as convective so the assembly lists them, and the gas loop
+        (:meth:`~src.solver.fluid.FluidResult.apply`) writes its own per-cell film on
+        them in every analysis - steady, losses and transient.  A fixed film at a fixed
+        gas temperature is the lumped tube model of the old code and is kept only for a
+        caller that asks for it explicitly.
+
+        The lumped bed source the geometry painted is rescaled over the cells that are
+        left, so a mesh that runs without the loop still carries the plant's power.
         """
         cells, _, areas = self.voxelize(mesh)
         riser_cells = self._riser_cells(mesh)
@@ -1230,9 +1234,17 @@ class PipeNetwork:
         props = MaterialManager().get(self.config.material)
         mesh.material_id[mask] = int(MaterialID.TUBES)
         mesh.k[mask], mesh.rho[mask], mesh.cp[mask] = props.k, props.rho, props.cp
+        power = float(np.sum(mesh.Q_source * mesh.V))
         mesh.Q_source[mask] = 0.0
         mesh.source_mask[mask] = False
+        remaining = float(np.sum(mesh.Q_source * mesh.V))
+        if power > 0.0 and remaining > 0.0:
+            # the pipes took their cells out of the bed: the power stays the plant's
+            mesh.Q_source *= power / remaining
         mesh.set_internal_convection(mask, float(h_fluid), float(t_fluid))
+        # an exchanging cell is convective even while its film is zero: the gas loop
+        # writes the film per cell, and the assembly must already list the cell
+        mesh.boundary_type[mask] = int(BoundaryType.CONVECTION)
         if self.insulated:
             lagged = mask & ~riser_mask
             mesh.set_internal_convection(lagged, 0.0, float(t_fluid))

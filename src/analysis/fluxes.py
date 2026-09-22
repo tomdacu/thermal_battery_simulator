@@ -311,14 +311,15 @@ def domain_fluxes(mesh: Mesh3D | AdaptiveMesh, radiation: bool = False,
 def tube_flux(mesh: Mesh3D | AdaptiveMesh, index: GridIndex | None = None) -> float:
     """Heat leaving the domain into the heat-transfer fluid [W].
 
-    The mask is the one the assembly applies - ``boundary_type == CONVECTION`` on cells
-    that do *not* sit on a box face, where a face condition takes over
-    (:func:`src.core.mesh_api.is_interior_tube`) - and the rate is ``bc_h / V^(1/3)`` per
-    cell, the coefficient the assembly puts on the diagonal and multiplies back by the
-    volume here.
+    The mask is the one the assembly applies - ``boundary_type == CONVECTION``
+    (:func:`src.core.mesh_api.is_interior_tube`) minus the cells the Dirichlet
+    elimination pins, whose identity row never sees the film - and the rate is
+    ``bc_h / V^(1/3)`` per cell, the coefficient the assembly puts on the diagonal and
+    multiplies back by the volume here.
     """
     mask = (as_flat(is_interior_tube(mesh.boundary_type, mesh.on_box_face))
             if _face_driven(mesh) else structured_index(mesh, index).interior_tube)
+    mask = mask & ~pinned_cells(mesh, index)
     if not mask.any():
         return 0.0
     h = as_flat(mesh.bc_h)[mask]

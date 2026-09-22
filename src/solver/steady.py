@@ -2,7 +2,11 @@
 
 Optional radiation makes the problem non-linear (the linearised coefficient
 depends on the surface temperature); it is solved by a Picard sweep that rebuilds
-the operators until the field stops moving.  The outer film of an excluded-air
+the operators until the field stops moving.  The gas loop is coupled the same way:
+with a :class:`~src.solver.fluid.FluidLoop` every sweep marches the gas on the current
+field, hands the exchange to the solid as an implicit film on the pipe cells and solves
+again, so the steady state is the plant's own - the resistors' power entering the bed
+through the pipe walls - and not a source spread over the sand.  The outer film of an excluded-air
 model is non-linear in the same way, and for the same reason: its radiative share
 is evaluated on the surface temperature the film itself drives, so every sweep
 re-evaluates it and the field and the film converge together.
@@ -21,6 +25,9 @@ from ..units import check_kelvin
 from .linear import LinearConfig, PreconditionerCache, set_num_threads, solve_linear
 from .matrix import GridIndex, build_steady_matrix
 
+if TYPE_CHECKING:
+    from .fluid import FluidLoop, FluidResult
+
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
     from ..core.adaptive_mesh import AdaptiveMesh
 
@@ -30,7 +37,7 @@ class SolverConfig(LinearConfig):
     """Linear settings + the non-linear/steady-specific options."""
 
     radiation: bool = False
-    max_picard: int = 30
+    max_picard: int = 60
     picard_tolerance: float = 1e-3   # [K] max field change between sweeps
     progress_callback: Callable[[int, str], None] | None = None
 
@@ -64,9 +71,14 @@ class SteadyStateSolver:
     order, leaves included.
     """
 
-    def __init__(self, mesh: Mesh3D | AdaptiveMesh, config: SolverConfig = None) -> None:
+    def __init__(self, mesh: Mesh3D | AdaptiveMesh, config: SolverConfig = None,
+                 fluid_loop: FluidLoop | None = None) -> None:
         self.mesh = mesh
         self.config = config or SolverConfig()
+        #: the gas loop that carries the heat, marched once per sweep (None: the mesh's
+        #: own sources and films are the whole problem)
+        self.fluid_loop = fluid_loop
+        self.fluid_result: FluidResult | None = None
         self.threads = set_num_threads(self.config.n_threads)
         self.adaptive = not isinstance(mesh, Mesh3D)
         if self.adaptive and not hasattr(mesh, "solve_steady"):
@@ -87,13 +99,17 @@ class SteadyStateSolver:
         self.mesh.validate(check_temperature=not self.config.radiation)
         notes = []
         t_start = time.perf_counter()
-        n_cells = self.mesh.n_cells if self.adaptive else self.mesh.N_total
-        x = self._x0 if self._x0 is not None else np.full(n_cells, 293.15)
+        # warm start: the previous solution, or the field the mesh carries
+        x = (self._x0 if self._x0 is not None
+             else np.asarray(self.mesh.T, dtype=float).ravel(order="F").copy())
         residual, iterations = np.inf, 0
         converged = False
+        nonlinear = self.config.radiation or self.fluid_loop is not None
 
         for sweep in range(1, self.config.max_picard + 1):
             iterations = sweep
+            if self.fluid_loop is not None:
+                self._march_loop()
             x_new, residual, converged = self._sweep(x, notes)
             change = float(np.max(np.abs(x_new - x))) if x_new.size else 0.0
             x = x_new
@@ -103,8 +119,14 @@ class SteadyStateSolver:
                                               f"sweep {sweep}, dT={change:.3g} K")
             if not converged:
                 break
-            if not self.config.radiation or change <= self.config.picard_tolerance:
+            if not nonlinear or change <= self.config.picard_tolerance:
                 break
+        else:
+            if nonlinear:
+                # ``converged`` stays the linear layer's verdict: a caller may ask for a
+                # fixed number of sweeps on purpose, and the note says what is left
+                notes.append(f"the coupling did not settle in {self.config.max_picard} "
+                             f"sweeps (last change {change:.3g} K)")
 
         check_kelvin(x, "steady solution")
         self._x0 = x
@@ -113,6 +135,17 @@ class SteadyStateSolver:
             solve_time=time.perf_counter() - t_start, notes=notes,
             stats=self.temperature_stats(x),
         )
+
+    def _march_loop(self) -> None:
+        """March the gas on the current field and write its film onto the mesh."""
+        result = self.fluid_loop.solve(self.mesh)
+        self.fluid_result = result
+        active = result.apply(self.mesh)
+        if self.index is not None and np.any(np.asarray(active).ravel(order="F")
+                                             & ~self.index.interior_tube):
+            # the structured index lists the film cells once: a cell the loop reaches
+            # must be in it, or its exchange would be dropped from the assembly
+            self.index = GridIndex.from_mesh(self.mesh)
 
     def _sweep(self, x: np.ndarray, notes: list) -> tuple[np.ndarray, float, bool]:
         """One assembly + linear solve of the current state, on either mesh."""

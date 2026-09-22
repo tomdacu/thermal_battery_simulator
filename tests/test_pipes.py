@@ -668,8 +668,9 @@ def test_a_lagged_header_is_painted_without_a_gas_film():
     net = build_pipe_network(mesh, config)
     report = net.paint(mesh)
     tubes = mesh.material_id == int(MaterialID.TUBES)
-    film = np.zeros_like(mesh.bc_h, dtype=bool)
-    film[tubes] = mesh.bc_h[tubes] > 0.0
+    # the paint writes no film value (the gas loop does, per cell): an exchanging cell
+    # is one the assembly lists as convective, a lagged one is not
+    film = tubes & (mesh.boundary_type == int(BoundaryType.CONVECTION))
     assert report.riser_cells < report.cells          # the headers have cells of their own
     assert int(np.count_nonzero(tubes & ~film)) > 0   # and they carry no film
     assert report.insulated == pytest.approx(
@@ -678,7 +679,8 @@ def test_a_lagged_header_is_painted_without_a_gas_film():
                                           diameter=0.1, horizontal_pitch=0.8,
                                           vertical_pitch=0.8))
     bare.paint(mesh)
-    assert int(np.count_nonzero(mesh.bc_h[tubes] > 0.0)) == int(tubes.sum())
+    assert int(np.count_nonzero(
+        mesh.boundary_type[tubes] == int(BoundaryType.CONVECTION))) == int(tubes.sum())
 
 
 # ------------------------------------------------------- the circuit of the loop

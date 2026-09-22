@@ -14,7 +14,7 @@ from ..constants import T_AMBIENT_DEFAULT, T_INITIAL_DEFAULT
 from ..units import check_kelvin
 
 POWER_MODES = ("off", "constant", "schedule", "csv")
-EXTRACTION_MODES = ("off", "power", "flow_rate")
+EXTRACTION_MODES = ("off", "power", "flow_rate", "return_temperature")
 IC_MODES = ("uniform", "by_material", "from_file", "keep")
 
 
@@ -86,7 +86,14 @@ class PowerProfile:
 
 @dataclass
 class ExtractionProfile:
-    """Heat extraction from the heat-transfer fluid [W] / [kg/s] / [K]."""
+    """Heat extraction from the heat-transfer fluid [W] / [kg/s] / [K].
+
+    With the gas loop (the plant) two modes matter: ``power`` - the exchanger takes a
+    set power out of the gas and the loop solves its own inlet temperature - and
+    ``return_temperature`` - the exchanger returns the gas at ``t_inlet`` and the power
+    is whatever the bed gives it.  ``flow_rate`` is the film of the lumped tube model,
+    used only on a mesh without a loop.
+    """
 
     mode: str = "off"
     power: float = 0.0
