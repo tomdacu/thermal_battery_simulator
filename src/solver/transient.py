@@ -33,6 +33,7 @@ import numpy as np
 from ..analysis.balance import compute_balance
 from ..analysis.fluxes import pinned_cells
 from ..constants import T_AMBIENT_DEFAULT
+from ..core.geometry import update_bed_conductivity
 from ..core.mesh import MaterialID, Mesh3D
 from ..core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from .linear import PreconditionerCache, solve_linear
@@ -256,6 +257,7 @@ class TransientSolver:
             raise ValueError("invalid transient configuration: " + "; ".join(problems))
         self.mesh.validate()
         self.apply_initial_condition()
+        update_bed_conductivity(self.mesh, step=0.0)
         self._source_masks()
         loop = self.config.fluid_loop
         self._loop_t_in = None if loop is None else loop.t_in
@@ -303,7 +305,10 @@ class TransientSolver:
                 self._set_extraction(t)
 
             film_now = self._tube_film()
-            if not stationary_operator or step_dt != dt or film_now != film_at_build:
+            # the bed's conductivity at the start of the step (lagged by one step)
+            k_moved = update_bed_conductivity(self.mesh)
+            if (not stationary_operator or step_dt != dt or film_now != film_at_build
+                    or k_moved):
                 # the shortened final step needs operators built for its own dt, and a
                 # film that changed (the loop marched) needs a rebuilt diagonal too
                 a, m_diag = build_transient_operators(

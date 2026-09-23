@@ -178,7 +178,8 @@ def test_the_battery_model_matches_on_both_meshes(paint_pair):
     reference = SteadyStateSolver(structured, config).solve()
 
     assert adaptive.converged and reference.converged
-    assert adaptive.iterations == reference.iterations == 1     # no radiation: one solve
+    # the bed's conductivity follows its temperature: the same Picard sweeps on both
+    assert adaptive.iterations == reference.iterations
     index = cell_of(structured, tree)
     field = np.asarray(reference.T, dtype=float).ravel(order="F")
     # every leaf, pinned ones included: the two assemblies hold the excluded leaves at

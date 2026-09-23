@@ -43,8 +43,9 @@ import numpy as np
 
 from ..constants import PACKING_FRACTION_DEFAULT, T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
 from .environment import h_out
-from .materials import MaterialManager, ThermalProperties
-from .mesh import MaterialID, Mesh3D
+from .materials import (PARTICLE_DIAMETER_DEFAULT, MaterialManager, PackedBed,
+                        ThermalProperties)
+from .mesh import MaterialID, Mesh3D, storage_mask
 from .physics import radiation_h
 
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
@@ -87,6 +88,38 @@ def _box(mesh) -> tuple[float, float, float]:
     if isinstance(mesh, Mesh3D):
         return mesh.Lx, mesh.Ly, mesh.Lz
     return tuple(float(v) for v in mesh.box)
+
+
+#: a bed cell's conductivity is re-evaluated once its law moved it by this fraction:
+#: a 2 % step keeps the operator (and its AMG hierarchy) between updates
+BED_K_STEP = 0.02
+
+
+def update_bed_conductivity(mesh, temperature=None, step: float = BED_K_STEP) -> bool:
+    """Evaluate the bed's conductivity law (``mesh.bed_conductivity``) on the field.
+
+    The storage cells (the sand and the tube cells buried in it) take the conductivity
+    of the packed bed at their own temperature; a cell is updated only when its value
+    moved by more than ``step`` of itself, so an operator survives many steps.  Returns
+    whether anything changed; a mesh without a law is left alone.
+    """
+    law = getattr(mesh, "bed_conductivity", None)
+    if law is None:
+        return False
+    field = mesh.T if temperature is None else temperature
+    field = np.asarray(field, dtype=float).reshape(np.shape(mesh.k), order="F")
+    mask = storage_mask(mesh.material_id)
+    if not mask.any():
+        return False
+    old = np.asarray(mesh.k[mask], dtype=float)
+    new = law(field[mask])
+    moved = np.abs(new - old) > step * old
+    if not moved.any():
+        return False
+    values = old.copy()
+    values[moved] = new[moved]
+    mesh.k[mask] = values
+    return True
 
 
 def _snap_note(mesh) -> str | None:
@@ -294,6 +327,17 @@ class BatteryGeometry:
     #: the shell is still cold, which would null the natural convection
     film_delta_t: float = 30.0
     t_ground: float = T_GROUND_DEFAULT      # [K]
+    #: grain size of the bed [m] and its conductivity model: ``"zbs"`` (Zehner-Bauer-
+    #: Schlunder with radiation, a law of the temperature the solvers re-evaluate) or
+    #: ``"geometric"`` (the constant geometric mean)
+    particle_diameter: float = PARTICLE_DIAMETER_DEFAULT
+    bed_model: str = "zbs"
+
+    def bed_law(self, materials: MaterialManager | None = None) -> PackedBed:
+        """The bed conductivity as a law of the temperature."""
+        return (materials or MaterialManager()).packed_bed(
+            self.storage_material, self.packing_fraction, self.particle_diameter,
+            self.bed_model)
 
     # ------------------------------------------------------------- validation
     def validate(self, mesh: Mesh3D | AdaptiveMesh) -> list[str]:
@@ -413,6 +457,10 @@ class BatteryGeometry:
         self._paint_storage(mesh, R, Z, storage_props)
         self._paint_roof(mesh, R, Z, storage_props, steel_props)
         report.n_source_cells = self._paint_source(mesh, Z, R)
+        # the bed's conductivity follows its temperature: the law rides on the mesh and
+        # every solver re-evaluates it on the field it solves
+        mesh.bed_conductivity = self.bed_law(materials)
+        update_bed_conductivity(mesh, step=0.0)
 
         # the air around the vessel becomes a boundary condition: the cells outside the
         # envelope leave the problem and the surface carries the film

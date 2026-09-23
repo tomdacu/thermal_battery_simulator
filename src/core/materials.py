@@ -9,24 +9,45 @@ Public API (frozen - the rest of the package is written against it)::
     MaterialManager.get_energy_density(name, t_high, t_low, packing_fraction=1.0)
     MaterialManager.compare_materials(names, t_high, t_low, packing_fraction=1.0)
 
-Packed bed (the model actually used for the storage region): geometric mean for
-the conductivity, arithmetic mean for the density, mass-weighted mean for the
-specific heat::
+Packed bed.  The density is the arithmetic mean and the specific heat the mass-weighted
+mean of the grains and the pore gas.  The conductivity is the **Zehner-Bauer-Schlunder**
+model of the VDI Heat Atlas (2nd ed., 2010, chapter D6.3, E. Tsotsas; Zehner and
+Schlunder, Chem. Ing. Tech. 42 (1970) 933), with the radiation between the grains
+(Breitbach and Barthels, Nucl. Technol. 49 (1980) 392): the gas in the voids, the
+contact through the grain cores and the radiation across the voids - which grows as
+``T^3 d`` and at 500 degC carries a third of the heat of a millimetre sand.  In the
+VDI's notation (``psi`` porosity, ``kappa = k_s / k_f``, ``B`` the deformation
+parameter of the unit cell, ``k_rad`` the radiative conductivity over ``k_f``)::
 
-    k_eff = k_solid^(1-phi) * k_fluid^phi
-    rho_eff = (1-phi) rho_solid + phi rho_fluid
-    cp_eff = [(1-phi) rho_s rho... ] / rho_eff
+    k_rad = 4 sigma T^3 d / ((2 / eps - 1) k_f)
+    B     = C_f ((1 - psi) / psi)^(10/9)            C_f = 1.25 spheres, 1.4 broken grains
+    N     = 1 + (k_rad - B) / kappa
+    k_c   = 2/N [ B (kappa + k_rad - 1) / (N^2 kappa) ln((kappa + k_rad) / B)
+                  + (B + 1) / (2 B) (k_rad - B) - (B - 1) / N ]
+    k_bed / k_f = (1 - sqrt(1 - psi)) (1 + psi k_rad)
+                  + sqrt(1 - psi) (phi kappa + (1 - phi) k_c)
 
-Properties are constant with temperature: the previous temperature-dependent
-hooks (``k_func``/``cp_func``) were never called by any solver, so they were
-removed instead of pretending the model is temperature aware.
+with ``phi = 0.0077`` the flattening of the contacts (VDI) and the pore gas at its own
+temperature (the air of Incropera's Table A.4).  The Smoluchowski reduction of the gas
+conductivity near the contacts is left out: it matters below ~0.1 mm or under vacuum,
+not for millimetre grains at one atmosphere.  The older model - the geometric mean
+``k_s^(1-psi) k_f^psi``, constant in temperature - stays available as ``"geometric"``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import numpy as np
+
 from ..constants import PACKING_FRACTION_DEFAULT
 from ..units import c_to_k
+
+#: Stefan-Boltzmann constant [W/(m^2 K^4)]
+SIGMA = 5.670374419e-8
+#: grain diameter of the bed by default [m]: a millimetre, crushed rock or coarse sand
+PARTICLE_DIAMETER_DEFAULT = 1.0e-3
+#: bed conductivity models
+BED_MODELS = ("zbs", "geometric")
 
 
 @dataclass(frozen=True)
@@ -48,7 +69,10 @@ def _p(name: str, k: float, rho: float, cp: float, t_max_c: float, eps: float = 
 
 
 STORAGE_MATERIALS: dict[str, ThermalProperties] = {
-    "silica_sand": _p("Silica sand", 0.35, 1500, 800, 1200, 0.9, "cheap bulk medium"),
+    # the *grain*: quartz (Incropera, Table A.3: 6.21 W/(m K) across the axis, 2650
+    # kg/m3); the bed values follow from the packing.  The entry used to carry the
+    # bed's own 0.35 W/(m K) and 1500 kg/m3, and the packing then diluted them again
+    "silica_sand": _p("Silica sand", 6.2, 2650, 800, 1200, 0.9, "cheap bulk medium"),
     "olivine": _p("Olivine", 3.5, 3300, 900, 1400, 0.85, "high conductivity sand"),
     "steatite": _p("Steatite (soapstone)", 3.0, 2700, 980, 1200, 0.9, "reference medium"),
     "basalt": _p("Basalt", 1.7, 2900, 850, 1100, 0.9),
@@ -90,6 +114,61 @@ CATEGORIES = {
     "structural": STRUCTURAL_MATERIALS,
     "fluid": FLUID_MATERIALS,
 }
+
+
+@dataclass(frozen=True)
+class PackedBed:
+    """The conductivity of a packed bed as a function of temperature (see the module).
+
+    ``solid_k`` is the grain's conductivity, ``porosity`` the void fraction, ``diameter``
+    the grain size [m], ``emissivity`` the grain surface's.  ``model`` is ``"zbs"`` or
+    ``"geometric"`` (constant).  Calling it with temperatures [K] returns the bed
+    conductivity [W/(m K)], elementwise.
+    """
+
+    solid_k: float
+    porosity: float
+    diameter: float = PARTICLE_DIAMETER_DEFAULT
+    emissivity: float = 0.9
+    shape: float = 1.4
+    flattening: float = 0.0077
+    fluid_k: float = 0.0263          # the pore gas at 300 K
+    fluid: str = "air"
+    model: str = "zbs"
+
+    def gas_k(self, temperature: np.ndarray) -> np.ndarray:
+        """The pore gas conductivity at ``temperature`` [W/(m K)]."""
+        from ..solver.fluid import property_shape
+
+        t = np.atleast_1d(np.asarray(temperature, dtype=float))
+        shapes = [property_shape(self.fluid, value) for value in np.unique(t)]
+        if shapes[0] is None:
+            return np.full(t.shape, self.fluid_k)
+        table = dict(zip(np.unique(t).tolist(), (s[2] for s in shapes), strict=True))
+        return self.fluid_k * np.vectorize(table.__getitem__)(t)
+
+    def __call__(self, temperature) -> np.ndarray:
+        t = np.atleast_1d(np.asarray(temperature, dtype=float))
+        psi = float(self.porosity)
+        if self.model == "geometric":
+            return np.full(t.shape, self.solid_k ** (1.0 - psi) * self.fluid_k ** psi)
+        # the gas conductivity is smooth: evaluate it on a 1 K grid and interpolate,
+        # so a field of a million cells costs a table of a few hundred entries
+        low, high = float(np.floor(t.min())), float(np.ceil(t.max())) + 1.0
+        grid = np.arange(low, high + 1.0)
+        k_f = np.interp(t, grid, self.gas_k(grid))
+        kappa = self.solid_k / k_f
+        k_rad = (4.0 * SIGMA * t ** 3 * self.diameter
+                 / ((2.0 / self.emissivity - 1.0) * k_f))
+        b = self.shape * ((1.0 - psi) / psi) ** (10.0 / 9.0)
+        n = 1.0 + (k_rad - b) / kappa
+        k_c = (2.0 / n) * (b * (kappa + k_rad - 1.0) / (n ** 2 * kappa)
+                           * np.log((kappa + k_rad) / b)
+                           + (b + 1.0) / (2.0 * b) * (k_rad - b) - (b - 1.0) / n)
+        root = np.sqrt(1.0 - psi)
+        ratio = ((1.0 - root) * (1.0 + psi * k_rad)
+                 + root * (self.flattening * kappa + (1.0 - self.flattening) * k_c))
+        return ratio * k_f
 
 
 class MaterialManager:
@@ -144,12 +223,39 @@ class MaterialManager:
         )
 
     def compute_packed_bed_properties(self, solid: str,
-                                      packing_fraction: float = PACKING_FRACTION_DEFAULT
-                                      ) -> ThermalProperties:
-        """Effective properties of a packed bed of solid particles."""
+                                      packing_fraction: float = PACKING_FRACTION_DEFAULT,
+                                      temperature: float | None = None,
+                                      particle_diameter: float = PARTICLE_DIAMETER_DEFAULT,
+                                      model: str = "geometric") -> ThermalProperties:
+        """Effective properties of a packed bed of solid particles.
+
+        ``model="geometric"`` is the constant geometric mean (the reference the older
+        callers were written against); ``"zbs"`` the Zehner-Bauer-Schlunder conductivity
+        with radiation at ``temperature`` [K] (293.15 K by default), for grains of
+        ``particle_diameter`` [m].
+        """
         if not 0.0 < packing_fraction < 1.0:
             raise ValueError(f"packing_fraction must be in (0, 1), got {packing_fraction}")
-        return self.compute_effective_properties(solid, 1.0 - float(packing_fraction))
+        props = self.compute_effective_properties(solid, 1.0 - float(packing_fraction))
+        if model == "geometric":
+            return props
+        law = self.packed_bed(solid, packing_fraction, particle_diameter, model)
+        k = float(law(293.15 if temperature is None else temperature)[0])
+        return replace(props, k=k, description=f"{props.description}, {model}")
+
+    def packed_bed(self, solid: str, packing_fraction: float = PACKING_FRACTION_DEFAULT,
+                   particle_diameter: float = PARTICLE_DIAMETER_DEFAULT,
+                   model: str = "zbs") -> PackedBed:
+        """The bed conductivity as a law of the temperature (:class:`PackedBed`)."""
+        if model not in BED_MODELS:
+            raise ValueError(f"unknown bed model {model!r}; expected one of {BED_MODELS}")
+        if particle_diameter <= 0.0:
+            raise ValueError(f"particle_diameter must be > 0, got {particle_diameter}")
+        grain = self.get(solid)
+        gas = self.get(self.pore_fluid)
+        return PackedBed(solid_k=grain.k, porosity=1.0 - float(packing_fraction),
+                         diameter=float(particle_diameter), emissivity=grain.emissivity,
+                         fluid_k=gas.k, fluid=self.pore_fluid, model=model)
 
     # --------------------------------------------------------------- energy
     def get_energy_density(self, material: str, t_high: float, t_low: float,

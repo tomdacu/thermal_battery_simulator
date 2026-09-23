@@ -209,6 +209,7 @@ class ThermalBatteryGUI(QMainWindow):
         battery.insulation_material = self.materials_panel.insulation_key()
         battery.shell_material = self.materials_panel.shell_key()
         battery.packing_fraction = self.materials_panel.packing_fraction()
+        battery.particle_diameter = self.materials_panel.particle_diameter()
         for key, value in self.materials_panel.conditions().items():
             setattr(battery, key, value)
         return battery

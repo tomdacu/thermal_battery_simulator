@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..core.geometry import update_bed_conductivity
 from ..core.mesh import Mesh3D
 from ..units import check_kelvin
 from .fluid import hold_loop_balance
@@ -106,10 +107,15 @@ class SteadyStateSolver:
              else np.asarray(self.mesh.T, dtype=float).ravel(order="F").copy())
         residual, iterations = np.inf, 0
         converged = False
-        nonlinear = self.config.radiation or self.fluid_loop is not None
+        law = getattr(self.mesh, "bed_conductivity", None)
+        nonlinear = (self.config.radiation or self.fluid_loop is not None
+                     or law is not None)
 
         for sweep in range(1, self.config.max_picard + 1):
             iterations = sweep
+            # the bed's conductivity at the field in hand (Picard: it is lagged by one
+            # sweep, and the sweeps stop when the field no longer moves)
+            update_bed_conductivity(self.mesh)
             if self.fluid_loop is not None:
                 self._march_loop()
             x_new, residual, converged = self._sweep(x, notes)

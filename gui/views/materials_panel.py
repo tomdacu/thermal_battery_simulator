@@ -37,14 +37,21 @@ class MaterialsPanel(QWidget):
         self.materials_page = FormPanel()
         bed = self.materials_page.section(
             "Materials",
-            "The bed is a packed bed of the medium: its conductivity, density and heat "
-            "capacity are those of the grains at the packing fraction, with the voids "
-            "(compute_packed_bed_properties).  The insulation and the shell are solid.")
+            "The bed is a packed bed of the medium: its density and heat capacity are "
+            "the grains' at the packing fraction, with the air in the voids; its "
+            "conductivity is the Zehner-Bauer-Schlunder model with the radiation "
+            "between the grains, re-evaluated at the temperature of every cell as the "
+            "bed heats.  The insulation and the shell are solid.")
         self.storage_material = bed.add("Storage medium", combo(
             _STORAGE, _index_of(_STORAGE, "steatite"), self.refresh_info))
         self.packing = bed.add("Packing [%]", int_spin(
             63, 20, 90, 1, on_change=self.refresh_info,
             tooltip="Solid fraction of the bed: 60-65 % for poured sand or crushed rock"))
+        self.grain = bed.add("Grain size [mm]", double_spin(
+            1.0, 0.05, 50.0, 0.5, 2, on_change=self.refresh_info,
+            tooltip="Mean grain diameter of the bed: the radiation between the grains "
+                    "grows with it (Zehner-Bauer-Schlunder with radiation, VDI Heat "
+                    "Atlas D6.3), so a coarser bed conducts better when hot"))
         self.storage_info = bed.add("Bed", hint("-"))
         self.insulation_material = bed.add("Insulation", combo(
             _INSULATION, 0, self.refresh_info))
@@ -72,11 +79,15 @@ class MaterialsPanel(QWidget):
     def refresh_info(self, *_args) -> None:
         from src.core.materials import MaterialManager
 
-        bed = MaterialManager().compute_packed_bed_properties(
-            self.storage_material.currentData(), self.packing_fraction())
+        manager = MaterialManager()
+        key = self.storage_material.currentData()
+        bed = manager.compute_packed_bed_properties(key, self.packing_fraction())
+        law = manager.packed_bed(key, self.packing_fraction(), self.particle_diameter())
+        cold, hot = law([293.15, 773.15])
         insulation = MATERIALS[self.insulation_material.currentData()]
         self.storage_info.setText(
-            f"k {bed.k:.3f} W/(m·K) · rho {bed.rho:.0f} kg/m³ · cp {bed.cp:.0f} J/(kg·K)")
+            f"k {cold:.2f} W/(m·K) at 20 °C, {hot:.2f} at 500 °C · rho {bed.rho:.0f} "
+            f"kg/m³ · cp {bed.cp:.0f} J/(kg·K)")
         self.insulation_info.setText(
             f"{insulation.k:.3f} W/(m·K) · up to {insulation.t_max - 273.15:.0f} °C")
 
@@ -92,6 +103,10 @@ class MaterialsPanel(QWidget):
 
     def packing_fraction(self) -> float:
         return self.packing.value() / 100.0
+
+    def particle_diameter(self) -> float:
+        """Grain diameter of the bed [m]."""
+        return self.grain.value() / 1000.0
 
     def conditions(self) -> dict[str, float]:
         return {
