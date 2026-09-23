@@ -243,7 +243,7 @@ class ThermalBatteryGUI(QMainWindow):
                                    nearest_leaf(region.height, dz))
         names = {"sand": "sand", "slab_bottom": "bottom slab", "slab_top": "top slab",
                  "insulation_radial": "insulation", "shell": "shell", "roof": "roof",
-                 "foundation": "foundation"}
+                 "foundation": "foundation", "ground": "soil"}
         panel.plan_info.setText(", ".join(
             f"{names.get(name, name)} {a * 1000:.0f}x{b * 1000:.0f} mm"
             for name, (a, b) in leaves.items()))

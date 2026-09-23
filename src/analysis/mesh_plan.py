@@ -276,10 +276,20 @@ def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
     if cyl.roof_height > 0:
         regions.append(ring("roof", casing, 0.0, cyl.r_shell, cyl.z_cone_base,
                             cyl.z_cone_apex, "the cone roof carries the top film"))
-    if cyl.base_z > 0:
+    if cyl.foundation_thickness > 0:
         reach = cyl.r_shell + max(cyl.foundation_margin, 0.0)
-        regions.append(ring("foundation", casing, 0.0, reach, 0.0, cyl.base_z,
+        regions.append(ring("foundation", casing, 0.0, reach, cyl.ground_depth,
+                            cyl.base_z,
                             "the concrete under the floor carries the ground face"))
+    if cyl.ground_depth > 0:
+        reach = cyl.r_shell + max(cyl.foundation_margin, 0.0)
+        height = heights.get("ground")
+        regions.append(MeshRegion(
+            "ground", target("ground", casing), (cx - reach, cy - reach, 0.0),
+            (cx + reach, cy + reach, cyl.ground_depth),
+            "the soil under the foundation, down to the deep-ground face",
+            target_z=None if height is None else float(height),
+            axis=(cx, cy), r_inner=0.0, r_outer=reach))
     boxes = list(pipe_boxes) + ([pipe_box] if pipe_box is not None else [])
     for low, high in boxes:
         regions.append(MeshRegion("pipe_wall", target("pipe_wall", 0.05),

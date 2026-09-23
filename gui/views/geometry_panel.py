@@ -109,7 +109,12 @@ class GeometryPanel(QWidget):
                                                           on_change=changed))
         self.base_z = shape.add("Foundation depth [m]", double_spin(
             0.3, 0.0, 5.0, 0.1, 2, on_change=changed,
-            tooltip="Concrete under the floor of the vessel: the ground face is under it"))
+            tooltip="Concrete pad under the floor of the vessel, on the ground"))
+        self.soil = shape.add("Soil under it [m]", double_spin(
+            3.0, 0.0, 20.0, 0.5, 1, on_change=changed,
+            tooltip="Ground modelled under the pad (moist sand, 1.5 W/(m K)); the Site "
+                    "ground temperature is held at its bottom.  0 holds it right under "
+                    "the pad, which overstates the losses to the ground"))
         layers = self.vessel_page.section("Insulation and shell")
         self.insulation_thickness = layers.add("Radial insulation [m]", double_spin(
             0.3, 0.02, 1.0, 0.05, 2, on_change=changed))
@@ -537,7 +542,8 @@ class GeometryPanel(QWidget):
         # ring (a thin steel shell needs no cells across it: the painter keeps it one
         # cell thick whatever the mesh)
         targets = {"sand": sand, "insulation_radial": across, "shell": across,
-                   "slab_bottom": sand, "slab_top": sand, "casing": sand}
+                   "slab_bottom": sand, "slab_top": sand, "casing": sand,
+                   "ground": 2.0 * sand}
         # heights: the bed's layer along the bed and the ring, the thickness of each
         # horizontal layer over the insulation count where one is
         heights = {
@@ -546,13 +552,16 @@ class GeometryPanel(QWidget):
                                         cyl.insulation_slab_bottom / insulation_cells),
             "slab_top": self.planned("slab_top", cyl.insulation_slab_top / insulation_cells),
             "casing": min(across, layer),
+            # the soil only spreads the heat of the pad downwards: a few layers
+            "ground": max(layer, cyl.ground_depth / 6.0),
         }
         return active_regions(cyl, targets, heights=heights)
 
     def _shape(self, center: tuple[float, float] = (0.0, 0.0)) -> CylinderGeometry:
         return CylinderGeometry(
             center_x=center[0], center_y=center[1],
-            base_z=self.base_z.value(), height=self.height.value(),
+            base_z=self.soil.value() + self.base_z.value(), height=self.height.value(),
+            ground_depth=self.soil.value(),
             r_storage=self.radius.value(),
             insulation_thickness=self.insulation_thickness.value(),
             shell_thickness=self.shell_thickness.value(),

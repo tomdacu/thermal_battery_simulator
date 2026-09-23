@@ -69,6 +69,9 @@ STRUCTURAL_MATERIALS: dict[str, ThermalProperties] = {
     "carbon_steel": _p("Carbon steel", 50.0, 7850, 490, 400, 0.8),
     "stainless_steel": _p("Stainless steel 304", 16.0, 8000, 500, 800, 0.6),
     "concrete": _p("Concrete", 1.4, 2400, 880, 300),
+    # moist sandy soil, the design value of ground-heat practice (VDI 4640-1, table 1:
+    # 1.2-1.9 W/(m K) for moist sand; volumetric capacity ~1.9 MJ/(m3 K))
+    "soil": _p("Soil (moist sand)", 1.5, 1900, 1000, 300),
 }
 
 FLUID_MATERIALS: dict[str, ThermalProperties] = {

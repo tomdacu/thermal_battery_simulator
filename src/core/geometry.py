@@ -120,6 +120,14 @@ class CylinderGeometry:
     fill_cone_with_sand: bool = False
     enable_cone_roof: bool = True
     foundation_margin: float = 0.5
+    #: soil under the foundation [m]: the domain floor is this far below grade and holds
+    #: the deep-ground temperature; 0 = the foundation sits on the fixed ground face.
+    #: ``base_z`` includes it (the foundation is ``base_z - ground_depth`` thick)
+    ground_depth: float = 0.0
+
+    @property
+    def foundation_thickness(self) -> float:
+        return max(self.base_z - self.ground_depth, 0.0)
 
     @property
     def r_insulation(self) -> float:
@@ -226,6 +234,8 @@ class CylinderGeometry:
             problems.append("insulation slab thicknesses must be >= 0")
         if self.base_z < 0:
             problems.append("base_z must be >= 0")
+        if not 0.0 <= self.ground_depth <= self.base_z:
+            problems.append("ground_depth must be in [0, base_z]")
         return problems
 
 
@@ -431,6 +441,11 @@ class BatteryGeometry:
         """Air-exposed faces convect (with the shell emissivity), ground is fixed."""
         steel_props = steel_props or MaterialManager().get(self.shell_material)
         for face in ("x_min", "x_max", "y_min", "y_max"):
+            if self.cylinder.ground_depth > 0:
+                # the only solid touching the sides of the box is the soil, which goes
+                # on beyond it: a symmetry (no flux), not a surface in the wind
+                mesh.set_adiabatic(face)
+                continue
             mesh.set_convection_bc(face, self.h_lateral, self.t_ambient)
             mesh.face_bc[face].emissivity = steel_props.emissivity
         mesh.set_convection_bc("z_max", self.h_top, self.t_ambient)
@@ -445,6 +460,41 @@ class BatteryGeometry:
         mesh.k[mask] = props.k
         mesh.rho[mask] = props.rho
         mesh.cp[mask] = props.cp
+
+    @staticmethod
+    def _blend(mesh, mask: np.ndarray, material: MaterialID, first: ThermalProperties,
+               second: ThermalProperties, fraction: float, series: bool) -> None:
+        """Cells that are ``fraction`` of ``first`` and the rest of ``second``.
+
+        The capacity is the two by volume (``rho`` by volume, ``cp`` by mass); the
+        conductivity is the two in series across the layers when ``series`` (heat
+        crossing a thin shell and the insulation behind it), else in parallel.
+        """
+        f = float(np.clip(fraction, 0.0, 1.0))
+        rho = f * first.rho + (1.0 - f) * second.rho
+        cp = (f * first.rho * first.cp + (1.0 - f) * second.rho * second.cp) / rho
+        if series:
+            k = 1.0 / (f / first.k + (1.0 - f) / second.k)
+        else:
+            k = f * first.k + (1.0 - f) * second.k
+        mesh.material_id[mask] = int(material)
+        mesh.k[mask] = k
+        mesh.rho[mask] = rho
+        mesh.cp[mask] = cp
+
+    @staticmethod
+    def _scale_capacity(mesh, mask: np.ndarray, fraction: float,
+                        rest: ThermalProperties) -> None:
+        """Keep the conduction of the cells, give them ``fraction`` of their capacity.
+
+        For a thin steel layer widened to a cell: the rest of the cell is ``rest`` (the
+        air or the sand behind it), whose capacity is added by volume.
+        """
+        f = float(np.clip(fraction, 0.0, 1.0))
+        rho = f * mesh.rho[mask] + (1.0 - f) * rest.rho
+        cp = (f * mesh.rho[mask] * mesh.cp[mask] + (1.0 - f) * rest.rho * rest.cp) / rho
+        mesh.rho[mask] = rho
+        mesh.cp[mask] = cp
 
     @staticmethod
     def _widen(low: float, high: float, minimum: float, grow_up: bool = True
@@ -475,7 +525,13 @@ class BatteryGeometry:
         mid_lateral = 0.5 * (cyl.base_z + cyl.z_shell_top)
         cell = max(_axis_size(mesh, 0, x_shell, y_shell, mid_lateral),
                    _axis_size(mesh, 1, x_shell, y_shell, mid_lateral))
-        foundation = (z < cyl.base_z) & (cyl.r_shell + cyl.foundation_margin >= R)
+        if cyl.ground_depth > 0:
+            # the soil under the foundation, the whole width of the box: the deep ground
+            # face is under it, its top outside the pad faces the ambient film
+            self._fill(mesh, z < cyl.ground_depth, MaterialID.GROUND,
+                       MaterialManager().get("soil"))
+        foundation = ((z >= cyl.ground_depth) & (z < cyl.base_z)
+                      & (cyl.r_shell + cyl.foundation_margin >= R))
         self._fill(mesh, foundation, MaterialID.CONCRETE, concrete)
 
         lateral = (z >= cyl.base_z) & (z < cyl.z_shell_top)
@@ -483,8 +539,17 @@ class BatteryGeometry:
         self._fill(mesh, lateral & (cyl.r_storage <= R) & (cyl.r_insulation > R),
                    MaterialID.INSULATION, insul)
         shell_inner = max(cyl.r_shell - max(cyl.shell_thickness, cell), 0.0)
-        self._fill(mesh, lateral & (shell_inner <= R) & (cyl.r_shell > R),
-                   MaterialID.STEEL, steel)
+        ring = lateral & (shell_inner <= R) & (cyl.r_shell > R)
+        if 0.0 < cyl.shell_thickness < cell:
+            # a shell thinner than the cell: the outer cell is steel *and* insulation.
+            # Radially the two are in series, so the cell keeps the insulation's
+            # resistance and adds the steel's; its capacity is the two by volume.
+            # Painting the whole cell steel widened a 20 mm shell into ~100 mm and took
+            # that much insulation away
+            self._blend(mesh, ring, MaterialID.STEEL, steel, insul,
+                        cyl.shell_thickness / cell, series=True)
+        else:
+            self._fill(mesh, ring, MaterialID.STEEL, steel)
         if cyl.insulation_slab_bottom > 0:
             slab_cell = _axis_size(mesh, 2, cyl.center_x, cyl.center_y,
                                    0.5 * (cyl.z_slab_bottom_start + cyl.z_storage_start))
@@ -505,8 +570,11 @@ class BatteryGeometry:
                                     cyl.z_slab_top_end)
             plate_low, plate_high = self._widen(cyl.z_slab_top_end, cyl.z_steel_slab_end,
                                                 plate_cell)
-            self._fill(mesh, (z >= plate_low) & (z < plate_high) & (cyl.r_insulation > R),
-                       MaterialID.STEEL, steel)
+            plate = (z >= plate_low) & (z < plate_high) & (cyl.r_insulation > R)
+            self._fill(mesh, plate, MaterialID.STEEL, steel)
+            # a widened plate carries the steel it has, not the cell's worth of it
+            self._scale_capacity(mesh, plate, cyl.steel_slab_top / (plate_high - plate_low),
+                                 MaterialManager().get("air"))
 
     def _paint_storage(self, mesh: Mesh3D | AdaptiveMesh, R, Z, storage) -> None:
         cyl = self.cylinder
@@ -528,7 +596,14 @@ class BatteryGeometry:
                         mesh.cell_size_at(cyl.center_x + 0.7 * cyl.r_shell, cyl.center_y,
                                           z_roof))
         r_inner = np.maximum(r_cone - thickness, 0.0)
-        self._fill(mesh, in_region & (r_inner <= R) & (r_cone > R), MaterialID.STEEL, steel)
+        cone = in_region & (r_inner <= R) & (r_cone > R)
+        self._fill(mesh, cone, MaterialID.STEEL, steel)
+        if 0.0 < cyl.shell_thickness < thickness:
+            # the cone is a thin shell over the air of the roof: a cell of it keeps the
+            # steel's conduction along the surface and the steel's own mass
+            self._scale_capacity(mesh, cone, cyl.shell_thickness / thickness,
+                                 storage if cyl.fill_cone_with_sand
+                                 else MaterialManager().get("air"))
 
     def _paint_source(self, mesh: Mesh3D | AdaptiveMesh, Z, R) -> int:
         """The lumped bed source: the gas circuit's power over the storage volume.
@@ -570,7 +645,7 @@ class BatteryGeometry:
             "cone_shell": self._cone_shell_volume(),
             "steel_slab": float(np.pi * cyl.r_insulation ** 2 * max(cyl.steel_slab_top, 0.0)),
             "foundation": float(np.pi * (cyl.r_shell + cyl.foundation_margin) ** 2
-                                * max(cyl.base_z, 0.0)),
+                                * cyl.foundation_thickness),
         }
         v["insulation"] = v["slab_bottom"] + v["slab_top"] + v["insulation_radial"]
         v["total"] = sum(v[k] for k in ("storage", "insulation", "shell", "cone_shell",

@@ -265,7 +265,51 @@ def solve_linear(a: sparse.csr_matrix, b: np.ndarray, cfg: LinearConfig = None,
     x0_flat = None if x0 is None else np.asarray(x0, dtype=float).ravel()
     if cfg.method == "direct":
         return _solve_direct(a, b, notes)
+    free, a_free, scale_free = _decoupled(a, cache, scale)
+    if free is not None:
+        # the rows a symmetric elimination pinned (the excluded air, a Dirichlet wall) are
+        # an identity and nothing else: their value is known, and the iterative method
+        # only sees the rows that are really coupled - a quarter fewer unknowns on the
+        # default vessel, whose excluded air is pinned at the ambient
+        a = a.tocsr()
+        x = b / a.diagonal()
+        start = None if x0_flat is None else x0_flat[free]
+        sub = _solve_iterative(a_free, b[free], cfg, start, cache, notes, scale_free)
+        x[free] = np.asarray(sub.T, dtype=float).ravel()
+        return LinearResult(x, sub.converged, sub.iterations, _relative_residual(a, b, x),
+                            sub.method, sub.notes)
     return _solve_iterative(a, b, cfg, x0_flat, cache, notes, scale)
+
+
+def _decoupled(a, cache, scale):
+    """``(free rows, A[free, free], scale[free])`` when rows decouple, else Nones.
+
+    A row is decoupled when its only entry is its diagonal and its column holds nothing
+    else either - what :func:`src.solver.matrix.apply_dirichlet` leaves of a pinned cell.
+    Built once per matrix (and scale) object when a cache is given.
+    """
+    memo = getattr(cache, "_reduced", None) if cache is not None else None
+    if (memo is not None and memo[0]() is a and memo[1] is scale):
+        return memo[2], memo[3], memo[4]
+    csr = a.tocsr()
+    n = csr.shape[0]
+    rows = np.diff(csr.indptr)
+    columns = np.diff(csr.tocsc().indptr)
+    diagonal = csr.diagonal()
+    alone = (rows == 1) & (columns == 1) & (diagonal != 0.0)
+    if int(np.count_nonzero(alone)) < max(1, int(0.02 * n)) or alone.all():
+        result = (None, None, None)
+    else:
+        free = np.flatnonzero(~alone)
+        a_free = csr[free][:, free].tocsr()
+        scale_free = None if scale is None else np.asarray(scale, dtype=float).ravel()[free]
+        result = (free, a_free, scale_free)
+    if cache is not None:
+        try:
+            cache._reduced = (weakref.ref(a), scale, *result)
+        except TypeError:
+            cache._reduced = None
+    return result
 
 
 def _solve_direct(a, b, notes) -> LinearResult:

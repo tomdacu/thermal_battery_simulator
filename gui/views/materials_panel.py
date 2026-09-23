@@ -57,12 +57,12 @@ class MaterialsPanel(QWidget):
             "The only ambient values the model uses.  The outer surface exchanges with the "
             "air through a film computed from the correlations - natural convection on the "
             "vessel plus the wind (ISO 6946, 4 + 4 v) - which the log reports after every "
-            "build; the ground is held at its temperature under the foundation.")
+            "build; the ground is held at its temperature at the bottom of the soil.")
         self.t_ambient = site.add("Ambient [°C]", double_spin(20.0, -40.0, 80.0, 1.0, 1))
         self.t_ground = site.add("Ground [°C]", double_spin(
             10.0, -20.0, 60.0, 1.0, 1,
-            tooltip="Held under the foundation: the ground below a plant is close to the "
-                    "annual mean air temperature"))
+            tooltip="Held at the bottom of the soil under the pad (Vessel page): a few "
+                    "metres down the ground is close to the annual mean air temperature"))
         self.wind = site.add("Wind speed [m/s]", double_spin(
             0.0, 0.0, 30.0, 0.5, 1,
             tooltip="Forced part of the outer film, 4 + 4 v (ISO 6946), added to the "
