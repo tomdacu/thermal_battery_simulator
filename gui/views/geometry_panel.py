@@ -30,7 +30,7 @@ from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
                                    LAYOUT_SPIRAL, LAYOUT_STAGGERED, PIPE_CARBON,
                                    PIPE_STAINLESS, SPLIT_EQUAL, SPLIT_PATH,
                                    SPLIT_RING, SPLIT_SECTOR, WARNING,
-                                   PipeNetworkConfig, riser_positions)
+                                   PipeNetworkConfig)
 from src.core.pipes import pipe_surface_power_w_cm2
 from src.solver.fluid import Fluid
 
@@ -233,21 +233,25 @@ class GeometryPanel(QWidget):
     def _build_mesh_page(self) -> None:
         resolution = self.mesh_page.section(
             "Resolution",
-            "The mesh is an octree refined on the active model only: the sand, the "
-            "insulation, the shell and a column around every riser, each to the finer "
-            "of the count below and the a priori plan.  The air around the vessel is "
-            "excluded from the problem, so its leaves stay coarse.  Every target snaps "
-            "to the nearest leaf size (leaves are powers of two of the finest one).")
+            "The mesh is a tree of boxes refined on the active model only: every leaf "
+            "has its own width in plan and its own height, so the bed and the insulation "
+            "are tall where nothing changes vertically and thin where the slabs, the "
+            "roof and the foundation are.  The pipes need no refinement: a tube is a "
+            "line inside a cell, coupled by the well model, and the cell around it must "
+            "be larger than the tube.  The air around the vessel is excluded, so its "
+            "leaves stay coarse.  Every size snaps to the nearest leaf (powers of two of "
+            "the finest one).")
         self.cells_storage = resolution.add("Cells across storage", int_spin(
             10, 2, 200, 1, on_change=self._mesh_mode,
             tooltip="Cells across the storage radius: the bed's own size"))
         self.cells_insulation = resolution.add("Cells across insulation", int_spin(
             3, 1, 50, 1, on_change=self._mesh_mode,
             tooltip="Cells across the radial insulation (and the slabs, and the shell)"))
-        self.cells_sheath = resolution.add("Cells across the tube", int_spin(
-            1, 1, 20, 1, on_change=self._mesh_mode,
-            tooltip="Cells across the outer diameter of a riser: the column of leaves "
-                    "the tree refines around every pipe"))
+        self.bed_layers = resolution.add("Layers in the bed height", int_spin(
+            20, 2, 400, 1, on_change=self._mesh_mode,
+            tooltip="Leaves across the height of the storage: the bed and the radial "
+                    "insulation take this height, the slabs, the roof and the "
+                    "foundation their own thickness over the insulation count"))
         self.max_cells = resolution.add("Cell budget", int_spin(
             400_000, 10_000, 20_000_000, 50_000, on_change=self._mesh_mode,
             tooltip="The most leaves the mesh may have: the refinement goes coarse to "
@@ -430,33 +434,55 @@ class GeometryPanel(QWidget):
         what the recipe fixes - the box, the resolution floor and the refinement boxes -
         and, once a tree has been built, what the tree actually is.
         """
-        lx, ly, lz = self.domain()
         try:
             plan = self.adaptive_plan()
         except (ValueError, RuntimeError) as exc:
             self.mesh_info.setText(f"invalid: {exc}")
             self.memory_info.setText("-")
             return
-        box = plan.n_finest * plan.physical_size
-        sizes = [band.size for band in plan.bands]
-        lines = [f"box {box:.2f} m, finest leaf {plan.physical_size * 1000:.0f} mm, "
-                 f"{len(plan.bands)} regions ({min(sizes) * 1000:.0f}-"
-                 f"{max(sizes) * 1000:.0f} mm)"]
+        lx, ly, lz = self.domain()
+        plan_sizes = [band.size for band in plan.bands]
+        heights = [band.height for band in plan.bands]
+        dz = plan.dz if plan.anisotropic else plan.physical_size
+        lines = [f"box {lx:.2f} x {ly:.2f} x {lz:.2f} m, finest leaf "
+                 f"{plan.physical_size * 1000:.0f} x {dz * 1000:.0f} mm (plan x height), "
+                 f"{len(plan.bands)} regions"]
+        well = self.well_model_check(min(plan_sizes))
+        if well:
+            lines.append(well)
         mesh = self._adaptive_mesh
         if mesh is None:
             lines.append("press Build mesh to count the leaves")
             self.memory_info.setText("-")
         else:
-            levels = ", ".join(
-                f"{plan.physical_size * 2 ** level * 1000:.0f} mm: {count:,}"
-                for level, count in mesh.level_histogram().items())
-            lines.append(f"{mesh.n_cells:,} leaves - {levels}")
+            histogram = sorted(mesh.size_histogram().items(), key=lambda item: -item[1])
+            shown = ", ".join(f"{a * 1000:.0f}x{b * 1000:.0f} mm: {count:,}"
+                              for (a, b), count in histogram[:4])
+            more = f" (+{len(histogram) - 4} more sizes)" if len(histogram) > 4 else ""
+            lines.append(f"{mesh.n_cells:,} leaves - {shown}{more}")
             if self._budget_short:
-                lines.append(f"the cell budget stopped the refinement at "
-                             f"{mesh.sizes.min() * 1000:.0f} mm: raise it for the "
-                             f"{min(sizes) * 1000:.0f} mm the regions ask for")
+                lines.append(f"the cell budget stopped the refinement before the "
+                             f"{min(plan_sizes) * 1000:.0f} x {min(heights) * 1000:.0f} mm "
+                             f"the regions ask for: raise it")
             self.memory_info.setText(f"~{mesh.n_cells * 98 / 1e6:.1f} MB of fields")
         self.mesh_info.setText("\n".join(lines))
+
+    def well_model_check(self, finest_plan: float) -> str:
+        """A warning when the leaf around a riser is too small for the well model.
+
+        The tube is a line in its cell and the cell's temperature is the bed's at the
+        equivalent radius ``0.198 h`` (Peaceman): that radius has to be outside the tube,
+        so the plan edge of the cell must exceed ``d / (2 * 0.198) = 2.53 d``.
+        """
+        diameter = self.pipe_diameter.value()
+        smallest = 0.5 * diameter / 0.198
+        sand = self.cylinder().r_storage / max(self.cells_storage.value(), 1)
+        if nearest_leaf(sand, finest_plan) + 1e-9 < smallest:
+            return (f"the bed's leaves ({nearest_leaf(sand, finest_plan) * 1000:.0f} mm) are "
+                    f"smaller than the {smallest * 1000:.0f} mm the well model of a "
+                    f"{diameter * 1000:.0f} mm tube needs: the tube-to-bed resistance is "
+                    f"then overstated - use fewer cells across the storage")
+        return ""
 
     def adaptive_plan(self) -> AdaptivePlan:
         """The tree the current targets ask for: the *regions* as boxes of an octree.
@@ -473,21 +499,25 @@ class GeometryPanel(QWidget):
         if self._auto_plan is not None:
             return self._auto_plan
         raw = region_bands(self.mesh_regions())
-        # the finest leaf is the one the finest region asks for (the pipes, usually):
-        # the refinement is local, so the floor no longer has to fit the whole box in
-        # the budget - the budget caps the leaves the rounds actually make (build_mesh)
-        box = max(self.domain())
-        finest = min(band.size for band in raw)
-        level = int(np.clip(np.round(np.log2(box / finest)), MIN_TREE_LEVEL, MAX_TREE_LEVEL))
-        n_finest = 1 << level
-        physical_size = box / n_finest
+        side, _side, tall = self.domain()
+
+        def finest(extent: float, target: float) -> tuple[int, float]:
+            """The finest cell along one direction: the finest region's target."""
+            level = int(np.clip(np.round(np.log2(extent / target)), MIN_TREE_LEVEL,
+                                MAX_TREE_LEVEL))
+            return 1 << level, extent / (1 << level)
+
+        # the finest leaf is the one the finest region asks for, separately in plan and
+        # in height; the budget caps the leaves the rounds actually make (build_mesh)
+        n_xy, dx = finest(side, min(band.size for band in raw))
+        n_z, dz = finest(tall, min(band.height for band in raw))
         # a leaf is a power of two of the finest cell: every target is snapped to the
         # largest such size within LEAF_TOLERANCE of it, not to the next one below -
         # otherwise a 200 mm request on 101.6/203 mm leaves refines the whole bed to
-        # 101.6 mm, twice finer than asked and eight times the leaves
-        bands = tuple(replace(band, size=nearest_leaf(band.size, physical_size))
-                      for band in raw)
-        return AdaptivePlan(n_finest=n_finest, physical_size=physical_size, bands=bands)
+        # 101.6 mm, twice finer than asked and four times the leaves of a layer
+        bands = tuple(replace(band, size=nearest_leaf(band.size, dx),
+                              size_z=nearest_leaf(band.height, dz)) for band in raw)
+        return AdaptivePlan(n_finest=n_xy, physical_size=dx, bands=bands, n_z=n_z, dz=dz)
 
     def mesh_regions(self):
         """The active regions of the model, each with the cell size the panel asks for.
@@ -499,29 +529,25 @@ class GeometryPanel(QWidget):
         """
         cyl = self.cylinder()
         insulation_cells = max(self.cells_insulation.value(), 1)
-        targets = {
-            "sand": self.planned("storage", cyl.r_storage / max(self.cells_storage.value(), 1)),
-            "insulation_radial": self.planned(
-                "insulation_radial", cyl.insulation_thickness / insulation_cells),
-            "slab_bottom": self.planned(
-                "slab_bottom", cyl.insulation_slab_bottom / insulation_cells),
+        sand = self.planned("storage", cyl.r_storage / max(self.cells_storage.value(), 1))
+        layer = cyl.height / max(self.bed_layers.value(), 1)
+        across = self.planned("insulation_radial",
+                              cyl.insulation_thickness / insulation_cells)
+        # plan edges: the bed's in the bed and under the slabs, the insulation's in the
+        # ring (a thin steel shell needs no cells across it: the painter keeps it one
+        # cell thick whatever the mesh)
+        targets = {"sand": sand, "insulation_radial": across, "shell": across,
+                   "slab_bottom": sand, "slab_top": sand, "casing": sand}
+        # heights: the bed's layer along the bed and the ring, the thickness of each
+        # horizontal layer over the insulation count where one is
+        heights = {
+            "sand": layer, "insulation_radial": layer, "shell": layer,
+            "slab_bottom": self.planned("slab_bottom",
+                                        cyl.insulation_slab_bottom / insulation_cells),
             "slab_top": self.planned("slab_top", cyl.insulation_slab_top / insulation_cells),
-            # a thin steel shell needs no cells across it: the painter keeps it one cell
-            # thick whatever the mesh, so it takes the insulation's size (and its own
-            # film rule, which for steel never binds)
-            "shell": cyl.insulation_thickness / insulation_cells,
-            "pipe_wall": self.pipe_diameter.value() / max(self.cells_sheath.value(), 1),
+            "casing": min(across, layer),
         }
-        targets["casing"] = max(targets.values())
-        config = self.pipe_network_config()
-        # one column per riser, as wide as the pipe: the tree refines the leaves the pipe
-        # crosses and its own 2:1 balance grades the sand around them.  A single box over
-        # the whole bundle refined all the sand to the pipe's size - no octree steps
-        # anywhere in the bed, and most of the leaves of the mesh
-        half = 0.5 * config.diameter
-        pipe_boxes = [((x - half, y - half, config.z_bottom), (x + half, y + half, config.z_top))
-                      for x, y in riser_positions(config, (cyl.center_x, cyl.center_y))]
-        return active_regions(cyl, targets, pipe_boxes=pipe_boxes)
+        return active_regions(cyl, targets, heights=heights)
 
     def _shape(self, center: tuple[float, float] = (0.0, 0.0)) -> CylinderGeometry:
         return CylinderGeometry(
@@ -558,17 +584,15 @@ class GeometryPanel(QWidget):
         leaf edges are measured, never guessed.
         """
         plan = self.adaptive_plan()
-        root = plan.base_level
-        if root is None:
-            root = int(np.log2(plan.n_finest))
-        mesh = AdaptiveMesh.uniform(plan.n_finest, plan.physical_size, root)
         # the budget is a cap on the leaves: the rounds go coarse to fine over the whole
         # tree, so a budget that stops them leaves every region one level short rather
         # than some regions done and others untouched
-        mesh.refine_bands(plan.bands, max_cells=int(self.max_cells.value()))
+        mesh = AdaptiveMesh.from_plan(plan, max_cells=int(self.max_cells.value()))
         self._adaptive_mesh = mesh
-        self._budget_short = float(mesh.sizes.min()) > 1.01 * min(
-            band.size for band in plan.bands)
+        self._budget_short = bool(
+            float(mesh.extent[:, 0].min()) > 1.01 * min(band.size for band in plan.bands)
+            or float(mesh.extent[:, 2].min()) > 1.01 * min(band.height
+                                                           for band in plan.bands))
         self._update_mesh_summary()
         return mesh
 

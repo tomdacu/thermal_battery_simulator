@@ -63,6 +63,7 @@ from ..solver.octree_solver import _NOISE_FLOOR, OctreeSteadySolver, _mark
 from ..units import check_kelvin
 from .mesh import FACES, BoundaryType, FaceBC
 from .mesh_api import FaceRow, is_interior_tube
+from .box_tree import BoxTree
 from .octree import FACE_AXIS, FACE_SIGN, Leaf, Octree, locate_in_tables, uniform_tree
 from .physics import half_cell_h
 
@@ -84,6 +85,9 @@ class RefinementBand:
     low: tuple[float, float, float]
     high: tuple[float, float, float]
     size: float
+    #: the height the band asks for [m] on an anisotropic tree (:class:`BoxTree`);
+    #: ``None`` = the same as ``size``.  A cubic octree reads ``min(size, size_z)``
+    size_z: float | None = None
     #: a *radial* band: the annulus ``r_inner <= r <= r_outer`` about the vertical axis
     #: through ``axis`` (x, y), between ``low[2]`` and ``high[2]``; ``low``/``high`` are
     #: then its bounding box.  ``None`` = the band is the box itself.  A cylindrical
@@ -92,6 +96,11 @@ class RefinementBand:
     axis: tuple[float, float] | None = None
     r_inner: float = 0.0
     r_outer: float = 0.0
+
+    @property
+    def height(self) -> float:
+        """The height the band asks for [m]."""
+        return float(self.size if self.size_z is None else self.size_z)
 
     def intersects(self, leaf: Leaf, physical_size: float) -> bool:
         """True when the leaf's box overlaps this band (a touch on a plane does not)."""
@@ -119,8 +128,8 @@ def _check_bands(bands: Sequence[RefinementBand]) -> None:
     if not bands:
         raise ValueError("at least one refinement band is required")
     for band in bands:
-        if band.size <= 0.0:
-            raise ValueError(f"band size must be > 0, got {band.size}")
+        if band.size <= 0.0 or band.height <= 0.0:
+            raise ValueError(f"band size must be > 0, got {band.size} x {band.height}")
         for low, high in zip(band.low, band.high, strict=True):
             if high <= low:
                 raise ValueError(f"empty band {band}")
@@ -201,7 +210,9 @@ class AdaptiveMesh:
     consumer inspecting a fresh mesh sees what it saw before.
     """
 
-    tree: Octree
+    #: the cubic :class:`Octree` (``physical_size`` is its finest edge) or the
+    #: anisotropic :class:`BoxTree` (which carries its own finest cell ``dx`` x ``dz``)
+    tree: Octree | BoxTree
     physical_size: float = 1.0
 
     # per-leaf state
@@ -237,6 +248,9 @@ class AdaptiveMesh:
     on_box_face: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if isinstance(self.tree, BoxTree):
+            # the finest plan cell: what a consumer that reads one finest size gets
+            self.physical_size = float(self.tree.dx)
         if self.physical_size <= 0.0:
             raise ValueError(f"physical_size must be > 0, got {self.physical_size}")
         self.face_bc = {face: FaceBC() for face in FACES}
@@ -259,8 +273,22 @@ class AdaptiveMesh:
         self.source_mask = np.zeros(n, dtype=bool)
         self._rebuild_caches()
 
+    @property
+    def anisotropic(self) -> bool:
+        """True on a :class:`BoxTree` (leaves with their own plan edge and height)."""
+        return isinstance(self.tree, BoxTree)
+
     def _rebuild_caches(self) -> None:
         """Leaf edges, volumes and the "touches a box face" mask of the current tree."""
+        if self.anisotropic:
+            #: ``(n, 3)`` leaf edges [m]: x and y the plan edge, z the height
+            self.extent = self.tree.extents()
+            self.V = np.prod(self.extent, axis=1)
+            self._h_char = np.cbrt(self.V)
+            #: the characteristic edge ``V^(1/3)``: a cube's edge on a cubic tree
+            self.sizes = self._h_char
+            self.on_box_face = self.tree.on_box_face()
+            return
         self.sizes = self.tree.cell_sizes() * self.physical_size
         self.V = self.sizes ** 3
         self._h_char = np.cbrt(self.V)
@@ -268,11 +296,43 @@ class AdaptiveMesh:
         corners, levels = self.tree._leaf_arrays()
         upper = corners + np.left_shift(np.int64(1), levels)[:, None]
         self.on_box_face = np.any((corners == 0) | (upper == n), axis=1)
+        self.extent = np.repeat(self.sizes[:, None], 3, axis=1)
 
     @classmethod
     def uniform(cls, n_finest: int, physical_size: float, level: int) -> AdaptiveMesh:
         """Every leaf of the same level, ``2 ** level`` finest cells on a side."""
         return cls(uniform_tree(n_finest, level), physical_size)
+
+    @classmethod
+    def from_box(cls, n_xy: int, n_z: int, dx: float, dz: float, lxy: int | None = None,
+            lz: int | None = None) -> AdaptiveMesh:
+        """A mesh on an anisotropic :class:`BoxTree`, uniform at ``(lxy, lz)``.
+
+        The box is ``n_xy dx`` square in plan and ``n_z dz`` tall; the default levels are
+        the single leaf of the whole box.
+        """
+        tree = BoxTree.uniform(n_xy, n_z, dx, dz,
+                               int(np.log2(n_xy)) if lxy is None else int(lxy),
+                               int(np.log2(n_z)) if lz is None else int(lz))
+        return cls(tree)
+
+    @classmethod
+    def from_plan(cls, plan, max_cells: int | None = None) -> AdaptiveMesh:
+        """The mesh of a :class:`~src.analysis.convergence.AdaptivePlan`, refined to it.
+
+        An anisotropic plan builds a :class:`BoxTree` from its single root leaf; a cubic
+        one the octree of :meth:`from_bands`.  ``max_cells`` caps the leaves.
+        """
+        if getattr(plan, "anisotropic", False):
+            mesh = cls.from_box(plan.n_finest, plan.n_z, plan.physical_size, plan.dz)
+            mesh.refine_bands(plan.bands, max_cells=max_cells)
+            return mesh
+        level = plan.base_level
+        if level is None:
+            level = int(np.log2(plan.n_finest))
+        mesh = cls(uniform_tree(plan.n_finest, level), plan.physical_size)
+        mesh.refine_bands(plan.bands, max_cells=max_cells)
+        return mesh
 
     @classmethod
     def from_bands(cls, n_finest: int, physical_size: float,
@@ -317,7 +377,10 @@ class AdaptiveMesh:
         that scales the plan does.
         """
         _check_bands(bands)
-        sizes = np.array([band.size for band in bands], dtype=float)
+        if self.anisotropic:
+            self._refine_bands_box(bands, max_cells)
+            return
+        sizes = np.array([min(band.size, band.height) for band in bands], dtype=float)
 
         def marks() -> np.ndarray:
             """1 for every leaf still larger than the finest band it touches, else 0.
@@ -346,6 +409,48 @@ class AdaptiveMesh:
                 return                        # the round would not fit: stop here
             self.refine(marked, 0.5)
 
+    def _refine_bands_box(self, bands: Sequence[RefinementBand],
+                          max_cells: int | None) -> None:
+        """:meth:`refine_bands` on a :class:`BoxTree`: plan and height separately.
+
+        A leaf is split in plan while its plan edge is larger than the finest plan
+        target of the bands it touches, and in height while its height is larger than
+        their finest height target; the rounds stop when every leaf meets its bands or
+        before a round that would exceed ``max_cells``.
+        """
+        plan = np.array([band.size for band in bands], dtype=float)
+        tall = np.array([band.height for band in bands], dtype=float)
+        tree = self.tree
+        for _ in range(tree.max_lxy + tree.max_lz + 1):
+            low = tree.lower()
+            edge = tree.extents()
+            high = low + edge
+            want_xy = np.full(tree.n_cells, np.inf)
+            want_z = np.full(tree.n_cells, np.inf)
+            for index, band in enumerate(bands):
+                touching = band.touching(low, high)
+                np.minimum(want_xy, np.where(touching, plan[index], np.inf), out=want_xy)
+                np.minimum(want_z, np.where(touching, tall[index], np.inf), out=want_z)
+            # a leaf exactly at its target is done
+            split_xy = (edge[:, 0] > want_xy * (1.0 + 1e-9)) & (tree.lxy > 0)
+            split_z = (edge[:, 2] > want_z * (1.0 + 1e-9)) & (tree.lz > 0)
+            added = (3 * int(np.count_nonzero(split_xy & ~split_z))
+                     + int(np.count_nonzero(split_z & ~split_xy))
+                     + 7 * int(np.count_nonzero(split_xy & split_z)))
+            if added == 0:
+                return
+            if max_cells is not None and self.n_cells + added > max_cells:
+                return
+            self._split_box(split_xy, split_z)
+
+    def _split_box(self, split_xy: np.ndarray, split_z: np.ndarray) -> None:
+        """Split a :class:`BoxTree` and carry every per-leaf field to the children."""
+        previous = {name: getattr(self, name).copy() for name in FIELDS}
+        mapping = self.tree.refine(split_xy, split_z)
+        for name in FIELDS:
+            setattr(self, name, previous[name][mapping])
+        self._rebuild_caches()
+
     def refine(self, indicator: np.ndarray | Callable[[Leaf], float], threshold: float,
                levels: int = 1) -> None:
         """Refine the tree and carry every per-leaf field to the children.
@@ -358,6 +463,12 @@ class AdaptiveMesh:
         boundary types and the environment survive the round: a leaf that was excluded
         stays excluded.
         """
+        if self.anisotropic:
+            if callable(indicator):
+                raise TypeError("a box tree refines on a per-leaf array, not a rule")
+            marked = np.asarray(indicator, dtype=float) > threshold
+            self._split_box(marked, marked)
+            return
         if not callable(indicator):
             values = np.asarray(indicator, dtype=float)
             if values.shape != (self.tree.n_cells,):
@@ -402,11 +513,13 @@ class AdaptiveMesh:
         either the field carries no feature above the floor, or the round would not fit
         the cell budget, in which case the tree is left exactly as it was.
         """
-        values = np.abs(np.asarray(self.indicator(), dtype=float))
         flux = np.abs(self.face_fluxes(self.T))
+        noise = _NOISE_FLOOR * (float(flux.max()) if flux.size else 0.0)
+        if self.anisotropic:
+            return self._refine_round_box(refine_fraction, floor_ratio, noise, max_cells)
+        values = np.abs(np.asarray(self.indicator(), dtype=float))
         threshold, marked = _mark(
-            self.tree, values, refine_fraction, floor_ratio,
-            noise=_NOISE_FLOOR * (float(flux.max()) if flux.size else 0.0))
+            self.tree, values, refine_fraction, floor_ratio, noise=noise)
         if marked == 0:
             return 0
         # the budget is checked before the round: a marked leaf becomes eight leaves, so
@@ -416,6 +529,55 @@ class AdaptiveMesh:
             return 0
         self.refine(values, threshold)
         return marked
+
+    def _refine_round_box(self, refine_fraction: float, floor_ratio: float, noise: float,
+                          max_cells: int | None) -> int:
+        """:meth:`refine_round` on a :class:`BoxTree`: split where the jump is, that way.
+
+        The flux jump is kept per axis: a leaf whose plan share of the jump is at least a
+        quarter of it is split in plan, and one whose vertical share is at least a quarter
+        in height - so a leaf of the bed whose error is radial stays tall.
+        """
+        net = self._axis_jumps()
+        values = net.sum(axis=1)
+        splittable = (self.tree.lxy > 0) | (self.tree.lz > 0)
+        live = values[splittable & (values > 0.0)]
+        if live.size == 0:
+            return 0
+        threshold = max(floor_ratio * float(live.max()), noise)
+        cap = max(int(np.ceil(refine_fraction * self.n_cells)), 1)
+        if int(np.count_nonzero(splittable & (values > threshold))) > cap:
+            threshold = max(threshold, float(np.quantile(live, 1.0 - refine_fraction)))
+        marked = splittable & (values > threshold)
+        count = int(np.count_nonzero(marked))
+        if count == 0:
+            return 0
+        share = np.divide(net, values[:, None], out=np.zeros_like(net),
+                          where=values[:, None] > 0.0)
+        split_xy = marked & (share[:, 0] + share[:, 1] >= 0.25)
+        split_z = marked & (share[:, 2] >= 0.25)
+        added = (3 * int(np.count_nonzero(split_xy & ~split_z))
+                 + int(np.count_nonzero(split_z & ~split_xy))
+                 + 7 * int(np.count_nonzero(split_xy & split_z)))
+        if max_cells is not None and self.n_cells + added > max_cells:
+            return 0
+        self._split_box(split_xy, split_z)
+        return count
+
+    def _axis_jumps(self, temperature: np.ndarray | None = None) -> np.ndarray:
+        """``(n, 3)`` flux imbalance per leaf and axis [W] (see :meth:`indicator`)."""
+        table = self._face_table()
+        values = self.T if temperature is None else np.asarray(temperature, dtype=float)
+        flux = table.g * (values[table.i] - values[table.j])
+        # every entry of a box tree's table has j on the high side of i
+        net = np.zeros((self.n_cells, 3))
+        np.add.at(net, (table.i, table.axis), flux)
+        np.add.at(net, (table.j, table.axis), -flux)
+        lower = self.lower_corners()
+        upper = lower + self.extent
+        box = np.asarray(self.box)
+        two_sided = (lower > 1e-12 * box) & (upper < box * (1.0 - 1e-12))
+        return np.abs(np.where(two_sided, net, 0.0))
 
     # ------------------------------------------------------- boundary conditions
     def set_adiabatic(self, face: str) -> None:
@@ -464,12 +626,29 @@ class AdaptiveMesh:
         return self.tree.n_cells
 
     @property
+    def box(self) -> tuple[float, float, float]:
+        """``(Lx, Ly, Lz)`` of the domain [m]."""
+        if self.anisotropic:
+            return self.tree.box
+        size = self.box_size
+        return (size, size, size)
+
+    def lower_corners(self) -> np.ndarray:
+        """``(n, 3)`` lower corners of the leaves [m]."""
+        if self.anisotropic:
+            return self.tree.lower()
+        corners, _levels = self.tree._leaf_arrays()
+        return corners * self.physical_size
+
+    @property
     def box_size(self) -> float:
-        """Edge of the (cubic) domain [m].
+        """Edge of the (cubic) domain [m]; the largest edge on an anisotropic tree.
 
         ``physical_size`` is the edge of one *finest* cell, so the box is ``n_finest``
         of them: this is the ``Lx = Ly = Lz`` a structured consumer reads.
         """
+        if self.anisotropic:
+            return float(max(self.tree.box))
         return float(self.physical_size) * self.tree.n
 
     @property
@@ -540,6 +719,22 @@ class AdaptiveMesh:
         cache = getattr(self, "_tables", None)
         if cache is not None and cache["version"] == self.tree.version:
             return cache
+        if self.anisotropic:
+            lower = self.tree.corners
+            upper = lower + self.tree.unit_extents()
+            limit = (self.tree.n_xy, self.tree.n_xy, self.tree.n_z)
+            walls = {}
+            for face in FACES:
+                axis = FACE_AXIS[face]
+                touching = (lower[:, axis] == 0 if FACE_SIGN[face] < 0
+                            else upper[:, axis] == limit[axis])
+                walls[face] = np.flatnonzero(touching).astype(int)
+            i, j, axis, area, distance = self.tree.face_arrays()
+            cache = {"version": self.tree.version, "walls": walls, "i": i.astype(int),
+                     "j": j.astype(int), "axis": axis.astype(int), "area": area,
+                     "distance": distance}
+            self._tables = cache
+            return cache
         n = self.tree.n
         corners = np.array([(leaf.x, leaf.y, leaf.z) for leaf in self.tree.leaves],
                            dtype=np.int64).reshape(-1, 3)
@@ -562,11 +757,19 @@ class AdaptiveMesh:
 
     def centre(self, position: int) -> tuple[float, float, float]:
         """Centre of one leaf in physical coordinates [m]."""
+        if self.anisotropic:
+            return tuple(float(c) for c in self.centres()[position])
         return tuple(float(c * self.physical_size)
                      for c in self.tree.leaves[position].centre)
 
     def centres(self) -> np.ndarray:
         """``(n_cells, 3)`` leaf centres in physical coordinates [m]."""
+        if self.anisotropic:
+            cache = getattr(self, "_centre_cache", None)
+            if cache is None or cache[0] != self.tree.version:
+                cache = (self.tree.version, self.tree.centres())
+                self._centre_cache = cache
+            return cache[1].copy()
         return self.tree.cell_centres() * self.physical_size
 
     def locate(self, x: float, y: float, z: float) -> int:
@@ -580,6 +783,11 @@ class AdaptiveMesh:
         migration); the coordinate is converted to the finest-cell index the leaf list is
         written in (``physical_size`` is the edge of one finest cell).
         """
+        if self.anisotropic:
+            position = int(self.tree.locate_points(np.array([[x, y, z]]), clamp=True)[0])
+            if position < 0:
+                raise ValueError(f"no leaf contains ({x}, {y}, {z}) m")
+            return position
         n = self.tree.n
         corner = tuple(int(np.clip(np.floor(value / self.physical_size), 0, n - 1))
                        for value in (x, y, z))
@@ -596,8 +804,33 @@ class AdaptiveMesh:
         """
         return float(self.h_char[self.locate(x, y, z)])
 
+    def axis_size_at(self, axis: int, x: float, y: float, z: float) -> float:
+        """Edge along ``axis`` (0 = x, 1 = y, 2 = z) of the leaf containing a point [m]."""
+        return float(self.extent[self.locate(x, y, z), axis])
+
+    def locate_points(self, points: np.ndarray, below: bool = False) -> np.ndarray:
+        """Leaf of each physical point (``(m, 3)`` [m]), -1 outside the box.
+
+        ``below``: a point on a face belongs to the leaf below it (``ceil(v/d) - 1``, the
+        rasteriser's rule); otherwise to the leaf above it (``floor(v/d)``).
+        """
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        if self.anisotropic:
+            return self.tree.locate_points(points, below=below)
+        scaled = points / self.physical_size
+        cells = (np.ceil(scaled) - 1 if below else np.floor(scaled)).astype(np.int64)
+        return self.tree.locate_many(cells)
+
     def faces(self) -> Sequence[FaceRow]:
-        """The conservative face list of :class:`MeshAPI`, straight from the octree."""
+        """The conservative face list of :class:`MeshAPI`, straight from the tree.
+
+        Finest-cell units on a cubic octree (its own convention); metres on a box tree,
+        whose axes have different finest cells.
+        """
+        if self.anisotropic:
+            i, j, axis, area, distance = self.tree.face_arrays()
+            return list(zip(i.tolist(), j.tolist(), axis.tolist(), area.tolist(),
+                            distance.tolist(), strict=True))
         return self.tree.faces()
 
     def face_rows(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
@@ -670,7 +903,7 @@ class AdaptiveMesh:
                 positions = self.wall_indices(face)
                 if positions.size == 0:
                     continue
-                size = self.sizes[positions]
+                size = self.extent[positions, FACE_AXIS[face]]
                 coefficient = half_cell_h(self.k[positions], bc.h, size) / size
                 out.append((face, positions, np.asarray(coefficient, dtype=float),
                             np.full(positions.size, float(bc.value))))
@@ -718,13 +951,15 @@ class AdaptiveMesh:
         tables = self._tree_tables()
         i, j = tables["i"], tables["j"]
         area, distance = tables["area"], tables["distance"]
+        normal_i = self.extent[i, tables["axis"]]
+        normal_j = self.extent[j, tables["axis"]]
         g_base = face_conductance(self.k[i], self.k[j], area, distance,
-                                  size_a=self.sizes[i], size_b=self.sizes[j],
+                                  size_a=normal_i, size_b=normal_j,
                                   material_a=self.material_id[i],
                                   material_b=self.material_id[j])
         excluded = self.excluded[i] | self.excluded[j] if self.excluded.any() else None
         g = face_conductance(self.k[i], self.k[j], area, distance,
-                             size_a=self.sizes[i], size_b=self.sizes[j],
+                             size_a=normal_i, size_b=normal_j,
                              material_a=self.material_id[i], material_b=self.material_id[j],
                              h_contact=self.h_contact, excluded_b=excluded)
         table = _FaceTable(i=i, j=j, axis=tables["axis"], area=area,
@@ -768,6 +1003,8 @@ class AdaptiveMesh:
         rather than re-derived, so a tree refined here refines the way
         ``refine_on_objective`` would refine it.
         """
+        if self.anisotropic:
+            return self._axis_jumps(temperature).sum(axis=1)
         values = self.T if temperature is None else np.asarray(temperature, dtype=float)
         solver = OctreeSteadySolver(self.tree, conductivity=self.k,
                                     physical_size=self.physical_size)
@@ -787,6 +1024,17 @@ class AdaptiveMesh:
         ``docs/16_ADAPTIVE_MESH_MIGRATION.md``).
         """
         table = self._face_table() if faces is None else faces
+        if self.anisotropic:
+            # the tree's operator is its face list itself: ``g / V`` on both rows
+            n = self.n_cells
+            ci, cj = table.g / self.V[table.i], table.g / self.V[table.j]
+            rows = np.concatenate((table.i, table.j, np.arange(n)))
+            cols = np.concatenate((table.j, table.i, np.arange(n)))
+            diagonal = np.zeros(n)
+            np.add.at(diagonal, table.i, ci)
+            np.add.at(diagonal, table.j, cj)
+            vals = np.concatenate((-ci, -cj, diagonal))
+            return sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
         base = self.tree.diffusion_matrix(self.k, self.physical_size).tocoo()
         changed = table.g != table.g_base
         if not changed.any():
@@ -830,7 +1078,7 @@ class AdaptiveMesh:
             if bc.kind == BoundaryType.NEUMANN and bc.value != 0.0:
                 positions = self.wall_indices(face)
                 if positions.size:
-                    b[positions] += bc.value / self.sizes[positions]
+                    b[positions] += bc.value / self.extent[positions, FACE_AXIS[face]]
         if not enforce_dirichlet:
             return entry["a"], b
         # the elimination's share of the right-hand side, exactly as apply_dirichlet
@@ -916,10 +1164,10 @@ class AdaptiveMesh:
         symmetrisation; on a graded one the leaf volumes are handed over, as the
         structured solver does with ``mesh.V`` on a graded ``Mesh3D``.
         """
-        sizes = self.tree.cell_sizes()
-        if float(sizes.min()) == float(sizes.max()):
+        volume = np.asarray(self.V, dtype=float)
+        if float(volume.min()) == float(volume.max()):
             return None
-        return np.asarray(self.V, dtype=float)
+        return volume
 
     def transient_operators(self, dt: float, radiation: bool = False
                             ) -> tuple[sparse.csr_matrix, np.ndarray]:
@@ -1077,11 +1325,24 @@ class AdaptiveMesh:
                 raise ValueError(f"face_bc[{face}].h must be >= 0")
 
     # -------------------------------------------------------------------- info
-    def level_histogram(self) -> dict[int, int]:
-        """Leaves per level, as :meth:`Octree.level_histogram` reports them."""
+    def level_histogram(self) -> dict:
+        """Leaves per level (a cubic tree) or per ``(lxy, lz)`` pair (a box tree)."""
+        if self.anisotropic:
+            return self.tree.level_pairs()
         return self.tree.level_histogram()
 
+    def size_histogram(self) -> dict[tuple[float, float], int]:
+        """Leaves per ``(plan edge, height)`` [m], finest first."""
+        pairs, counts = np.unique(np.round(self.extent[:, [0, 2]], 9), axis=0,
+                                  return_counts=True)
+        return {(float(a), float(b)): int(c)
+                for (a, b), c in zip(pairs, counts, strict=True)}
+
     def summary(self) -> str:
+        if self.anisotropic:
+            sizes = ", ".join(f"{a * 1000:.0f}x{b * 1000:.0f} mm: {count}"
+                              for (a, b), count in self.size_histogram().items())
+            return f"adaptive mesh: {self.n_cells} leaves ({sizes}; plan x height)"
         levels = ", ".join(f"L{level}: {count}"
                            for level, count in self.level_histogram().items())
         # no face count: the face list costs seconds on a large tree and the summary is

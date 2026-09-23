@@ -79,6 +79,15 @@ class AdaptivePlan:
     physical_size: float
     bands: tuple[RefinementBand, ...]
     base_level: int | None = None
+    #: an anisotropic tree (:class:`~src.core.box_tree.BoxTree`): ``n_finest`` and
+    #: ``physical_size`` are then the plan's, and these the height's (``None``: a cubic
+    #: octree)
+    n_z: int | None = None
+    dz: float | None = None
+
+    @property
+    def anisotropic(self) -> bool:
+        return self.n_z is not None and self.dz is not None
 
     def scaled(self, factor: float) -> AdaptivePlan:
         """The same plan with every band target multiplied by ``factor``.
@@ -89,8 +98,10 @@ class AdaptivePlan:
         or max size rails to scale, because a leaf edge is a power of two of
         ``physical_size`` and never goes below it.
         """
-        return replace(self, bands=tuple(replace(band, size=band.size * factor)
-                                         for band in self.bands))
+        return replace(self, bands=tuple(
+            replace(band, size=band.size * factor,
+                    size_z=None if band.size_z is None else band.size_z * factor)
+            for band in self.bands))
 
 
 @dataclass(frozen=True)

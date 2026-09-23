@@ -79,15 +79,14 @@ def _axis_size(mesh, axis: int, x: float, y: float, z: float) -> float:
     """
     if isinstance(mesh, Mesh3D):
         return (mesh.size_x(x), mesh.size_y(y), mesh.size_z(z))[axis]
-    return mesh.cell_size_at(x, y, z)
+    return mesh.axis_size_at(axis, x, y, z)
 
 
 def _box(mesh) -> tuple[float, float, float]:
     """The domain box ``(Lx, Ly, Lz)`` [m]; a tree spans a cube."""
     if isinstance(mesh, Mesh3D):
         return mesh.Lx, mesh.Ly, mesh.Lz
-    size = mesh.box_size
-    return size, size, size
+    return tuple(float(v) for v in mesh.box)
 
 
 def _snap_note(mesh) -> str | None:

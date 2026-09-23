@@ -218,8 +218,10 @@ def _domain_face_flux_adaptive(mesh, face: str) -> float:
         return 0.0
     pinned = pinned_cells(mesh)
     positions = mesh.wall_indices(face)
-    size = mesh.sizes[positions]
-    area = size * size                             # the leaves are cubes: V = size^3
+    # the half-cell depth is the leaf's edge along the face normal, and its face the
+    # volume over that edge (a cube's size^2; a flat or tall box's own face)
+    size = mesh.extent[positions, FACE_AXIS[face]]
+    area = mesh.V[positions] / size
     free = ~pinned[positions]
     if bc.kind == BoundaryType.DIRICHLET:
         wall = np.zeros(mesh.n_cells, dtype=bool)

@@ -199,8 +199,7 @@ class SimulationController(QObject):
 
             def build(level: AdaptivePlan):
                 """One search level: the tree, the battery and the network painted on it."""
-                tree = AdaptiveMesh.from_bands(level.n_finest, level.physical_size,
-                                               level.bands, level.base_level)
+                tree = AdaptiveMesh.from_plan(level)
                 config.battery.apply_to_mesh(tree)
                 if config.pipe_config is not None:
                     cyl = config.battery.cylinder

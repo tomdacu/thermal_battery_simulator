@@ -79,9 +79,9 @@ def _extent(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
     A tree spans a cube whose edge is ``box_size`` (``physical_size`` times the finest
     cells a side), which is the ``Lx = Ly = Lz`` a structured mesh reports.
     """
-    box = getattr(mesh, "box_size", None)
+    box = getattr(mesh, "box", None)
     if box is not None:
-        return (float(box),) * 3
+        return tuple(float(v) for v in box)
     return (float(mesh.Lx), float(mesh.Ly), float(mesh.Lz))
 
 
@@ -94,6 +94,9 @@ def _leaf_list(mesh: Mesh3D | AdaptiveMesh) -> np.ndarray | None:
     tree = getattr(mesh, "tree", None)
     if tree is None:
         return None
+    if getattr(mesh, "anisotropic", False):
+        # a box tree: plan level, height level and the corner in finest cells
+        return np.column_stack((tree.lxy, tree.lz, tree.corners)).astype(int)
     return np.array([[leaf.level, leaf.x, leaf.y, leaf.z] for leaf in tree.leaves],
                     dtype=int)
 

@@ -124,7 +124,7 @@ def test_every_panel_getter_survives_extreme_widget_values(window):
     # run kinds below stay a smoke test
     window.geometry_panel.max_cells.setValue(10_000)
     window.geometry_panel.cells_storage.setValue(6)
-    window.geometry_panel.cells_sheath.setValue(1)
+    window.geometry_panel.bed_layers.setValue(10)
     for panel in (window.geometry_panel, window.materials_panel,
                   window.analysis_panel, window.solver_panel):
         try:
@@ -252,7 +252,7 @@ def test_the_mesh_tab_builds_a_refined_tree(window):
     panel = window.geometry_panel
     panel.cells_storage.setValue(6)
     panel.cells_insulation.setValue(2)
-    panel.cells_sheath.setValue(1)
+    panel.bed_layers.setValue(10)
     panel.max_cells.setValue(10_000)
     mesh = panel.build_mesh()
     assert len(mesh.level_histogram()) > 1

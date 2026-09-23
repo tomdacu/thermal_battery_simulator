@@ -1230,8 +1230,9 @@ class PipeNetwork:
         gas temperature is the lumped tube model of the old code and is kept only for a
         caller that asks for it explicitly.
 
-        The lumped bed source the geometry painted is rescaled over the cells that are
-        left, so a mesh that runs without the loop still carries the plant's power.
+        The lumped bed source the geometry painted is left alone: a pipe cell is a cell
+        of the bed, so a mesh that runs without the loop carries the plant's power over
+        the whole band.
         """
         cells, _, areas = self.voxelize(mesh)
         riser_cells = self._riser_cells(mesh)
@@ -1246,13 +1247,10 @@ class PipeNetwork:
         # "pipe" for 0.05 m3 of wall), which soaked up the charge and conducted along the
         # risers; the wall's own capacity is a few percent of the cell's and is dropped
         mesh.material_id[mask] = int(MaterialID.TUBES)
-        power = float(np.sum(mesh.Q_source * mesh.V))
-        mesh.Q_source[mask] = 0.0
-        mesh.source_mask[mask] = False
-        remaining = float(np.sum(mesh.Q_source * mesh.V))
-        if power > 0.0 and remaining > 0.0:
-            # the pipes took their cells out of the bed: the power stays the plant's
-            mesh.Q_source *= power / remaining
+        # the lumped bed source (the analyses that run without the loop) stays where it
+        # is: a pipe cell is a cell of the bed, and on a mesh whose leaves are several
+        # tube diameters wide - the well model asks for that - nearly every cell of the
+        # bed holds a tube
         mesh.set_internal_convection(mask, float(h_fluid), float(t_fluid))
         # an exchanging cell is convective even while its film is zero: the gas loop
         # writes the film per cell, and the assembly must already list the cell

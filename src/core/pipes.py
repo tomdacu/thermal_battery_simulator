@@ -130,8 +130,7 @@ def box_size(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
     """
     if isinstance(mesh, Mesh3D):
         return mesh.Lx, mesh.Ly, mesh.Lz
-    size = float(mesh.box_size)
-    return size, size, size
+    return tuple(float(v) for v in mesh.box)
 
 
 def cell_of(mesh: Mesh3D | AdaptiveMesh, x: float, y: float, z: float) -> int:
@@ -151,13 +150,8 @@ def cell_of(mesh: Mesh3D | AdaptiveMesh, x: float, y: float, z: float) -> int:
         if not (0 <= i < mesh.Nx and 0 <= j < mesh.Ny and 0 <= k < mesh.Nz):
             return -1
         return i + j * mesh.Nx + k * mesh.Nx * mesh.Ny
-    size, n = float(mesh.physical_size), mesh.tree.n
-    corner = tuple(int(np.ceil(value / size)) - 1 for value in (x, y, z))
-    if not all(0 <= index < n for index in corner):
-        return -1
-    # the tree's own walk from the finest cell, and its own position table
-    index = mesh.tree._locate(corner[0], corner[1], corner[2])
-    return int(index)
+    # the tree's own lookup, with the "below" rule: ceil(v / d) - 1 per axis
+    return int(mesh.locate_points(np.array([[x, y, z]], dtype=float), below=True)[0])
 
 
 def cell_index(mesh: Mesh3D | AdaptiveMesh, x: float, y: float,
@@ -215,10 +209,8 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
         elevation = flat_cells(cell_centres(mesh)[2])
         order = sorted(lengths, key=lambda idx: float(elevation[idx]))
     else:
-        # only the leaves the run crossed: the centre of one leaf is its corner plus half
-        # its edge, in finest cells
-        leaves = mesh.tree.leaves
-        order = sorted(lengths, key=lambda idx: leaves[idx].z + 0.5 * leaves[idx].size)
+        elevation = mesh.centres()[:, 2]
+        order = sorted(lengths, key=lambda idx: float(elevation[idx]))
     run.cells = np.asarray(order, dtype=np.int64)
     run.length = np.asarray([lengths[idx] for idx in order], dtype=float)
     return run
@@ -233,22 +225,21 @@ def _rasterize_on_tree(mesh: AdaptiveMesh, run: PipeRun, pts: np.ndarray,
     it) and the same order of the result (by elevation, then by first crossing): only the
     loop over the samples is gone.
     """
-    size, n = float(mesh.physical_size), mesh.tree.n
     cells_parts: list[np.ndarray] = []
     length_parts: list[np.ndarray] = []
     for a, b in zip(pts[:-1], pts[1:], strict=True):
         span = float(np.linalg.norm(b - a))
         if span <= 0.0:
             continue
-        cell_here = mesh.cell_size_at(0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]),
-                                      0.5 * (a[2] + b[2]))
+        mid = 0.5 * (a + b)
+        position = mesh.locate(float(mid[0]), float(mid[1]), float(mid[2]))
+        # the smallest edge of the leaf there: a leaf may be flat or tall, and the
+        # samples must not step over the short side of one
+        cell_here = float(np.min(mesh.extent[position]))
         count = max(int(substeps * span / max(cell_here, 1e-9)), 2)
         edges = np.linspace(0.0, 1.0, count + 1)
         mids = a[None, :] + (0.5 * (edges[:-1] + edges[1:]))[:, None] * (b - a)[None, :]
-        corner = np.ceil(mids / size).astype(np.int64) - 1
-        inside = np.all((corner >= 0) & (corner < n), axis=1)
-        index = np.full(count, -1, dtype=np.int64)
-        index[inside] = mesh.tree.locate_many(corner[inside])
+        index = mesh.locate_points(mids, below=True)
         keep = index >= 0
         cells_parts.append(index[keep])
         length_parts.append(np.diff(edges)[keep] * span)
@@ -259,8 +250,7 @@ def _rasterize_on_tree(mesh: AdaptiveMesh, run: PipeRun, pts: np.ndarray,
     unique, first, inverse = np.unique(cells, return_index=True, return_inverse=True)
     totals = np.zeros(unique.size)
     np.add.at(totals, inverse, pieces)
-    leaves = mesh.tree.leaves
-    elevation = np.array([leaves[int(i)].z + 0.5 * leaves[int(i)].size for i in unique])
+    elevation = mesh.centres()[unique, 2]
     order = np.lexsort((first, elevation))
     run.cells = unique[order].astype(np.int64)
     run.length = totals[order]

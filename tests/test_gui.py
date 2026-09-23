@@ -187,9 +187,10 @@ def test_the_automatic_search_refines_a_tree(window):
     # the manual targets alone: the a priori plan of a built mesh asks for millimetres at
     # the shell, which a 375 mm floor could never refine towards
     panel.set_plan_targets({})
-    panel.cells_sheath.setValue(2)          # the plan this test was sized on: 25 mm pipes
-    plan = AdaptivePlan(n_finest=16, physical_size=0.4375,   # a 7 m box: the default vessel
-                        bands=region_bands(panel.mesh_regions())).scaled(20.0)
+    # the panel's own anisotropic plan, four times coarser: a probe the search can refine
+    # in the time a test affords
+    plan = panel.adaptive_plan().scaled(4.0)
+    assert plan.anisotropic and region_bands(panel.mesh_regions())
     try:
         assert isinstance(window._run_config().mesh_spec, AdaptivePlan)
         window.battery = window._battery_from_panels()
@@ -215,7 +216,6 @@ def test_the_automatic_search_refines_a_tree(window):
     finally:
         panel.set_auto_spec(None)
         panel.max_cells.setValue(10_000)
-        panel.cells_sheath.setValue(1)
 
 
 def test_the_window_fits_the_screen_and_explanations_take_no_room(window):

@@ -59,9 +59,9 @@ def domain_extent(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
     (``physical_size`` times the finest cells a side), which is the ``Lx = Ly = Lz`` the
     view and the clip plane are written against.
     """
-    box = getattr(mesh, "box_size", None)
+    box = getattr(mesh, "box", None)
     if box is not None:
-        return (float(box),) * 3
+        return tuple(float(v) for v in box)
     return (float(mesh.Lx), float(mesh.Ly), float(mesh.Lz))
 
 
@@ -288,12 +288,13 @@ def _leaf_grid(mesh: AdaptiveMesh, pv):
     order (the lower face counter-clockwise seen from above, then the upper one).
     """
     centres = np.asarray(mesh.centres(), dtype=float)
-    half = np.cbrt(np.asarray(mesh.V, dtype=float)) / 2.0
+    # the half edges per axis: a leaf of a box tree is flat or tall, not a cube
+    half = 0.5 * np.asarray(mesh.extent, dtype=float)
     corners = np.array([[-1.0, -1.0, -1.0], [1.0, -1.0, -1.0],
                         [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
                         [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0],
                         [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]])
-    points = (centres[:, None, :] + half[:, None, None] * corners[None, :, :]).reshape(-1, 3)
+    points = (centres[:, None, :] + half[:, None, :] * corners[None, :, :]).reshape(-1, 3)
     order = np.arange(8 * centres.shape[0], dtype=np.int64).reshape(-1, 8)
     cells = np.hstack([np.full((centres.shape[0], 1), 8, dtype=np.int64), order]).ravel()
     types = np.full(centres.shape[0], int(pv.CellType.HEXAHEDRON), dtype=np.uint8)

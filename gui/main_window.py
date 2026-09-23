@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
@@ -236,16 +235,18 @@ class ThermalBatteryGUI(QMainWindow):
         panel = self.geometry_panel
         panel.set_plan_targets({plan.name: plan.target for plan in plans})
         # the leaf each region gets, not the size it asked for: leaves are powers of two
-        finest = panel.adaptive_plan().physical_size
-        targets: dict[str, float] = {}
+        plan = panel.adaptive_plan()
+        dz = plan.dz if plan.anisotropic else plan.physical_size
+        leaves: dict[str, tuple[float, float]] = {}
         for region in panel.mesh_regions():
-            leaf = nearest_leaf(region.target, finest)
-            targets[region.name] = min(targets.get(region.name, np.inf), leaf)
+            leaves[region.name] = (nearest_leaf(region.target, plan.physical_size),
+                                   nearest_leaf(region.height, dz))
         names = {"sand": "sand", "slab_bottom": "bottom slab", "slab_top": "top slab",
                  "insulation_radial": "insulation", "shell": "shell", "roof": "roof",
-                 "foundation": "foundation", "pipe_wall": "around the pipes"}
-        panel.plan_info.setText(", ".join(f"{names.get(name, name)} {size * 1000:.0f} mm"
-                                          for name, size in targets.items()))
+                 "foundation": "foundation"}
+        panel.plan_info.setText(", ".join(
+            f"{names.get(name, name)} {a * 1000:.0f}x{b * 1000:.0f} mm"
+            for name, (a, b) in leaves.items()))
 
     @safe_slot
     def build_mesh(self) -> None:

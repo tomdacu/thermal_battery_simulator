@@ -173,10 +173,12 @@ class MeshRegion:
     """
 
     name: str
-    target: float                                  # [m] cell size asked for
+    target: float                                  # [m] cell size asked for (in plan)
     low: tuple[float, float, float]
     high: tuple[float, float, float]
     reason: str = ""
+    #: the cell *height* asked for [m] on an anisotropic tree; ``None`` = ``target``
+    target_z: float | None = None
     #: a radial region: the annulus ``r_inner..r_outer`` about the vertical axis through
     #: ``axis`` (``low``/``high`` are its bounding box); ``None`` = the box itself
     axis: tuple[float, float] | None = None
@@ -191,16 +193,23 @@ class MeshRegion:
         return float(np.prod([max(h - low, 0.0)
                               for low, h in zip(self.low, self.high, strict=True)]))
 
+    @property
+    def height(self) -> float:
+        """The cell height the region asks for [m]."""
+        return float(self.target if self.target_z is None else self.target_z)
+
     def __str__(self) -> str:
         box = " ".join(f"{axis}[{low:.2f}, {high:.2f}]"
                        for axis, low, high in zip("xyz", self.low, self.high, strict=True))
-        return (f"{self.name:18s} target {self.target * 1000:6.1f} mm  {box}"
+        return (f"{self.name:18s} target {self.target * 1000:6.1f} x "
+                f"{self.height * 1000:6.1f} mm  {box}"
                 + (f"  ({self.reason})" if self.reason else ""))
 
 
 def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
                    pipe_box: tuple[Sequence[float], Sequence[float]] | None = None,
-                   pipe_boxes: Sequence[tuple[Sequence[float], Sequence[float]]] = ()
+                   pipe_boxes: Sequence[tuple[Sequence[float], Sequence[float]]] = (),
+                   heights: Mapping[str, float] | None = None
                    ) -> list[MeshRegion]:
     """The boxes of the active model, each with the cell size it asks for [m].
 
@@ -218,9 +227,15 @@ def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
     floor) and it is what keeps a 20 mm shell or a 5 mm plate from being widened into a
     metre of steel by the voxel painter when the grid is coarse.  The box of the pipes
     is the caller's: the bundle is the network's business, not the vessel's.
+
+    ``heights`` gives the cell *height* per region for an anisotropic tree (a region
+    missing from it asks for cubes).  The buried pipes need no region of their own on
+    such a tree: the tube is a line inside a cell, coupled through the well model of
+    :mod:`src.solver.fluid`, and the cell around it must be *larger* than the tube.
     """
     cyl = cylinder
     cx, cy = cyl.center_x, cyl.center_y
+    heights = heights or {}
 
     def target(name: str, length: float) -> float:
         return float(targets.get(name, length))
@@ -228,8 +243,11 @@ def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
     def ring(name: str, size: float, inner: float, outer: float, z_low: float,
              z_high: float, reason: str = "") -> MeshRegion:
         """A radial region of the vessel: the annulus (a disc for inner = 0)."""
+        key = "casing" if name in ("roof", "foundation") and name not in heights else name
+        height = heights.get(key)
         return MeshRegion(name, size, (cx - outer, cy - outer, z_low),
                           (cx + outer, cy + outer, z_high), reason,
+                          target_z=None if height is None else float(height),
                           axis=(cx, cy), r_inner=inner, r_outer=outer)
 
     # the vessel is a cylinder: every region of it is a disc or an annulus about its
@@ -284,7 +302,10 @@ def region_bands(regions: Sequence[MeshRegion]) -> tuple[RefinementBand, ...]:
         if region.target <= 0.0 or region.volume <= 0.0:
             continue
         bands.append(RefinementBand(low=tuple(region.low), high=tuple(region.high),
-                                    size=float(region.target), axis=region.axis,
+                                    size=float(region.target),
+                                    size_z=(None if region.target_z is None
+                                            else float(region.target_z)),
+                                    axis=region.axis,
                                     r_inner=float(region.r_inner),
                                     r_outer=float(region.r_outer)))
     if not bands:
