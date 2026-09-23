@@ -87,14 +87,13 @@ gas film instead.
 | Layout | Concentric rings | 5 layouts | `PipeNetworkConfig.layout` |
 | Rings ⓘ | 6 | 1–20 | `n_rings`, enabled for the ring layout: spread over the whole radius, risers on a ring spaced like the rings (126 risers by default) |
 | Radial files | 12 | 3–72 | `n_files`, enabled for the radial layout |
-| Collection | Reverse return (balanced) | 4 modes | `collection` |
+| Collection ⓘ | Radial manifold (rings in parallel) | 5 modes | `collection`; the header engine may pick the manifold instead of a chain and sets the combo to it |
 | Pipe outer d [m] ⓘ | 0.05 | 0.01–0.3 | `diameter` |
 | Wall thickness [mm] ⓘ | 2.0 | 0–20 | `wall_thickness` |
 | Tube material ⓘ / Wall roughness [um] ⓘ | stainless / "from the material" | – / 0–2000 | `material` / `roughness` |
-| Duct d [m] | 0.15 | 0.05–0.6 | `duct_diameter` |
 | Insulated headers ⓘ | off ("lagged") | – | `insulated_headers` |
 | Inlet / Outlet azimuth [deg] | 180 / 0 | 0–360 | `azimuth_in` / `azimuth_out` |
-| Flow split | Equal per branch | 4 rules | `split_mode` |
+| Flow split ⓘ | From the network hydraulics | hydraulic + 4 imposed rules | `split_mode`: the flows the pressures give (the plant), or an imposed rule for a comparison |
 | Sectors ⓘ | 4 | 1–16 | `n_sectors`, enabled for the sector split |
 | *Rebuild the network on the mesh* | – | – | repaints on the current mesh (Build mesh does it too) |
 | Network ⓘ | read-out | – | two lines (risers, tube area, flow spread, painted cells); the full `summary()`, paint report, wall heat flux and design notes - each once - are its tooltip |
@@ -104,6 +103,20 @@ the network as the panels describe it now (laid out on a throw-away tree of eigh
 leaves, `ThermalBatteryGUI.preview_network`); the status bar says when the built mesh no
 longer matches.  A pipe cell keeps the bed's properties and carries the pipe's exchange;
 the gas loop writes its film in every analysis.
+
+## 3b. Plant — Header engine
+
+| control | default | range | feeds |
+|---|---|---|---|
+| Flow uniformity [%] ⓘ | 5 | 0.5–50 | the tolerance under which no orifice is added |
+| Max header velocity [m/s] ⓘ | 20 | 3–60 | the velocity limit of every header and duct |
+| Design gas temperature [°C] ⓘ | 500 | 20–1000 | the gas density the headers are sized at |
+| *Size the headers* | – | – | runs the engine now; *Build mesh* runs it when the plant changed |
+| Design ⓘ | read-out | – | collection, header sizes, lift, pressure drop, velocity; the tooltip lists every group, the orifices and their plate holes |
+
+The header and duct diameters are the engine's ([19](19_HYDRAULICS.md)); there is no
+duct control any more.  Default plant: radial manifold, headers 60–406 mm, 243 mm into
+the sand, 751 Pa, 17.1 m/s, orifices on 124 risers (holes 23.7–46 mm).
 
 ## 4. Site
 
@@ -179,6 +192,9 @@ The linear method is fixed: CG + AMG Ruge-Stüben with a V(1,1) Gauss-Seidel cyc
 
 ## 8. 3D view and results
 
-The 3D view (field, cut axis, position, opacity, reset camera; `coolwarm`) and the results
+The 3D view's field selector lists **Temperature, Material, Sources, Conductivity and
+Geometry**: the geometry is one entry among the others and the fields come back from it
+(the *Show geometry* button selects it); every pipe is drawn at its own diameter.  The
+3D view (field, cut axis, position, opacity, reset camera; `coolwarm`) and the results
 tabs (Statistics, Energy balance with the gas loop, Materials, Transient, Log) are
 unchanged; the two exports are *Series CSV...* and *Field VTK...* under the results.

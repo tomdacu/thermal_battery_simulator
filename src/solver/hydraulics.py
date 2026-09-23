@@ -575,6 +575,35 @@ def size_headers(network: HydraulicNetwork, mass_flow: float, fluid: Fluid,
                         shares=state.riser_flow / mass_flow, notes=notes)
 
 
+def orifice_loss(area_ratio: np.ndarray) -> np.ndarray:
+    """Loss coefficient of a thin sharp-edged orifice plate in a pipe [-].
+
+    Idelchik (Handbook of Hydraulic Resistance, diagram 4-15, thin-walled orifice):
+    ``K = (1 + 0.707 sqrt(1 - f) - f)^2 / f^2`` with ``f = (d_orifice / d_pipe)^2``,
+    referred to the velocity in the pipe.
+    """
+    f = np.clip(np.asarray(area_ratio, dtype=float), 1e-6, 1.0)
+    return (1.0 + 0.707 * np.sqrt(1.0 - f) - f) ** 2 / f ** 2
+
+
+def orifice_bore(k: np.ndarray, bore: float) -> np.ndarray:
+    """The hole of the plate that gives each loss ``k`` in a pipe of ``bore`` [m].
+
+    The inverse of :func:`orifice_loss` by bisection on the area ratio (the loss falls
+    monotonically as the hole opens); ``k = 0`` is no plate (the full bore).
+    """
+    k = np.atleast_1d(np.asarray(k, dtype=float))
+    low = np.full(k.shape, 1e-6)
+    high = np.ones(k.shape)
+    for _ in range(60):
+        middle = 0.5 * (low + high)
+        too_open = orifice_loss(middle) < k
+        high = np.where(too_open, middle, high)
+        low = np.where(too_open, low, middle)
+    ratio = np.where(k <= 1e-9, 1.0, 0.5 * (low + high))
+    return bore * np.sqrt(ratio)
+
+
 def voronoi_shares(points: np.ndarray, radius: float, samples: int = 240) -> np.ndarray:
     """Share of a disc of ``radius`` closest to each of ``points`` (plan, about its centre).
 

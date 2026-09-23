@@ -106,6 +106,14 @@ falls tap by tap) and the flow already collected along the collector.  A ring is
 its entry tap and divides both ways round to its exit tap; mass is conserved at every
 node (`GasGraph.check`).
 
+**The flows are the network's.**  How the flow divides between the risers is what the
+pressures of the network give (`src/solver/hydraulics.py`, [19](19_HYDRAULICS.md)):
+Darcy-Weisbach in every pipe, the tees' losses, the draught of the hot gas, node
+pressures by Newton [TP88].  The headers and the ducts are sized by the header engine
+so that every riser carries the share of the flow equal to the share of the bed it
+serves, with calibrated orifices where the headers alone do not get there, and the
+headers are lifted into the sand.
+
 On each segment of wetted area `A` at wall temperature `T_w` the gas follows the
 effectiveness relation [Kays]:
 
@@ -206,8 +214,8 @@ through [PyAMG], V(1,1) with forward/backward Gauss-Seidel) [Saad].
   its pressure; the result says when it does not).
 * Several tubes in one cell share it (the well model assumes one): cells of the bed are
   kept wider than a tube, not wider than the pitch.
-* The flow split is imposed (equal, by path, by ring, by sector), not solved from the
-  hydraulics of the network.
+* The hydraulics is sized at one design gas temperature; the runs re-solve it at the
+  real temperatures (lagged by one march).
 * The Smoluchowski reduction of the gas conductivity near the grain contacts is left
   out (it matters below ~0.1 mm or under vacuum).
 * No natural convection inside the roof air or the pores.

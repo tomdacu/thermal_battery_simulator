@@ -16,7 +16,9 @@ says where it is used.
 | [ISO6946] | ISO 6946:2017, *Building components - Thermal resistance and thermal transmittance*, Annex C (external surface coefficient 4 + 4 v) | wind part of the outer film `src/core/environment.py` |
 | [CC75] | S. W. Churchill, H. H. S. Chu, "Correlating equations for laminar and turbulent free convection from a vertical plate", *Int. J. Heat Mass Transfer* 18 (1975) 1323-1329 | natural convection on the vessel `src/core/environment.py` |
 | [Haaland] | S. E. Haaland, "Simple and explicit formulas for the friction factor in turbulent pipe flow", *J. Fluids Eng.* 105 (1983) 89-90 | `src/solver/fluid.py::friction_factor` |
-| [Idelchik] | I. E. Idelchik, *Handbook of Hydraulic Resistance*, 4th ed., Begell House, 2007 | pipe roughness of drawn and commercial steel `src/core/pipe_network.py::PIPE_MATERIALS` |
+| [Idelchik] | I. E. Idelchik, *Handbook of Hydraulic Resistance*, 4th ed., Begell House, 2007 | pipe roughness of drawn and commercial steel `src/core/pipe_network.py::PIPE_MATERIALS`; the losses of tees and bends and of a thin sharp-edged orifice (diagram 4-15) `src/solver/hydraulics.py` |
+| [TP88] | E. Todini, S. Pilati, "A gradient algorithm for the analysis of pipe networks", in *Computer Applications in Water Supply*, Vol. 1, Research Studies Press, 1988, 1-20 | the Newton (global gradient) solution of a looped pipe network `src/solver/hydraulics.py::HydraulicNetwork.solve` |
+| [EN10220] | EN 10220:2002, *Seamless and welded steel tubes - Dimensions and masses per unit length* (ISO 1127 for stainless) | the nominal outer diameters the header engine chooses from `src/solver/hydraulics.py::CATALOGUE` |
 
 ## The tube in the bed
 

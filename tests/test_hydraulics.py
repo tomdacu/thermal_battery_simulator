@@ -158,3 +158,13 @@ def test_the_loop_follows_the_hydraulics_of_the_hot_gas(ring_design):
     assert result.power == pytest.approx(20_000.0, rel=1e-9)
     assert loop.hydraulic_state is not None and loop.hydraulic_state.converged
     loop.graph.check(tolerance=1e-6)
+
+
+def test_an_orifice_hole_gives_its_loss_back():
+    from src.solver.hydraulics import orifice_bore, orifice_loss
+
+    k = np.array([0.0, 0.5, 5.0, 25.0, 200.0])
+    holes = orifice_bore(k, 0.046)
+    assert holes[0] == pytest.approx(0.046)
+    assert np.all(np.diff(holes) < 0.0)                  # more loss, smaller hole
+    assert np.allclose(orifice_loss((holes[1:] / 0.046) ** 2), k[1:], rtol=1e-6)

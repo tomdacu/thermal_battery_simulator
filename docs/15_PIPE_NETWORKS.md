@@ -292,6 +292,24 @@ these bands as `Band(low, high, t)` of `GridSpec.z`; on a uniform mesh the optio
 promise the grid cannot keep, and `validate()` warns when `t` is coarser than the tube
 it is meant to resolve.
 
+## 10b. The radial manifold, and the header engine (2026-09-23)
+
+`COLLECTION_MANIFOLD` ("radial_manifold", rings only): a straight trunk along the inlet
+diameter meets every ring at its two taps on that diameter (the entry and the exit tap
+of the ring layout both lie on it), so the rings are fed **in parallel** and each ring
+main carries its own flow; the collector mirrors it at the top and discharges on the
+opposite side.  The ring chains of the other collections put the rings in series: every
+ring's flow crosses the rings before it, and on the default plant that needs headers at
+over 50 m/s.
+
+The header diameters are no longer the user's: the **header engine**
+([19](19_HYDRAULICS.md)) solves the network's hydraulics, sizes every header group from
+the nominal pipe sizes, balances the risers with calibrated orifices where needed, lifts
+the headers into the sand (`header_lift`: a radius plus a quarter-diameter cover, at
+least 50 mm, above the bottom slab and below the top one) and tries the manifold against
+the chosen collection.  Its output rides on the configuration: `header_sizes`,
+`header_lift`, `riser_orifices`, `split_mode = "hydraulic"`.
+
 ## 11. From the GUI to the solver
 
 **The loop is the whole circuit** (2026-09-23).  `PipeNetwork.fluid_loop(..., mesh=mesh)`

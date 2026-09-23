@@ -49,10 +49,19 @@ volume.
 at a set mass flow and pressure); the gas runs through the **whole buried network** -
 inlet duct, distributor, risers, collector, outlet duct - and gives its heat to the bed
 through every wall it touches.  Five layouts (staggered bundle, square grid, concentric
-rings, radial files, spiral) and four collection modes (direct, reverse return, central
-header, two-level rings).  The same circuit discharges the bed through an exchanger at a
-set power or a set return temperature.  Pressure drop and fan power are part of the
-ledger.
+rings, radial files, spiral) and five collection modes (direct, reverse return, central
+header, two-level rings, radial manifold).  The same circuit discharges the bed through
+an exchanger at a set power or a set return temperature.  Pressure drop and fan power are
+part of the ledger.
+
+**The hydraulics, and the header engine.**  How the flow divides between the risers is
+what the network's pressures give: Darcy-Weisbach in every pipe, the tees' losses and the
+draught of the hot gas, solved by Newton on the node pressures.  The headers are not set
+by hand: an **engine** sizes the ring mains, trunks and ducts from the nominal pipe sizes
+so every riser carries the share of the flow equal to the share of the bed it serves,
+under a velocity limit, growing them while they pay for themselves in pressure drop and
+balancing the rest with calibrated orifice plates; it lifts the headers into the sand and
+tries a radial manifold (rings fed in parallel) against the ring chain.
 
 **The tube in the bed.**  A tube is a line inside a cell of the bed, coupled to it by
 **Peaceman's well model**: the bed between the tube wall and the cell centre is counted
@@ -89,6 +98,7 @@ The full account - every equation and its source - is in
 | Mesh | a **tree of boxes**: every leaf has its own width in plan and its own height (any aspect ratio), 2:1 balanced per direction, arrays only | p4est, Burstedde et al. (2011); layered grids, Aziz & Settari (1979) |
 | Bed conductivity | Zehner-Bauer-Schlünder + radiation, per cell, re-evaluated on the field | VDI Heat Atlas D6.3; Zehner & Schlünder (1970); Breitbach & Barthels (1980) |
 | Gas circuit | 1-D segments between nodes, effectiveness-NTU, enthalpy mixing, balance imposed on the exchange | Kays & London (1984) |
+| Hydraulics | looped pipe network, Darcy-Weisbach + tees + draught, Newton on the node pressures; headers sized on EN 10220 sizes, riser orifices (Idelchik) | Todini & Pilati (1988); Idelchik (2007) |
 | Tube ↔ bed | well model, `r_eq = 0.14 sqrt(a^2 + b^2)` | Peaceman (1978, 1983) |
 | Gas properties | air, nitrogen, steam at their temperature | Incropera et al., Tables A.4, A.6 |
 | Film, friction | Dittus-Boelter / laminar Nu = 3.66; Haaland | Incropera; Haaland (1983) |
@@ -131,8 +141,10 @@ The left column has six tabs; every explanation is behind an **ⓘ** tooltip.
    insulation, shell, slabs, roof; the medium, its packing and grain size (the *Bed*
    read-out gives its conductivity at 20 and 500 °C), the insulation and the shell.
 2. **Plant** - rated power, gas, mass flow, pressure, fan; the buried network (layout,
-   rings or files, collection, tube and wall, ducts, lagged headers, azimuths, flow
-   split).  The preview redraws as you edit.
+   rings or files, collection, tube and wall, lagged headers, azimuths, flow split); the
+   **Header engine** (flow uniformity, velocity limit, design gas temperature, *Size the
+   headers*).  The preview redraws as you edit.  In the 3D view, *Geometry* is one entry
+   of the field selector.
 3. **Site** - ambient, ground and wind.
 4. **Mesh** - cells across the bed and the insulation, layers in the bed height, the
    cell budget; *Find the mesh* runs the automatic search.
@@ -154,16 +166,18 @@ across, 7 m tall, ~100 t of sand, 8 MWh, 200 kW of charge, 100 kW of discharge):
 - 4 m bed, 5 m tall, steatite at 63 % packing, 1 mm grains (~95 t);
 - 0.3 m of rock wool, 20 mm carbon-steel shell, 0.2 m slabs, 15° roof;
 - 0.3 m concrete pad on 3 m of soil;
-- 200 kW, 1 kg/s of air at 1 atm, 6 concentric rings, 126 risers of 50 mm, reverse
-  return.
+- 200 kW, 1 kg/s of air at 1 atm, 6 concentric rings, 126 risers of 50 mm; the engine
+  chooses the radial manifold, headers 60-406 mm, 243 mm into the sand, 751 Pa at
+  17 m/s, orifice plates balancing the risers (the ring chain needed 52 m/s).
 
 Measured on the development machine (2026-09-23):
 
 | Step | Time | Result |
 |---|---|---|
-| Build and paint the mesh | 2.3 s | 36 268 leaves |
-| Standby at 500 °C | 10.7 s | 6.4 kW of losses, two secant steps |
-| Transient, 6 h of charge at 200 kW, dt = 900 s | 18 s | ~0.75 s per step |
+| Size the headers (once per plant) | ~17 s | radial manifold, 751 Pa |
+| Build and paint the mesh | 2-6 s | 36 268 leaves |
+| Standby at 500 °C | 15 s | 5.9 kW of losses |
+| Transient, 6 h of charge at 200 kW, dt = 900 s | 13 s | ~0.5 s per step |
 
 ---
 
@@ -187,6 +201,7 @@ Measured on the development machine (2026-09-23):
 | [16 Adaptive mesh](docs/16_ADAPTIVE_MESH_MIGRATION.md) | the mesh protocol, the octree and the tree of boxes |
 | [17 References](docs/17_REFERENCES.md) | every source, with the module that uses it |
 | [18 The solver, end to end](docs/18_SOLVER.md) | the whole solution path with its equations |
+| [19 Hydraulics and the header engine](docs/19_HYDRAULICS.md) | the network's flows, the orifices, the engine, the default design |
 
 ---
 
@@ -212,6 +227,7 @@ battery_simulation/
 │   │   └── refinement.py      # graded grid of Mesh3D (reference)
 │   ├── solver/
 │   │   ├── fluid.py           # the gas circuit: graph march, well model, gas properties
+│   │   ├── hydraulics.py      # the network's pressures and flows, the header engine
 │   │   ├── linear.py          # CG + AMG, decoupled rows, hierarchy reuse
 │   │   ├── matrix.py          # structured assembly (reference)
 │   │   ├── steady.py          # Picard sweeps: loop, bed conductivity, radiation
@@ -239,8 +255,8 @@ balance, the closed gas loop, the effectiveness and blower design curves.
 ## 🛠️ Development
 
 ```bash
-python -m pytest tests/ -q                                   # 406 cases, ~3 minutes, head-less
-python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 395 without the GUI sweep
+python -m pytest tests/ -q                                   # 416 cases, ~6 minutes, head-less
+python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 405 without the GUI sweep
 python -m ruff check src tests gui --select F,E9,B,SIM,UP     # lint
 ```
 
@@ -248,9 +264,9 @@ Counts measured on 2026-09-23 with `--collect-only`; re-run the command instead 
 trusting the number.  `tests/test_octree.py` holds one wall-clock assertion (a
 32 768-leaf tree in under a second) that a loaded machine can miss.
 
-**Stated limits** ([docs/18](docs/18_SOLVER.md) §10): 1-D incompressible gas, one tube
-per cell in the well model, an imposed flow split between the branches, no natural
-convection in the roof air or in the pores.
+**Stated limits** ([docs/18](docs/18_SOLVER.md) §10, [docs/19](docs/19_HYDRAULICS.md)
+§8): 1-D incompressible gas, one tube per cell in the well model, headers sized at one
+design gas temperature, no natural convection in the roof air or in the pores.
 
 ---
 

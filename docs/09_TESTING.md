@@ -40,7 +40,7 @@ asserts under a second for a 32768-leaf tree and fails on this workstation (1.30
 with the machine idle, 2.06 s under load) - it is the only failing case of the 311 on
 2026-09-20, and it is a machine-speed assertion, not a correctness one.
 
-**Update 2026-09-23** (`--collect-only`): **406** cases, **395** without the GUI sweep.
+**Update 2026-09-23** (`--collect-only`): **416** cases, **405** without the GUI sweep.
 New files of the anisotropic mesh and the plant physics:
 
 | file | collected cases | covers |
@@ -48,6 +48,7 @@ New files of the anisotropic mesh and the plant physics:
 | `tests/test_box_tree.py` | 5 | the tree of boxes: octree faces on a uniform tree, the 2:1 rule per direction and faces that tile every leaf after refinement, the same field as the octree, a vertical profile exact on leaves graded in plan, the balance on an anisotropic tree |
 | `tests/test_well_model.py` | 4 | one tube in a square of sand against the shape factor (Incropera Table 4.1) on two meshes with the well model, the mesh dependence without it, no correction in a cell smaller than the tube, the whole gas circuit (mass at every node, the bed taking the external power, the headers exchanging) |
 | `tests/test_thin_layers_and_soil.py` | 2 | a thin shell blended in series with the insulation, the steel's own mass; the soil layer and its boundary conditions |
+| `tests/test_hydraulics.py` | 10 | the network's hydraulics and the header engine: Darcy-Weisbach, parallel pipes, the draught at low and high flow, balancing orifices to 1e-8, the orifice plate, Voronoi targets, the engine (manifold chosen, velocity met, headers lifted, targets delivered, the loop following the hydraulics) |
 | `tests/test_packed_bed.py` | 5 | the Zehner-Bauer-Schlünder bed: the gas limit, the bounds without radiation, growth with temperature and grain, dry sand in the measured range, a steady bed at the conductivity of its temperature |
 
 ## 1. Strategy

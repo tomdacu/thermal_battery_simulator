@@ -244,19 +244,27 @@ def _add_pipe_network(plotter, network, clip, scale) -> None:
 
     points: list[list[float]] = []
     lines: list[int] = []
+    radii: list[float] = []
     for run in network.runs:
         vertices = np.asarray(run.points, dtype=float)
         if vertices.shape[0] < 2:
             continue
         first = len(points)
         points.extend(vertices.tolist())
+        # every run at its own diameter: the headers the engine sized, the tubes thin
+        radii.extend([max(0.5 * float(run.diameter), 0.005)] * vertices.shape[0])
         lines.extend([vertices.shape[0], *range(first, first + vertices.shape[0])])
     if not lines:
         return
     polydata = pv.PolyData(np.asarray(points, dtype=float),
                            lines=np.asarray(lines, dtype=np.int64))
-    radius = max(0.5 * float(network.config.diameter), 0.005)
-    tubes = _clip_dataset(polydata.tube(radius=radius, n_sides=6), clip)
+    polydata.point_data["radius"] = np.asarray(radii, dtype=float)
+    try:
+        tubes = polydata.tube(scalars="radius", absolute=True, n_sides=8)
+    except TypeError:                       # an older PyVista: one radius for all
+        tubes = polydata.tube(radius=min(radii), n_sides=6)
+    tubes.clear_data()
+    tubes = _clip_dataset(tubes, clip)
     if tubes.n_points:
         plotter.add_mesh(tubes, color=MATERIAL_COLORS[int(MaterialID.TUBES)],
                          opacity=min(0.95 * scale, 1.0), label="pipe network")

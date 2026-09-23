@@ -148,8 +148,11 @@ solve and the AMG hierarchy is reused.  Default plant: 36 268 leaves in 2.3 s, s
 6.4 kW in 10.7 s, 6 h of charge in 18 s.  Suite 406 / 395.  Full account:
 [18_SOLVER.md](18_SOLVER.md); sources: [17_REFERENCES.md](17_REFERENCES.md).
 
-Open, in order: (1) the flow split between the branches solved from the network's
-hydraulics instead of imposed; (2) the march's float loop over the cells of a segment
+Later: the flow split is solved from the network's hydraulics and the headers are
+sized by the engine of [19_HYDRAULICS.md](19_HYDRAULICS.md) (radial manifold chosen on
+the default plant, orifices, headers lifted into the sand).
+
+Open, in order: (1) a multi-point hydraulic design (charge and discharge temperatures); (2) the march's float loop over the cells of a segment
 (0.13 s per march on the default plant) could be vectorised for large networks; (3) the
 standby paths of [13](13_REDESIGN.md) §7; (4) a measured bed conductivity to check the
 ZBS model against.

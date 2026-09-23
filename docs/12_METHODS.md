@@ -387,10 +387,35 @@ identity closes to 1 %; the discharge stop within one step), `tests/test_fluid.p
 
 ---
 
+## 12. The flow between the risers: solved, then designed
+
+**Choice.** The riser flows are the network's hydraulics (Darcy-Weisbach, tees, the
+draught of the gas, Newton on the node pressures [TP88]), and the headers are sized by
+an engine that meets a target distribution (each riser's share of the bed), a velocity
+limit and the room between the rings, grows the headers while they pay for themselves
+in pressure drop, and balances the rest with calibrated orifices ([19](19_HYDRAULICS.md)).
+
+**Why.** An imposed split hid the one thing a layout decides: the default ring chain,
+solved, gave riser flows from 0.01 to 5 times the mean with 150 mm headers.  Sizing by
+velocity alone cannot fix a network whose risers lose less than its headers; orifices can,
+and they make the distribution robust off the design point.  The engine is greedy on a
+catalogue of nominal sizes because the decision is discrete and the network small (a
+solve is ~0.1 s); an exhaustive or gradient optimum would not change the verdict.
+
+**Rejected.** A single header diameter chosen by the user (it was the maldistribution);
+solving the flows once and freezing them (the draught of the hot gas moves them: the loop
+re-solves at the gas temperatures).
+
+**Checked.** `tests/test_hydraulics.py`: Darcy-Weisbach on one pipe, the split of two
+parallel pipes, the draught at low and high flow, orifices that deliver every target to
+1e-8, the orifice plate's loss inverted, the engine choosing the manifold and meeting the
+velocity, the lift, the designed network delivering its targets, the loop following the
+hydraulics.
+
 ## 10. Open modelling questions (decisions for the owner)
 
-1. The flow split between the branches is imposed (equal, by path, by ring, by sector),
-   not solved from the network's hydraulics.
+1. The engine sizes at one design gas temperature; a multi-point design (charge and
+   discharge) would weigh the two.
 2. The `2k/h` criterion applies to the outer insulation surface; whether the *inner*
    steel shell (k = 50) needs its own resolution rule is a judgement call - the plan
    currently leaves it to the insulation target.

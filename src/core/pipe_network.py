@@ -2140,10 +2140,17 @@ class HeaderDesign:
             lines.append(f"{group}: {size * 1000:.1f} mm outer")
         lines.append(f"collection: {self.config.collection}")
         if self.sizing.orifices_needed:
+            from ..solver.hydraulics import orifice_bore
+
             k = self.sizing.k_orifice
+            holes = orifice_bore(k[k > 1e-9], self.config.inner_diameter)
             lines.append(f"orifices: K from {float(np.min(k)):.1f} to {float(np.max(k)):.1f} "
                          f"(the most throttled riser drops "
-                         f"{float(np.max(self.sizing.orifice_dp)):.0f} Pa across it)")
+                         f"{float(np.max(self.sizing.orifice_dp)):.0f} Pa across it); "
+                         f"plate holes {float(np.min(holes)) * 1000:.1f}-"
+                         f"{float(np.max(holes)) * 1000:.1f} mm in the "
+                         f"{self.config.inner_diameter * 1000:.0f} mm bore, "
+                         f"{int(np.count_nonzero(k <= 1e-9))} risers without a plate")
         worst = np.argsort(-np.abs(self.sizing.shares / self.sizing.targets - 1.0))[:3]
         for b in worst:
             lines.append(f"riser {int(b)}: {100 * self.sizing.shares[b]:.3f} % of the "

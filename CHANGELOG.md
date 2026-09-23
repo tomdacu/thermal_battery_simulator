@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-23 (night) - the flows from the hydraulics, the headers from an engine
+
+* `src/solver/hydraulics.py`: the circuit as a looped pipe network (Darcy-Weisbach, a
+  continuous friction factor, Idelchik's tee losses, the draught of the hot gas), node
+  pressures by Newton.  The riser flows are solved; the loop re-solves them at the gas
+  temperatures and turns a segment round if its flow reverses.
+* The **header engine** (`design_headers`): targets = each riser's share of the bed
+  (Voronoi), header groups sized on EN 10220 nominal sizes under a velocity limit and
+  grown while they pay in pressure drop, calibrated riser orifices (K, and the plate hole
+  by Idelchik) where needed, the headers lifted into the sand and iterated with the sizes;
+  tries the chosen collection and the **radial manifold** and keeps the better.
+* Default plant: the reverse-return ring chain, solved, gave riser flows from 0.01 to 5x
+  the mean with 150 mm headers and needs 52 m/s at any size that fits; the manifold runs
+  at 17 m/s and 751 Pa, orifices on 124 risers, headers 243 mm into the sand.
+* The preview draws every pipe at its own diameter; *Geometry* is an entry of the 3D
+  field selector, and the fields come back from it (the view was stuck on the geometry).
+* The duct diameter control is gone (the engine's); the collection defaults to the
+  radial manifold, the split to the hydraulics.
+* [docs/19_HYDRAULICS.md](docs/19_HYDRAULICS.md); 15, 17, 18, 06, 09, 12, README updated.
+
 ## 2026-09-23 (evening) - phase 1 and 2: the mesh follows the vessel, the physics the plant
 
 | # | Change | Evidence |
