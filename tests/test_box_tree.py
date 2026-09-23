@@ -32,8 +32,8 @@ def test_a_uniform_box_tree_has_the_octree_faces():
     octree = uniform_tree(4, 0).face_array()
     assert i.size == octree.shape[0] == 144
     assert np.allclose(area, 1.0) and np.allclose(distance, 1.0)
-    assert set(zip(i.tolist(), j.tolist())) == {
-        tuple(sorted(pair)) for pair in zip(i.tolist(), j.tolist())}
+    # every pair once, from its low side
+    assert np.all(i < j)
 
 
 def test_refinement_keeps_the_balance_per_direction_and_tiles_every_face():
