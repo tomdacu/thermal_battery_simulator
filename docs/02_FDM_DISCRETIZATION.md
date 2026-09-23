@@ -128,6 +128,11 @@ longer borrows the top face's coefficient for its lateral faces.
 
 ### 5.4 Internal convection (heat-exchanger tubes)
 
+> On the plant the tube film is the gas loop's: `G = m_dot c_p (1 - e^-NTU)` per cell,
+> with `UA'` including the bed between the wall and the cell centre (Peaceman's well
+> model), written as `bc_h = G V^(1/3) / V` so that the assembled coefficient is `G / V`.
+> See [18](18_SOLVER.md) §5-7.
+
 Tube cells are interior cells with `boundary_type == CONVECTION`.  They are the
 tube wall, so the fluid exchange is applied to the cell volume directly:
 

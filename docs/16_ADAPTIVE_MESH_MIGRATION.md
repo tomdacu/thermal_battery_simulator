@@ -437,3 +437,15 @@ Who still uses `Mesh3D`, and why:
 Deleting the class therefore means deleting the Mesh tab's structured mode, the graded
 `GridSpec` search level and the structured branches of those modules - a change of its own,
 with its own equivalence question, and not one this step takes.
+
+## 8. The tree of boxes (2026-09-23)
+
+`src/core/box_tree.py` replaces the cubic octree on the GUI's path: a leaf has a plan
+level and a height level, splits into four, two or eight, and is kept 2:1 per direction
+[BWG11].  `AdaptiveMesh` runs on either tree - its per-axis `extent` feeds the box-face
+films, the Neumann faces, the contact resistance and the flux reports, and the face
+table of a box tree carries the overlap areas in metres - so every consumer of this
+document works unchanged.  `AdaptivePlan` carries `n_z` and `dz` for it and
+`AdaptiveMesh.from_plan` builds either.  The octree and `Mesh3D` stay as the references
+of the equivalence tests (`tests/test_box_tree.py` pins a uniform box tree against the
+uniform octree to 1e-8 K).  Details in [18](18_SOLVER.md) §1.

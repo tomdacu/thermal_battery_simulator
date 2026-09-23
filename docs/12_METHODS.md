@@ -25,6 +25,14 @@ and the matrix assembly simple and vectorisable; a body-fitted or cut-cell grid 
 represent the cylinder surface better but at the cost of a much larger implementation
 surface (and this geometry - a squat cylinder in a box - loses little).
 
+**The grid is a tree of boxes** (`src/core/box_tree.py`, [18](18_SOLVER.md) §1): every
+leaf has its own plan edge and its own height, 2:1 balanced per direction [BWG11], so the
+bed and the insulation are tall where nothing changes vertically and thin at the slabs,
+the roof and the foundation.  The finite-volume statement is the same on it: a face
+carries the overlap area of the two leaves and the centre distance along the normal, and
+the balance closes to round-off (`tests/test_box_tree.py`).  The structured `Mesh3D` and
+the cubic octree stay as the references of the equivalence tests.
+
 **Rejected.** Finite differences on the same grid (no natural conservation statement),
 body-fitted meshes (complexity not justified by the geometry), finite elements (mass
 lumping to keep the transient explicit-free, more machinery).
@@ -129,6 +137,16 @@ cached; the symmetrised operator and its AMG hierarchy are reused for the same m
 object; the second solve that holds the loop balance is the same for every step and is
 done once.  Default model: standby 25 s, a transient step ~0.5 s.
 
+**Decoupled rows.** The rows the symmetric elimination leaves as a bare diagonal - the
+excluded air, a Dirichlet wall - are solved directly and CG sees the coupled rows only:
+on the default plant a quarter fewer unknowns, the standby from 19 to 10 s.
+
+**Reuse for a nearby operator.** A preconditioner only has to be close to the operator
+(CG still converges to the tolerance asked [Saad]): when the pattern is the same and every
+entry moved by less than 20 % (the films of a transient, the bed conductivity), the
+hierarchy is kept.  A 6-hour charge of the default plant took 21 s with a setup per step
+and 12 s with the reuse.
+
 **Cache.** The AMG hierarchy is the dominant setup cost, so it is kept while the matrix
 *content* is unchanged (a hash of the CSR arrays).  It used to be keyed on the matrix
 object as well, and the symmetrised operator of a graded mesh is a new object at every
@@ -143,18 +161,22 @@ benchmarks in `scripts/`.
 
 | Iteration | Criterion | Why this criterion |
 |---|---|---|
-| Radiation sweeps, gas-loop coupling (steady) | max field change between sweeps <= 1e-3 K, at most 60 sweeps | the linearised coefficient and the gas temperatures are fixed points of the field they drive; the *field* change is what the user sees, and 1e-3 K is far below any physical uncertainty |
+| Radiation sweeps, gas-loop coupling, bed conductivity (steady) | max field change between sweeps <= 0.1 K (the GUI's temperature tolerance), at most 60 sweeps | the linearised coefficient and the gas temperatures are fixed points of the field they drive; the *field* change is what the user sees, and 1e-3 K is far below any physical uncertainty |
 | Losses analysis (secant) | change of the storage mean temperature <= tolerance | the target is a temperature set point; the secant method converges in 3-6 iterations because the loss is smooth and monotone in the power |
 | Automatic mesh | Richardson estimate of the discretisation error of the *chosen* grid, against the tolerance | with predicted jumps the raw change between two grids is dominated by the coarse one; the Richardson estimate divides it by `r^p - 1` and is what Roache's GCI is built on |
 
 ---
 
-## 5. Mesh: graded bands, and how the grid is chosen
+## 5. Mesh: physical targets, and how the grid is chosen
 
-**Choice.** The user declares *physical* targets (cells across the storage, the
-insulation, the sheath; far-field size; growth ratio); the mesher turns them into a
-graded grid.  The automatic search then moves the targets until the steady answer stops
-moving.
+**Choice.** The user declares *physical* targets - cells across the storage radius and
+the insulation, layers in the bed height; the slabs, the roof and the foundation take
+their thickness over the insulation count in height - and the tree refines each region
+to its own plan edge and height ([18](18_SOLVER.md) §1).  The tubes need no refinement:
+the well model couples a tube to a cell *larger* than it (§11).  The automatic search
+then moves the targets until the standby answer stops moving.  What follows describes
+the graded Cartesian mesher (`Mesh3D`), which stays as the reference of the tests; the
+Richardson/GCI search below is the one the tree uses.
 
 **Why a graded grid.** The temperature field has three very different length scales
 (4 m of sand, 300 mm of insulation, 12 mm of sheath); a uniform grid able to resolve
@@ -262,28 +284,29 @@ as built, the ground condition included (the losses run no longer rewrites it).
 
 ## 8. Materials and effective properties
 
-**Choice.** A small built-in database (steatite, silica sand, rock wool, glass wool,
-carbon steel, concrete, air) plus a packed-bed model that combines the solid and the
-fluid conductivity with a geometric mean weighted by the packing fraction.
+**Choice.** A built-in database of *grain* properties (steatite, silica sand, olivine,
+basalt, magnetite, quartzite, granite; the insulations; the steels, concrete and soil) and
+the packed bed of the **Zehner-Bauer-Schlünder** model with radiation between the grains
+[VDI-D6.3], [ZS70], [BB80], evaluated at the temperature of every cell
+([18](18_SOLVER.md) §3).
 
-**Why a geometric mean.** It is the standard interpolation for a two-phase medium when
-one phase is dispersed in the other, it reduces to the right limits (`phi -> 0` gives
-the solid, `phi -> 1` the fluid) and it is monotone in between.  More elaborate
-correlations (Zehner-Bauer, Kunii-Smith, Maxwell) add terms for particle contact,
-internal radiation and internal convection that need parameters (particle size,
-emissivity, coordination number) this tool does not ask the user for.
+**Why this model.** It is the reference correlation of the VDI Heat Atlas for packed
+beds, it separates the three paths (gas, grain contacts, radiation) and it carries the
+two parameters that matter for a hot storage: the grain size and the temperature.  At
+500 °C the radiation across the voids carries about a third of the heat of a millimetre
+bed; a constant model misses the factor 1.9 between the cold and the hot bed.  Its extra
+inputs are the grain diameter (a GUI control, 1 mm by default) and the grain emissivity
+(from the database); the contact flattening (0.0077) and the shape factor (1.4, broken
+grains) are the VDI's values.
 
-**Caveat, stated openly.** The database value for silica sand (k = 0.35 W/(m·K)) is a
-*bulk* value for a dry sand bed, i.e. it already contains the porosity.  Feeding it to
-the geometric mean as the *solid* phase counts the porosity twice and gives
-`k_eff ~ 0.13 W/(m·K)`, below the measured range of dry sand beds (0.15-0.35).  Either
-the database value should be the solid-phase value (quartz, 6-12 W/(m·K)) or the
-packed-bed model should be skipped for materials whose value is already bulk.  Until
-that is decided, treat the sand's effective conductivity as an assumption of the model,
-not as data.
+**Fixed on 2026-09-23.** The silica sand entry carried the *bed's* own values
+(0.35 W/(m K), 1500 kg/m3), which the packing then diluted a second time (a bed of
+0.13 W/(m K)); it now carries the quartz grain [Incropera, Table A.3], and the bed comes
+out at 0.39 W/(m K) at 20 °C, in the measured range of dry sand.
 
-**Checked.** `tests/test_core.py` (packing fraction limits, energy density), and the
-material database is the single source of truth used by solver, balance and GUI.
+**Checked.** `tests/test_packed_bed.py` (the gas limit, the bounds without radiation,
+the growth with temperature and grain size, the measured range of dry sand, the steady
+bed carrying the conductivity of its own temperature), `tests/test_core.py`.
 
 ---
 
@@ -341,11 +364,22 @@ fixed "gas temperature" of 60 °C - the lumped tube model - so the pipes were a 
 enters through the pipe walls at the circuit's flow, and the gas temperatures are the
 loop's own.
 
-**Limits.** The gas properties are evaluated once, at the prescribed inlet or at 300 K,
-not along the loop: `h` and the pressure drop therefore do not follow the temperature of
-the gas (at 600 °C the turbulent `h` of air is ~30 % higher, the laminar one ~2.4x).
-Making them follow it changes `G`, hence the operator, and needs a rebuild policy; it is
-the next refinement of this model.
+**The whole circuit.**  Since 2026-09-23 the loop is the network's graph
+(`PipeNetwork.gas_graph`): inlet duct, distributor, risers, collector and outlet duct,
+each segment with the flow it carries, streams mixed by enthalpy at the nodes.  The
+headers exchange with the bed like the risers (they carry 28 % of the wetted area of
+the default network), and the balance is imposed on the exchange itself, so the bed
+takes exactly the external power ([18](18_SOLVER.md) §5).
+
+**The tube in its cell.**  The exchange of a piece of tube includes the bed between its
+wall and the cell centre through Peaceman's equivalent radius [Pea78], [Pea83]; without
+it the exchange depended on the cell (+26 % on 300 mm cells, -9 % on 75 mm cells against
+the shape factor of a tube in a square; with it within 3.5 %) - `tests/test_well_model.py`,
+[18](18_SOLVER.md) §6.
+
+**Gas properties.**  They follow the gas: every segment at its own mean temperature
+(Incropera Tables A.4 and A.6), lagged by one march and refreshed when the gas moved by
+more than 10 K, which keeps the operator between refreshes.
 
 **Checked.** `tests/test_cycle.py` (the deposit equals the external power; the cycle
 identity closes to 1 %; the discharge stop within one step), `tests/test_fluid.py`,
@@ -355,7 +389,8 @@ identity closes to 1 %; the discharge stop within one step), `tests/test_fluid.p
 
 ## 10. Open modelling questions (decisions for the owner)
 
-1. The sand conductivity caveat of §8.
+1. The flow split between the branches is imposed (equal, by path, by ring, by sector),
+   not solved from the network's hydraulics.
 2. The `2k/h` criterion applies to the outer insulation surface; whether the *inner*
    steel shell (k = 50) needs its own resolution rule is a judgement call - the plan
    currently leaves it to the insulation target.

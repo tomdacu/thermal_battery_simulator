@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-09-23 (evening) - phase 1 and 2: the mesh follows the vessel, the physics the plant
+
+| # | Change | Evidence |
+|---|--------|----------|
+| 1 | **Tree of boxes** (`src/core/box_tree.py`): leaves with their own plan edge and height, 2:1 per direction, arrays only; the GUI's mesh | default 36 268 leaves in 2.3 s (the cubic octree: 214 089 in 12 s) |
+| 2 | **Well model** (Peaceman): the bed between the tube wall and the cell centre in the tube's `UA`; no refinement around the tubes any more | one tube in a square of sand: within 3.5 % of the shape factor on 300 and 150 mm cells (without: +26 % / +5 %, -9 % on 75 mm) |
+| 3 | **The whole gas circuit** marched: inlet duct, distributor, risers, collector, outlet duct, each segment with its flow, enthalpy mixing at the nodes; the balance on the exchange | the headers carry 28 % of the wetted area and now exchange |
+| 4 | **Gas properties** at the gas's own temperature per segment (Incropera A.4/A.6), 10 K hysteresis | - |
+| 5 | The reverse-return ring outlet rises above the rings instead of crossing them | - |
+| 6 | **Pinned rows out of the Krylov solve** (excluded air, Dirichlet walls); **AMG reused** for operators within 20 % per entry | standby 19 -> 10 s; 6 h transient 21 -> 12 s |
+| 7 | **Thin shell blended** in series with the insulation (the widened shell ate up to 100 mm of insulation); roof and plate keep the steel's own mass | standby losses at 500 degC 8.3 -> 6.1 kW with the soil |
+| 8 | **Soil under the pad** (3 m of moist sand, VDI 4640), box sides a symmetry | - |
+| 9 | **Zehner-Bauer-Schlünder bed with radiation**, re-evaluated on the field (steady per sweep, transient per step, 2 % hysteresis) | steatite 0.30 (20 degC) / 0.57 (500 degC) W/(m K); standby 6.4 kW |
+| 10 | Silica sand carried the bed's own k and density, diluted twice by the packing | now the quartz grain: bed 0.39 W/(m K) at 20 degC |
+| 11 | GUI: layers in the bed height, soil depth, grain size, the bed's k at 20 and 500 degC, the network report behind an info mark | - |
+| 12 | Docs: [17 References](docs/17_REFERENCES.md), [18 The solver, end to end](docs/18_SOLVER.md), README rewritten, citations in 01, 02, 12, 15, 16 | - |
+
+Suite: 406 passed (395 without the GUI sweep), ruff clean.
+
 ## 2026-09-23 - the solver checked, the GUI cut to the plant
 
 Every item was measured before it was changed; the numbers are in the commits and in

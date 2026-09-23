@@ -63,23 +63,30 @@ convective surface adds the film in series with the half cell it sits on
 
 ## 1.5 Porous storage medium
 
-The storage region is a packed bed: solid particles with air in the voids.
-With packing fraction $\phi_x$ (solid fraction) and porosity $\phi = 1-\phi_x$,
-`src/core/materials.py::MaterialManager.compute_effective_properties` uses
+The storage region is a packed bed: solid grains with air in the voids.  With packing
+fraction $\phi_x$ (solid fraction) and porosity $\psi = 1-\phi_x$ the capacity is the
+volume mean,
 
-$$k_{eff} = k_{solid}^{1-\phi}\, k_{fluid}^{\phi}, \qquad
-\rho_{eff} = (1-\phi)\rho_s + \phi \rho_f, \qquad
-c_{p,eff} = \frac{(1-\phi)\rho_s c_{p,s} + \phi \rho_f c_{p,f}}{\rho_{eff}}$$
+$$\rho_{eff} = (1-\psi)\rho_s + \psi \rho_f, \qquad
+c_{p,eff} = \frac{(1-\psi)\rho_s c_{p,s} + \psi \rho_f c_{p,f}}{\rho_{eff}},$$
 
-(the geometric mean is the standard interpolation for a random two-phase
-medium; the density is arithmetic and the heat capacity is mass-weighted, so
-$\rho_{eff} c_{p,eff}$ is the arithmetic mean of the volumetric capacities).
-The default packing fraction is 0.63; the GUI allows 0.20–0.90.
+and the conductivity is the **Zehner-Bauer-Schlünder** model with the radiation between
+the grains (VDI Heat Atlas D6.3 [VDI-D6.3]; Zehner and Schlünder [ZS70]; Breitbach and
+Barthels [BB80]; `src/core/materials.py::PackedBed`).  Three paths in parallel and in
+series: the gas in the voids, the conduction through the grains and their contacts, and
+the radiation across the voids, whose conductivity grows as $4\sigma T^3 d$:
 
-Properties are **constant with temperature**: the previous temperature-dependent
-hooks were never called by any solver and were removed rather than pretending.
-Over a 20–600 °C operating range a real $k(T)$ can vary by tens of percent, so
-this is an assumption to state in a report, not a hidden one.
+$$k_{rad} = \frac{4 \sigma T^3 d}{(2/\varepsilon - 1)\, k_f}, \qquad
+\frac{k_{bed}}{k_f} = (1-\sqrt{1-\psi})(1 + \psi k_{rad})
++ \sqrt{1-\psi}\,\big(\varphi \kappa + (1-\varphi) k_c(\kappa, k_{rad}, B)\big)$$
+
+($\kappa = k_s/k_f$, $B = C_f ((1-\psi)/\psi)^{10/9}$, $k_c$ the unit-cell core term;
+the full expressions are in [18](18_SOLVER.md) §3).  For steatite at 63 % packing and 1 mm
+grains the bed conducts **0.30 W/(m K) at 20 °C, 0.57 at 500 °C and 0.68 at 700 °C**:
+the conductivity is a law of the temperature, and the solvers evaluate it on the field.
+The default packing fraction is 0.63 (the GUI allows 0.20–0.90) and the grain 1 mm.
+The constant geometric mean $k_s^{1-\psi} k_f^{\psi}$ used before stays available as the
+`"geometric"` model; it gave 0.52 W/(m K) at every temperature.
 
 ## 1.6 Boundary conditions
 
@@ -167,6 +174,17 @@ limits are the *area-limited* regime ($NTU \ll 1$, $q \approx hA\,\Delta T$) and
 *flow-limited* one ($NTU \gg 1$, $q \approx \dot m c_p \Delta T$).  A storage discharges
 in the second regime by design.
 
+With the tube buried in a cell of the bed, $UA$ is not $hA$: between the wall and the
+cell centre lies the bed itself.  The well model of Peaceman [Pea78, Pea83] gives the
+radius at which the discrete cell temperature equals the radial solution,
+$r_{eq} = 0.14\sqrt{a^2 + b^2}$ for a cell of cross-section $a \times b$, so
+
+$$\frac{1}{UA'} = \frac{1}{h \pi d_i} + \frac{\ln(r_o/r_i)}{2\pi k_{wall}}
++ \frac{\ln(r_{eq}/r_o)}{2\pi k_{bed}}$$
+
+per unit length ([18](18_SOLVER.md) §6).  The gas properties are those of the gas at
+its own temperature along the loop (Incropera Table A.4).
+
 The film coefficient follows the usual correlations for internal flow (laminar
 $Nu = 3.66$, turbulent Dittus-Boelter, blended in between, `solver/fluid.py::pipe_h`),
 the friction factor comes from the classical correlations, and the **fan work** is
@@ -179,7 +197,9 @@ terms that decide the round-trip efficiency of a real machine.
 
 ## 1.11 References
 
-1. Incropera, DeWitt, Bergman, Lavine - *Fundamentals of Heat and Mass Transfer*
-2. Çengel - *Heat Transfer: A Practical Approach*
-3. Bejan - *Advanced Engineering Thermodynamics* (exergy)
-4. Kaviany - *Principles of Heat Transfer in Porous Media*
+The keys are those of [17_REFERENCES.md](17_REFERENCES.md): [Incropera] for the
+properties, the shape factors and the film correlations; [VDI-D6.3], [ZS70] and [BB80]
+for the packed bed; [Pea78], [Pea83] for the tube in its cell; [Kays] for the
+effectiveness relation; [CC75] and [ISO6946] for the outer film.  Background:
+Çengel, *Heat Transfer: A Practical Approach*; Bejan, *Advanced Engineering
+Thermodynamics* (exergy); Kaviany, *Principles of Heat Transfer in Porous Media*.

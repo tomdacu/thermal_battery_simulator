@@ -50,7 +50,8 @@ centre set by hand is what put the pipe network off the vessel once.
 |---|---|---|---|
 | Radius [m] | 2.0 | 0.2–20 | `CylinderGeometry.r_storage` |
 | Height [m] | 5.0 | 0.5–30 | `height` (of the bed) |
-| Foundation depth [m] ⓘ | 0.3 | 0–5 | `base_z`: concrete under the floor, the ground face under it |
+| Foundation depth [m] ⓘ | 0.3 | 0–5 | the concrete pad under the floor |
+| Soil under it [m] ⓘ | 3.0 | 0–20 | `ground_depth`: moist sand (1.5 W/(m K), VDI 4640) down to the ground-temperature face; `base_z` = soil + pad |
 | Radial insulation [m] | 0.3 | 0.02–1 | `insulation_thickness` |
 | Bottom / Top slab [m] | 0.2 / 0.2 | 0–1 | `insulation_slab_bottom` / `insulation_slab_top` |
 | Steel shell [m] ⓘ | 0.02 | 0–0.2 | `shell_thickness` (painted one leaf thick if thinner) |
@@ -59,7 +60,9 @@ centre set by hand is what put the pipe network off the vessel once.
 | Steel plate [m] ⓘ | 0.005 | 0–0.2 | `steel_slab_top` |
 | Cone fill | off | – | `fill_cone_with_sand` |
 | Storage medium | Steatite (soapstone) | 7 media | `storage_material` |
-| Packing [%] ⓘ | 63 | 20–90 | `packing_fraction`; the "Bed" read-out gives k, rho, cp of the packed bed (0.518 W/(m K), 1701 kg/m³, 980 J/(kg K) for steatite) |
+| Packing [%] ⓘ | 63 | 20–90 | `packing_fraction` |
+| Grain size [mm] ⓘ | 1.0 | 0.05–50 | `particle_diameter`: the radiation between the grains grows with it |
+| Bed | read-out | – | the Zehner-Bauer-Schlünder conductivity at 20 and 500 °C, rho, cp (steatite: 0.30 and 0.57 W/(m K), 1701 kg/m³, 980 J/(kg K)) |
 | Insulation / Shell | Rock wool / Carbon steel | 5 / 3 | `insulation_material` / `shell_material` |
 
 ## 2. Plant — Gas circuit
@@ -114,23 +117,22 @@ the gas loop writes its film in every analysis.
 
 | control | default | range | feeds |
 |---|---|---|---|
-| Cells across storage ⓘ | 10 | 2–200 | the bed's leaf: `r / n` = 200 mm → 207 mm leaves |
-| Cells across insulation ⓘ | 3 | 1–50 | the insulation ring, the slabs and the shell: 100 mm → 104 mm |
-| Cells across the tube ⓘ | 1 | 1–20 | a column per riser: `d / n` = 50 mm → 52 mm leaves |
+| Cells across storage ⓘ | 10 | 2–200 | the bed's plan edge `r / n` = 200 mm → 195 mm leaves |
+| Cells across insulation ⓘ | 3 | 1–50 | the insulation ring's plan edge (100 mm → 97 mm), and the height of the slabs (200 mm / 3 → 75 mm) |
+| Layers in the bed height ⓘ | 20 | 2–400 | the height of the bed's and the ring's leaves: 250 mm → 301 mm |
 | Cell budget ⓘ | 400 000 | 10 000–20 000 000 | the most leaves the build may make |
-| Regions / Mesh / Memory | read-outs | – | the leaf each region gets, the leaves per size after a build, whether the budget stopped it |
+| Regions / Mesh / Memory | read-outs | – | plan x height of every region, the leaves per size after a build, whether the budget stopped it, a warning when the bed's leaves are too small for the well model (under 2.53 tube diameters) |
 
-The finest leaf is the finest region's target, snapped to a power of two of the box; every
-region takes the largest leaf within 1.6 times its target (`LEAF_TOLERANCE`); the budget
-caps the leaves the rounds make (they go coarse to fine over the whole tree, so a budget
-that stops them leaves every region one level short).  Regions have their own shapes:
-discs and annuli about the vessel axis, a column around every riser.  Default model:
-214 089 leaves (52 mm around the pipes, 104 mm in the insulation, 207 mm in the bed) built
-and painted in ~12 s.
+The mesh is the anisotropic tree of boxes ([18](18_SOLVER.md) §1): the finest plan edge
+and the finest height are the finest regions' targets, snapped to powers of two of the
+box; every target snaps to the largest leaf within 1.6 times it (`LEAF_TOLERANCE`); the
+budget caps the leaves.  No column follows the tubes any more: a tube is a line in its
+cell, coupled by the well model.  Default plant: **36 268 leaves**, built and painted in
+~2.3 s.
 
 **Automatic mesh** (same page): tolerances 2 K / 2 %, 4 levels, refine factor 0.6, *Find
-the mesh*.  Each level is the **standby** state on a finer tree (the bed held at the
-standby temperature, the holding power as the second observable).
+the mesh*.  Each level is the **standby** state on a finer tree; a round splits a leaf in
+plan, in height or both, following the axis of its flux jump.
 
 ## 6. Analysis
 

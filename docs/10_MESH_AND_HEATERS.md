@@ -1,5 +1,9 @@
 # 10. Graded mesh and heater elements
 
+> The GUI's mesh is now the anisotropic tree of boxes ([18](18_SOLVER.md) §1,
+> [16](16_ADAPTIVE_MESH_MIGRATION.md) §8).  This document describes the graded Cartesian
+> mesher and the heater bank, which stay as the references of the tests.
+
 Status of this work stream, as of 2026-09-20.  **Parts 1-3 are implemented and
 tested; part 4 (the optimisation measurements) is open.**  The numbers are
 measurements: `python -m pytest tests/ --collect-only -q` for the counts

@@ -137,6 +137,23 @@ Open, in order: (1) gas properties that follow the gas temperature along the loo
 array-only tree (Morton codes) would make it ~10x faster; (4) the headers are not
 marched with the loop; (5) the risers are 5 m against the ~4 m of the guideline.
 
+## 3c. 2026-09-23 evening: phases 1 and 2
+
+The mesh is the anisotropic tree of boxes; the tube is coupled to its cell by
+Peaceman's well model (no refinement around the tubes); the loop marches the whole
+circuit with the headers; the gas properties and the bed conductivity
+(Zehner-Bauer-Schlünder with radiation) follow the temperature; the shell blends with the
+insulation; a soil layer carries the ground temperature; pinned rows leave the Krylov
+solve and the AMG hierarchy is reused.  Default plant: 36 268 leaves in 2.3 s, standby
+6.4 kW in 10.7 s, 6 h of charge in 18 s.  Suite 406 / 395.  Full account:
+[18_SOLVER.md](18_SOLVER.md); sources: [17_REFERENCES.md](17_REFERENCES.md).
+
+Open, in order: (1) the flow split between the branches solved from the network's
+hydraulics instead of imposed; (2) the march's float loop over the cells of a segment
+(0.13 s per march on the default plant) could be vectorised for large networks; (3) the
+standby paths of [13](13_REDESIGN.md) §7; (4) a measured bed conductivity to check the
+ZBS model against.
+
 ## 4. Work in progress / next
 
 * **Octree in the main solver**: `src/core/octree.py` (mesh, balance, conservative

@@ -294,6 +294,23 @@ it is meant to resolve.
 
 ## 11. From the GUI to the solver
 
+**The loop is the whole circuit** (2026-09-23).  `PipeNetwork.fluid_loop(..., mesh=mesh)`
+hands the solver the network's graph (`gas_graph`): the inlet duct, the distributor ring
+by ring (fed at the entry tap, both ways round to the exit tap, then the jumper to the
+next ring), the risers, the collector mirrored, and the outlet duct - straight segments
+between nodes, each with the flow it carries (the branch split on the risers, the flow
+still to be delivered along the distributor, the flow already collected along the
+collector).  Only the cells inside the vessel exchange; a lagged network exchanges on its
+risers alone.  The tube-in-cell resistance (well model), the tube wall
+(`PipeMaterial.k_wall`: 21 W/(m K) stainless, 38 carbon steel at 500 °C) and the gas at
+its own temperature are switched on; `whole_circuit=False, well_model=False,
+variable_properties=False` return the parallel-riser reference.  The equations are in
+[18](18_SOLVER.md) §5-7.
+
+**The outlet of a reverse-return ring chain** ends on the innermost ring; its duct now
+rises to one level above the collector (`z_top + 2 d_duct`, capped under the roof)
+before crossing the outer rings, instead of running through them.
+
 The *Pipes* tab of the Geometry panel owns the network; the window owns the mesh, and
 the mesh is what a run solves.  The wiring is therefore:
 
