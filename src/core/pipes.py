@@ -171,7 +171,8 @@ def cell_index(mesh: Mesh3D | AdaptiveMesh, x: float, y: float,
 
 
 def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]],
-                   diameter: float, name: str = "run", substeps: float = 4.0) -> PipeRun:
+                   diameter: float, name: str = "run", substeps: float = 4.0,
+                   order: str = "elevation") -> PipeRun:
     """Split a polyline into the cells it crosses, with the length inside each cell.
 
     The polyline is sampled at ``substeps`` points per *local cell size* so that the
@@ -181,6 +182,8 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
     The cells are the mesh's own - a ``Mesh3D`` cell or an octree leaf - and the run is
     returned in their order of elevation, so the same centreline rasterised on a tree and
     on the structured mesh of the same cells names the same cells in the same order.
+    ``order="path"`` returns them in the order the centreline meets them instead - what a
+    march along a horizontal header needs, whose cells may sit at different heights.
     """
     pts = np.asarray(points, dtype=float)
     if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
@@ -188,9 +191,9 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
     run = PipeRun(name=name, points=pts, diameter=float(diameter))
 
     if not isinstance(mesh, Mesh3D):
-        return _rasterize_on_tree(mesh, run, pts, substeps)
+        return _rasterize_on_tree(mesh, run, pts, substeps, order)
 
-    lengths: dict[int, float] = {}
+    lengths: dict[int, float] = {}          # insertion order: the path order
     for a, b in zip(pts[:-1], pts[1:], strict=True):
         span = float(np.linalg.norm(b - a))
         if span <= 0.0:
@@ -205,19 +208,18 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
             if index >= 0:
                 lengths[index] = lengths.get(index, 0.0) + (t1 - t0) * span
 
-    if isinstance(mesh, Mesh3D):
-        elevation = flat_cells(cell_centres(mesh)[2])
-        order = sorted(lengths, key=lambda idx: float(elevation[idx]))
+    if order == "path":
+        cells = list(lengths)
     else:
-        elevation = mesh.centres()[:, 2]
-        order = sorted(lengths, key=lambda idx: float(elevation[idx]))
-    run.cells = np.asarray(order, dtype=np.int64)
-    run.length = np.asarray([lengths[idx] for idx in order], dtype=float)
+        elevation = flat_cells(cell_centres(mesh)[2])
+        cells = sorted(lengths, key=lambda idx: float(elevation[idx]))
+    run.cells = np.asarray(cells, dtype=np.int64)
+    run.length = np.asarray([lengths[idx] for idx in cells], dtype=float)
     return run
 
 
 def _rasterize_on_tree(mesh: AdaptiveMesh, run: PipeRun, pts: np.ndarray,
-                       substeps: float) -> PipeRun:
+                       substeps: float, order: str = "elevation") -> PipeRun:
     """:func:`rasterize_pipe` on a tree, every sample located at once.
 
     The same samples (``substeps`` per local leaf edge, midpoints of equal pieces), the
@@ -250,10 +252,12 @@ def _rasterize_on_tree(mesh: AdaptiveMesh, run: PipeRun, pts: np.ndarray,
     unique, first, inverse = np.unique(cells, return_index=True, return_inverse=True)
     totals = np.zeros(unique.size)
     np.add.at(totals, inverse, pieces)
-    elevation = mesh.centres()[unique, 2]
-    order = np.lexsort((first, elevation))
-    run.cells = unique[order].astype(np.int64)
-    run.length = totals[order]
+    if order == "path":
+        sequence = np.argsort(first, kind="stable")
+    else:
+        sequence = np.lexsort((first, mesh.centres()[unique, 2]))
+    run.cells = unique[sequence].astype(np.int64)
+    run.length = totals[sequence]
     return run
 
 

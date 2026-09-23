@@ -118,7 +118,7 @@ from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULA
                     rasterize_pipe)
 
 if TYPE_CHECKING:                       # the solver layer imports this module's layer
-    from ..solver.fluid import Fluid, FluidLoop
+    from ..solver.fluid import Fluid, FluidLoop, GasGraph
     from .adaptive_mesh import AdaptiveMesh
 
 # ---------------------------------------------------------------------- vocabulary
@@ -177,6 +177,8 @@ class PipeMaterial:
 
     label: str
     roughness: float          # [m] absolute roughness of a new pipe
+    #: conductivity of the wall at 500 degC [W/(m K)] (the well model's wall term)
+    k_wall: float = 21.0
 
     def __str__(self) -> str:
         return f"{self.label} (eps {self.roughness * 1e6:.0f} um)"
@@ -189,8 +191,8 @@ class PipeMaterial:
 PIPE_STAINLESS = "stainless_steel"
 PIPE_CARBON = "carbon_steel"
 PIPE_MATERIALS: dict[str, PipeMaterial] = {
-    PIPE_STAINLESS: PipeMaterial("stainless steel, drawn", 1.5e-5),
-    PIPE_CARBON: PipeMaterial("carbon steel, commercial", 4.6e-5),
+    PIPE_STAINLESS: PipeMaterial("stainless steel, drawn", 1.5e-5, 21.0),
+    PIPE_CARBON: PipeMaterial("carbon steel, commercial", 4.6e-5, 38.0),
 }
 
 #: above this relative roughness the friction factor leaves the Moody chart range
@@ -353,7 +355,10 @@ class PipeNetworkConfig:
             return float(self.elevation_out)
         if self.collection == COLLECTION_CENTRAL:
             wanted = 0.5 * (self.z_top + self.level_gap + self.roof_z)
-        elif self.collection == COLLECTION_TWO_LEVEL:
+        elif self.collection == COLLECTION_TWO_LEVEL or (
+                self.collection == COLLECTION_REVERSE and self.layout == LAYOUT_RINGS):
+            # the reverse-return ring chain ends on the innermost ring: its outlet has
+            # to cross the other rings, so it runs one level above them
             wanted = self.z_top + self.level_gap
         else:
             wanted = self.z_top
@@ -1365,11 +1370,175 @@ class PipeNetwork:
         return [PipeRun(name=run.name, points=run.points, diameter=bore,
                         cells=run.cells, length=run.length) for run in runs]
 
+    def gas_graph(self, mesh: Mesh3D | AdaptiveMesh) -> GasGraph:
+        """The whole circuit as the gas walks it, on ``mesh`` (:class:`GasGraph`).
+
+        Inlet duct, distributor, risers, collector and outlet duct, as straight segments
+        between nodes, each with its share of the flow: the branch split of
+        :meth:`split` on the risers, and on the headers the sum of the branches that
+        still have to leave (distributor) or have already joined (collector).  A ring
+        is fed at its entry tap and divides both ways round to its exit tap, where the
+        two halves meet and leave by the jumper; the collector mirrors it.  Only the
+        cells inside the vessel exchange (a nozzle stub in the excluded air carries the
+        gas and nothing else), and a lagged network exchanges on its risers alone.
+        """
+        from ..solver.fluid import GasGraph, GasSegment
+
+        config = self.config
+        split = self.split()
+        bore, duct_bore = self.inner_diameter, config.duct_inner_diameter
+        tube, duct = config.diameter, config.duct_d
+        lagged = bool(self.insulated)
+        segments: list[GasSegment] = []
+        counter = [2]                       # 0: after the heater, 1: before it
+
+        def node() -> int:
+            counter[0] += 1
+            return counter[0] - 1
+
+        def line(points, flow: float, start: int, end: int, name: str, riser: bool
+                 ) -> None:
+            """A polyline as a chain of straight segments from ``start`` to ``end``."""
+            points = [np.asarray(point, dtype=float) for point in points]
+            points = [pt for index, pt in enumerate(points)
+                      if index == 0 or np.linalg.norm(pt - points[index - 1]) > 1e-12]
+            if len(points) < 2:
+                points = [points[0], points[0]]
+            ends = [start] + [node() for _ in range(len(points) - 2)] + [end]
+            for piece, (a, b) in enumerate(zip(points[:-1], points[1:], strict=True)):
+                span = b - a
+                cells, length = self._piece_cells(mesh, a, b, tube if riser else duct)
+                segments.append(GasSegment(
+                    name=f"{name}.{piece}" if len(points) > 2 else name,
+                    source=ends[piece], target=ends[piece + 1], flow=float(flow),
+                    bore=bore if riser else duct_bore, outer=tube if riser else duct,
+                    axis=int(np.argmax(np.abs(span))) if np.any(span) else 2,
+                    cells=cells, length=length, exchanges=riser or not lagged))
+
+        count = len(self.branches)
+        groups = self._group_labels()
+        if self.distributors and len(self.distributors) > 1 or (
+                self.distributors and self.config.layout == LAYOUT_RINGS):
+            n_groups = len(self.distributors)
+            taps = [[b for b in range(count) if groups[b] == g] for g in range(n_groups)]
+            ring_flow = [float(sum(split[b] for b in taps[g])) for g in range(n_groups)]
+            dist_order = list(range(n_groups - 1, -1, -1))
+            balanced = config.collection in BALANCED_COLLECTIONS
+            coll_order = dist_order if balanced else list(reversed(dist_order))
+            d_node = [[node() for _ in taps[g]] for g in range(n_groups)]
+            c_node = [[node() for _ in taps[g]] for g in range(n_groups)]
+            line(self.inlet.points, 1.0, 0, d_node[dist_order[0]][0], "inlet_duct", False)
+
+            def ring(run, g: int, nodes: list[int], downstream: float, collector: bool
+                     ) -> None:
+                """The two halves of one ring: taps 0 -> n/2 both ways round."""
+                n = len(taps[g])
+                half = n // 2
+                f = [float(split[b]) for b in taps[g]]
+                pts = [run.points[t] for t in range(n)]
+                for side in (list(range(0, half + 1)),
+                             [0] + list(range(n - 1, half - 1, -1))):
+                    if len(side) < 2:
+                        continue
+                    share = 0.5 * ((downstream + f[0]) if collector
+                                   else (downstream + f[half]))
+                    inner = side[1:-1]
+                    for step, (t0, t1) in enumerate(zip(side[:-1], side[1:], strict=True)):
+                        if collector:
+                            flow = share + sum(f[t] for t in inner[:step])
+                        else:
+                            flow = share + sum(f[t] for t in inner[step:])
+                        a, b = (nodes[t0], nodes[t1])
+                        line([pts[t0], pts[t1]], flow, a, b,
+                             f"{run.name}.{t0}-{t1}", False)
+
+            remaining = 1.0
+            for position, g in enumerate(dist_order):
+                downstream = remaining - ring_flow[g]
+                ring(self.distributors[g], g, d_node[g], downstream, collector=False)
+                remaining = downstream
+                if position + 1 < len(dist_order):
+                    nxt = dist_order[position + 1]
+                    n = len(taps[g])
+                    line([self.distributors[g].points[n // 2],
+                          self.distributors[nxt].points[0]], downstream,
+                         d_node[g][n // 2], d_node[nxt][0], f"distributor_jumper_{g}", False)
+            for g in range(n_groups):
+                for t, b in enumerate(taps[g]):
+                    line(self.risers[b].points, float(split[b]), d_node[g][t], c_node[g][t],
+                         self.risers[b].name, True)
+            upstream = 0.0
+            for position, g in enumerate(coll_order):
+                ring(self.collectors[g], g, c_node[g], upstream, collector=True)
+                upstream += ring_flow[g]
+                n = len(taps[g])
+                if position + 1 < len(coll_order):
+                    nxt = coll_order[position + 1]
+                    line([self.collectors[g].points[n // 2],
+                          self.collectors[nxt].points[0]], upstream,
+                         c_node[g][n // 2], c_node[nxt][0], f"collector_jumper_{g}", False)
+                else:
+                    line(self.outlet.points, 1.0, c_node[g][n // 2], 1, "outlet_duct",
+                         False)
+        else:
+            # a ladder: one distributor through the feet in branch order, one collector
+            # through the heads, walked the same way (reverse return) or back (direct)
+            d_node = [node() for _ in range(count)]
+            c_node = [node() for _ in range(count)]
+            f = [float(v) for v in split]
+            bottom = self.distributors[0].points
+            top = self.collectors[0].points
+            line(self.inlet.points, 1.0, 0, d_node[0], "inlet_duct", False)
+            for b in range(count - 1):
+                line([bottom[b], bottom[b + 1]], sum(f[b + 1:]), d_node[b], d_node[b + 1],
+                     f"distributor.{b}", False)
+            for b in range(count):
+                line(self.risers[b].points, f[b], d_node[b], c_node[b],
+                     self.risers[b].name, True)
+            if config.collection in BALANCED_COLLECTIONS:
+                for b in range(count - 1):
+                    line([top[b], top[b + 1]], sum(f[:b + 1]), c_node[b], c_node[b + 1],
+                         f"collector.{b}", False)
+                line(self.outlet.points, 1.0, c_node[count - 1], 1, "outlet_duct", False)
+            else:
+                for b in range(count - 1, 0, -1):
+                    line([top[b], top[b - 1]], sum(f[b:]), c_node[b], c_node[b - 1],
+                         f"collector.{b}", False)
+                line(self.outlet.points, 1.0, c_node[0], 1, "outlet_duct", False)
+        graph = GasGraph(segments)
+        graph.check()
+        return graph
+
+    def _piece_cells(self, mesh: Mesh3D | AdaptiveMesh, a: np.ndarray, b: np.ndarray,
+                     diameter: float) -> tuple[np.ndarray, np.ndarray]:
+        """Cells of one straight piece inside the vessel, in the order the gas meets them.
+
+        Rasterised once per mesh state (the piece's two ends key the memo); a cell
+        outside the vessel is dropped - the gas crosses it without exchanging.
+        """
+        import weakref
+
+        version = getattr(getattr(mesh, "tree", None), "version", None)
+        memo = getattr(self, "_piece_memo", None)
+        if memo is None or memo[0]() is not mesh or memo[1] != version:
+            memo = (weakref.ref(mesh), version, {})
+            self._piece_memo = memo
+        key = (tuple(np.round(a, 9)), tuple(np.round(b, 9)))
+        cached = memo[2].get(key)
+        if cached is None:
+            run = rasterize_pipe(mesh, [a, b], diameter, order="path")
+            inside = self._vessel_mask(mesh, run.cells)
+            cached = (run.cells[inside], np.asarray(run.length, dtype=float)[inside])
+            memo[2][key] = cached
+        return cached
+
     def fluid_loop(self, mass_flow: float, fluid: Fluid | None = None,
                    external_power: float = 0.0, t_in: float | None = None,
                    h_fluid: float | None = None, fittings_k: float = 0.0,
                    fan_efficiency: float = 0.7, pressure: float = 101325.0,
-                   mesh: Mesh3D | AdaptiveMesh | None = None) -> FluidLoop:
+                   mesh: Mesh3D | AdaptiveMesh | None = None, whole_circuit: bool = True,
+                   well_model: bool = True, variable_properties: bool = True
+                   ) -> FluidLoop:
         """Build the gas circuit of the network as the 1-D loop the analyses march.
 
         One run per branch, in branch order, with the branch split of :meth:`split`:
@@ -1389,7 +1558,10 @@ class PipeNetwork:
 
         ``mesh`` re-rasterises the risers on another grid, the way
         :meth:`voxelize` does: pass the mesh the solve will use when it is not the one
-        the network was built on.  ``h_fluid`` is passed to the loop as it is (None
+        the network was built on.  With a mesh the loop marches the *whole circuit*
+        (:meth:`gas_graph`: the headers and the ducts exchange too, with their own
+        flows), with the well model of the tubes and the gas at its own temperature -
+        the three switches keep the parallel-riser reference reachable.  ``h_fluid`` is passed to the loop as it is (None
         lets the loop compute the film coefficient of each run from its own flow and
         the bore).
         """
@@ -1398,11 +1570,17 @@ class PipeNetwork:
         fluid = self._fluid_or_default(fluid)
         circuit = self.hydraulics(mass_flow, fluid)
         runs = self._gas_runs(mesh)
+        material = self.config.pipe_material
+        graph = self.gas_graph(mesh) if mesh is not None and whole_circuit else None
         return FluidLoop(runs=runs, mass_flow=float(mass_flow), fluid=fluid,
                          h_fluid=h_fluid, external_power=float(external_power),
                          t_in=t_in, split=self.split(), roughness=self.roughness,
                          fittings_k=float(fittings_k) + circuit.fittings_k,
-                         fan_efficiency=fan_efficiency, pressure=pressure)
+                         fan_efficiency=fan_efficiency, pressure=pressure, graph=graph,
+                         well_model=well_model,
+                         wall_thickness=float(self.config.wall_thickness),
+                         k_wall=21.0 if material is None else material.k_wall,
+                         variable_properties=variable_properties)
 
 
 # -------------------------------------------------------------- the two reports
@@ -1667,6 +1845,11 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
         (float(discharge_vertex[0]), float(discharge_vertex[1]),
          float(discharge_vertex[2])),
     ]
+    if rings and not central and coll_order[-1] != max(range(plan.n_groups)):
+        # the chain ends inside: rise to the outlet level first, so the duct crosses
+        # the outer rings above them instead of through them
+        outlet_points.append((float(discharge_vertex[0]), float(discharge_vertex[1]),
+                              config.outlet_elevation))
     if central:
         outlet_points.append((cx, cy, float(discharge_vertex[2])))
         outlet_points.append((cx, cy, config.outlet_elevation))

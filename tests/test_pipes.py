@@ -724,7 +724,9 @@ def test_the_loop_built_from_the_network_marches_with_its_split_and_keeps_enthal
         mesh.set_adiabatic(face)
     mesh.T[:] = 500.0
     mass_flow = 0.05
-    loop = net.fluid_loop(mass_flow, t_in=300.0)
+    # the reference: the risers in parallel at constant gas properties
+    loop = net.fluid_loop(mass_flow, t_in=300.0, well_model=False,
+                          variable_properties=False)
     assert loop.runs[0].diameter == pytest.approx(config.inner_diameter, rel=1e-12)
     assert [run.name for run in loop.runs] == [run.name for run in net.risers]
     assert loop.split == pytest.approx(list(net.split()), rel=1e-12)

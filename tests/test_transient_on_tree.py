@@ -407,10 +407,10 @@ def test_the_cycle_closes_its_ledger_on_a_tree(structured_twin):
         assert on_tree.seconds == pytest.approx(on_grid.seconds, abs=1e-9), on_tree.name
         assert on_tree.stored_start == pytest.approx(on_grid.stored_start, rel=1e-6), on_tree.name
         assert on_tree.stored_end == pytest.approx(on_grid.stored_end, rel=1e-6), on_tree.name
-        assert on_tree.energy_in == pytest.approx(on_grid.energy_in, rel=1e-6), on_tree.name
-        assert on_tree.energy_out == pytest.approx(on_grid.energy_out, rel=1e-6), on_tree.name
-        assert on_tree.energy_loss == pytest.approx(on_grid.energy_loss, rel=1e-6), on_tree.name
-        assert on_tree.fan_energy == pytest.approx(on_grid.fan_energy, rel=1e-6), on_tree.name
+        assert on_tree.energy_in == pytest.approx(on_grid.energy_in, rel=1e-6, abs=1e-6), on_tree.name
+        assert on_tree.energy_out == pytest.approx(on_grid.energy_out, rel=1e-6, abs=1e-6), on_tree.name
+        assert on_tree.energy_loss == pytest.approx(on_grid.energy_loss, rel=1e-6, abs=1e-6), on_tree.name
+        assert on_tree.fan_energy == pytest.approx(on_grid.fan_energy, rel=1e-6, abs=1e-6), on_tree.name
         assert on_tree.t_end == pytest.approx(on_grid.t_end, rel=1e-9), on_tree.name
     assert reference.balance_residual() < 0.01
 

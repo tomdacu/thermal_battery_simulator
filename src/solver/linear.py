@@ -115,6 +115,18 @@ def fingerprint(a: sparse.spmatrix) -> str:
     return h.hexdigest()
 
 
+#: relative change of every entry under which an AMG hierarchy is reused as it is
+NEAR_REUSE = 0.2
+
+
+def _structure(a: sparse.csr_matrix) -> str:
+    """Hash of the sparsity pattern alone."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(np.ascontiguousarray(a.indptr, dtype=np.int64).tobytes())
+    h.update(np.ascontiguousarray(a.indices, dtype=np.int64).tobytes())
+    return h.hexdigest()
+
+
 class PreconditionerCache:
     """Keeps the expensive AMG hierarchy alive while the matrix is unchanged."""
 
@@ -166,6 +178,14 @@ class PreconditionerCache:
             notes.append("reusing cached AMG hierarchy")
             self._last = weakref.ref(a)
             return self._object
+        if self._near(a, cfg):
+            # the same sparsity and entries within NEAR_REUSE of the ones the hierarchy
+            # was built for: a preconditioner only has to be *close* to the operator
+            # (CG still converges to the tolerance asked), so a transient whose films
+            # drift step by step keeps one hierarchy for several steps
+            notes.append("reusing the AMG hierarchy of a nearby operator")
+            self._last = weakref.ref(a)
+            return self._object
         if cfg.preconditioner == "amg_sa":
             solver = pyamg.smoothed_aggregation_solver(a, max_coarse=500, max_levels=10)
         else:
@@ -179,7 +199,22 @@ class PreconditionerCache:
                 postsmoother=("gauss_seidel", {"sweep": "backward"}))
         self._key, self._object = key, solver.aspreconditioner()
         self._last = weakref.ref(a)
+        self._built = (cfg.preconditioner, a.shape, _structure(a), a.data.copy())
         return self._object
+
+    def _near(self, a: sparse.csr_matrix, cfg: LinearConfig) -> bool:
+        """Whether ``a`` has the built operator's pattern and entries within NEAR_REUSE."""
+        built = getattr(self, "_built", None)
+        if built is None or self._object is None or built[0] != cfg.preconditioner:
+            return False
+        if built[1] != a.shape or built[3].size != a.data.size:
+            return False
+        if built[2] != _structure(a):
+            return False
+        old = built[3]
+        change = np.abs(a.data - old)
+        scale = np.maximum(np.abs(old), 1e-300)
+        return bool(np.all(change <= NEAR_REUSE * scale))
 
 
 def _symmetry_tolerance(a: sparse.spmatrix) -> float:
