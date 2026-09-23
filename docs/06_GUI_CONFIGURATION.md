@@ -44,6 +44,13 @@ air around the vessel is excluded from the problem, so the box only has to hold 
 vessel plus 0.3 m of air (`GeometryPanel.domain`) and the vessel is centred in it - a
 centre set by hand is what put the pipe network off the vessel once.
 
+**Geometry and mesh are coupled.**  The window keeps a digest of the model the mesh was
+built from (`ThermalBatteryGUI.model_signature`: the vessel, the materials, the site, the
+mesh request and the pipe network with its engine design).  An edit on any of those pages
+marks the mesh out of date - the 3D view says so in red and the Mesh tab's read-out too -
+and *Run* rebuilds the mesh (running the header engine if the plant changed) before it
+solves; `tests/test_gui.py::test_the_mesh_follows_the_model_it_was_built_from` pins it.
+
 ## 1. Vessel
 
 | control | default | range | feeds |

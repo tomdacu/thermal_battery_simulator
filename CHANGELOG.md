@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.0 - 2026-09-24
+
+The first tagged version.  Everything since the last push is in it: the anisotropic tree
+of boxes, the well model, the whole gas circuit and its hydraulics, the header engine and
+the radial manifold, the Zehner-Bauer-Schlünder bed, the thin layers and the soil, and:
+
+* **the mesh coupled to the model**: the window keeps a digest of the model the mesh was
+  built from; an edit on the vessel, the materials, the site, the mesh settings or the
+  plant marks it out of date (the 3D view and the Mesh tab say so) and *Run* rebuilds it
+  before it solves - before, a run after an edit solved the old mesh with the new
+  panels;
+* the house-style banner and icon (`scripts/banner.py`, `assets/`), the README restyled;
+* the repository renamed `thermal_battery_simulator`.
+
 ## 2026-09-23 (night) - the flows from the hydraulics, the headers from an engine
 
 * `src/solver/hydraulics.py`: the circuit as a looped pipe network (Darcy-Weisbach, a

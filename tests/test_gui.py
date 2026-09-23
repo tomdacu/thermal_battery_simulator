@@ -255,3 +255,31 @@ def test_the_window_fits_the_screen_and_explanations_take_no_room(window):
                        if label.wordWrap() and len(label.text()) > 200
                        and not label.textInteractionFlags() & readout]
     assert help_paragraphs == [], [label.text()[:120] for label in help_paragraphs]
+
+
+def test_the_mesh_follows_the_model_it_was_built_from(window):
+    """Geometry, materials and mesh are coupled: an edit makes the built mesh stale,
+    and a run rebuilds it from the model the panels describe before it solves."""
+    from PyQt6.QtWidgets import QApplication
+
+    window.build_mesh()
+    assert window.mesh_is_current()
+    built = window.mesh
+    radius = window.geometry_panel.radius
+    original = radius.value()
+    try:
+        radius.setValue(original + 0.2)
+        QApplication.processEvents()
+        assert not window.mesh_is_current()
+        window._model_edited()
+        assert "out of date" in window.geometry_panel.mesh_info.text()
+        # a material edit is a model edit too: the mesh is painted with it
+        window.materials_panel.storage_material.setCurrentIndex(0)
+        window.run()
+        assert window.controller.wait(600_000), "the run did not finish"
+        QApplication.processEvents()
+        assert window.mesh is not built
+        assert window.mesh_is_current()
+        assert window.battery.cylinder.r_storage == pytest.approx(original + 0.2)
+    finally:
+        radius.setValue(original)

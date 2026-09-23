@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src import __version__
 from src.analysis.mesh_plan import plan_regions
 from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import BatteryGeometry
@@ -71,12 +72,14 @@ class ThermalBatteryGUI(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Thermal Battery Simulator")
+        self.setWindowTitle(f"Thermal Battery Simulator {__version__}")
         self.resize(1500, 950)
         icon = window_icon_path()
         if icon is not None:
             self.setWindowIcon(QIcon(str(icon)))
         self.mesh: AdaptiveMesh | None = None
+        #: the digest of the model the mesh was built from (see model_signature)
+        self._built_signature: str | None = None
         self.battery = BatteryGeometry()
         self.state_manager = StateManager()
         self.controller = SimulationController(self)
@@ -191,6 +194,20 @@ class ThermalBatteryGUI(QMainWindow):
                 widget.currentIndexChanged.connect(self._preview_timer.start)
             for widget in page.findChildren(QCheckBox):
                 widget.toggled.connect(self._preview_timer.start)
+        # every page the model is made of: an edit there makes the built mesh stale
+        self._stale_timer = QTimer(self)
+        self._stale_timer.setSingleShot(True)
+        self._stale_timer.setInterval(250)
+        self._stale_timer.timeout.connect(self._model_edited)
+        for page in (self.geometry_panel.vessel_page, self.geometry_panel.plant_page,
+                     self.geometry_panel.mesh_page, self.materials_panel.materials_page,
+                     self.materials_panel.site_page):
+            for widget in page.findChildren((QDoubleSpinBox, QSpinBox)):
+                widget.valueChanged.connect(self._stale_timer.start)
+            for widget in page.findChildren(QComboBox):
+                widget.currentIndexChanged.connect(self._stale_timer.start)
+            for widget in page.findChildren(QCheckBox):
+                widget.toggled.connect(self._stale_timer.start)
         self.analysis_panel.save_requested.connect(self.save_state)
         self.analysis_panel.load_requested.connect(self.load_state)
         self.analysis_panel.analysis_changed.connect(self._on_analysis_changed)
@@ -285,6 +302,8 @@ class ThermalBatteryGUI(QMainWindow):
         # one: the pipes are painted on the very cells the run will solve
         self.paint_pipe_network("painted with the mesh")
         self._update_mesh_info()
+        self._built_signature = self.model_signature()
+        self.viz.set_stale(False)
         self.viz.show_mesh(mesh)
         self.statusBar().showMessage("Mesh ready")
 
@@ -418,11 +437,52 @@ class ThermalBatteryGUI(QMainWindow):
             **self.solver_panel.settings(),
         )
 
+    # ------------------------------------------------ geometry <-> mesh coupling
+    def model_signature(self) -> str:
+        """A digest of everything the built mesh is made of.
+
+        The vessel and its materials, the site, the mesh request and the pipe network (the
+        engine's design included): the mesh is painted from these, so it is current only
+        while they are unchanged.
+        """
+        import hashlib
+
+        panel = self.geometry_panel
+        battery = self._battery_from_panels()
+        text = repr((battery, panel.adaptive_plan(), panel.pipe_network_config()))
+        return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+
+    def mesh_is_current(self) -> bool:
+        """True when a mesh exists and was built from the model the panels describe."""
+        if self.mesh is None or self._built_signature is None:
+            return False
+        try:
+            return self.model_signature() == self._built_signature
+        except ValueError:
+            return False
+
+    @safe_slot
+    def _model_edited(self) -> None:
+        """A model setting changed: say so where the mesh is shown."""
+        stale = self.mesh is not None and not self.mesh_is_current()
+        self.viz.set_stale(stale)
+        if stale:
+            self.geometry_panel.mesh_info.setText(
+                "out of date: the model changed after the build - Run rebuilds it "
+                "(or press Build mesh)")
+            self.statusBar().showMessage("the model changed: the mesh will be rebuilt "
+                                         "before the next run")
+
     @safe_slot
     def run(self) -> None:
-        if self.mesh is None:
-            QMessageBox.warning(self, "No mesh", "Build the mesh first.")
-            return
+        if self.mesh is None or not self.mesh_is_current():
+            # the mesh is painted from the model: a run on a mesh built from another
+            # vessel, other materials or another network would answer another question
+            self.log("[mesh] the model changed since the build (or no mesh yet): "
+                     "rebuilding it before the run")
+            self.build_mesh()
+            if self.mesh is None or not self.mesh_is_current():
+                return
         try:
             # the materials, the packing and the ambient may have changed after the
             # build: the run must use what the panels say now, not what was frozen

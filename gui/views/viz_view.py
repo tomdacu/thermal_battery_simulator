@@ -41,6 +41,8 @@ class VizView(QWidget):
         self._battery = None
         self._network = None
         self._disabled_reason = None
+        #: the mesh on show was built from another model than the panels describe
+        self._stale = False
         if os.environ.get("THERMAL_DISABLE_3D", "") in ("1", "true", "yes"):
             self._disabled_reason = "3D view disabled by THERMAL_DISABLE_3D"
         else:
@@ -161,6 +163,10 @@ class VizView(QWidget):
             self.plotter.add_text(f"{field}  |  cut {axis} at "
                                   f"{fraction * length:.2f} m",
                                   position="upper_left", font_size=10)
+            if self._stale:
+                self.plotter.add_text("mesh out of date: the model changed after the "
+                                      "build - Run rebuilds it", position="lower_left",
+                                      font_size=9, color="red")
             add_material_legend(self.plotter)
         self.plotter.add_axes()
         self.position_label.setText(f"{fraction * self._domain_length(axis):.2f} m")
@@ -178,6 +184,13 @@ class VizView(QWidget):
         return 1.0
 
     # -------------------------------------------------------------- preview
+    def set_stale(self, stale: bool) -> None:
+        """Mark the mesh on show as built from another model (redraws on a change)."""
+        if bool(stale) != self._stale:
+            self._stale = bool(stale)
+            if self.field_combo.currentData() != GEOMETRY:
+                self.render()
+
     def _select(self, entry: str) -> None:
         """Select an entry of the field selector without rendering twice."""
         index = self.field_combo.findData(entry)

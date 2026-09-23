@@ -1,38 +1,38 @@
-# 🔋 Thermal Battery Simulator
+# Thermal Battery Simulator
 
-![Banner](photo/Banner%20thermal%20battery%20simulator.png)
+![Thermal Battery Simulator](assets/banner.png)
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-blue.svg)](https://polyformproject.org/licenses/noncommercial/1.0.0)
-[![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
+**A 3D simulator of sand batteries: the bed, the envelope and the gas circuit that
+charges and discharges it, solved together.**
 
-A 3D thermal simulator of **sand batteries**: a vessel of sand or crushed rock charged
-by electric resistors through a closed gas circuit and buried pipes, and discharged
-through an exchanger on the same circuit - the architecture of the Polar Night Energy
-plants.  It answers the questions a designer asks: how much the plant loses in standby,
-how the bed charges and discharges, what the gas temperatures are, how much the fan
-costs, and where the heat goes.
+A sand battery stores electricity as heat in a vessel of sand or crushed rock: electric
+resistors heat the gas of a closed circuit, the gas runs through pipes buried in the bed
+and leaves its heat there, and on discharge an exchanger on the same circuit takes it
+back out - the architecture of the Polar Night Energy plants.  This code answers the
+questions a designer asks of such a plant: what it loses in standby, how the bed charges
+and discharges, what the gas temperatures are, how the flow divides between the tubes,
+how the headers must be sized, what the fan costs and where the heat goes.
 
-![Thermal Battery Visualization](photo/heating_elements_3D.png)
+Version **2.0.0** (2026-09-24): an anisotropic mesh, the tube coupled to its cell by a
+well model, the whole gas circuit with its hydraulics, a header-sizing engine, a packed
+bed that conducts like a hot one, and the mesh coupled to the model it is built from.
+
+## Contents
+
+- [What it models](#what-it-models)
+- [How it solves](#how-it-solves)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [The default plant and what it takes to run](#the-default-plant-and-what-it-takes-to-run)
+- [Documentation](#documentation)
+- [Project structure](#project-structure)
+- [Figures](#figures)
+- [Development](#development)
+- [Licence](#licence)
 
 ---
 
-## 📋 Contents
-
-- [What it models](#-what-it-models)
-- [How it solves](#-how-it-solves)
-- [Installation](#-installation)
-- [Quick start](#-quick-start)
-- [The default plant and what it takes to run](#-the-default-plant-and-what-it-takes-to-run)
-- [Documentation](#-documentation)
-- [Project structure](#-project-structure)
-- [Figures](#-figures)
-- [Development](#-development)
-- [License](#-license)
-
----
-
-## 🔥 What it models
+## What it models
 
 **The vessel.**  A cylindrical bed of sand or crushed rock (steatite, silica sand,
 olivine, basalt, magnetite, quartzite, granite) inside a radial insulation, a steel
@@ -85,7 +85,7 @@ insulation its resistance.
 
 ---
 
-## 🧮 How it solves
+## How it solves
 
 The full account - every equation and its source - is in
 **[docs/18_SOLVER.md](docs/18_SOLVER.md)**; the reasons behind each choice in
@@ -113,13 +113,13 @@ at a relative residual of 1e-6.
 
 ---
 
-## 💻 Installation
+## Installation
 
 Python 3.10 or newer.
 
 ```bash
-git clone https://github.com/PhyTom/Thermal_battery_simulator.git
-cd Thermal_battery_simulator
+git clone https://github.com/tomdacu/thermal_battery_simulator.git
+cd thermal_battery_simulator
 python -m venv .venv
 .venv\Scripts\activate            # Windows  (Linux/Mac: source .venv/bin/activate)
 pip install -r requirements.txt   # numpy, scipy, h5py, PyQt6, pyvista, pyvistaqt, pyamg, matplotlib
@@ -129,7 +129,7 @@ Without PyAMG the linear layer falls back to CG + Jacobi (slower, same answer).
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 python run_gui.py
@@ -152,13 +152,17 @@ The left column has six tabs; every explanation is behind an **ⓘ** tooltip.
    *Discharge* (the exchanger); save and load a state.
 6. **Solver** - temperature tolerance, linear residual, threads, radiation.
 
-Then **Build mesh** and **Run**.  The right-hand panel shows the statistics, the energy
+Then **Build mesh** and **Run**.  The mesh is coupled to the model it is built from:
+change the vessel, a material, the site, the mesh settings or the plant and the mesh is
+marked out of date (in the 3D view and on the Mesh tab), and **Run rebuilds it** - with
+the header engine when the plant changed - before it solves, so a result always belongs
+to the model on screen.  The right-hand panel shows the statistics, the energy
 balance with the gas loop, the materials, the time series and the log; the time series
 exports to CSV and the field to VTK (ParaView).
 
 ---
 
-## 📏 The default plant and what it takes to run
+## The default plant and what it takes to run
 
 The defaults are sized on the published pilot of the class (Kankaanpää, 2022: 4 m
 across, 7 m tall, ~100 t of sand, 8 MWh, 200 kW of charge, 100 kW of discharge):
@@ -181,7 +185,7 @@ Measured on the development machine (2026-09-23):
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 | Document | Read it for |
 |---|---|
@@ -205,7 +209,7 @@ Measured on the development machine (2026-09-23):
 
 ---
 
-## 📁 Project structure
+## Project structure
 
 ```
 battery_simulation/
@@ -244,7 +248,7 @@ battery_simulation/
 
 ---
 
-## 🖼️ Figures
+## Figures
 
 Every figure in `docs/figures/` is generated offscreen by `python scripts/figures.py`:
 the vessel with the buried bundle, a temperature slice, the graded mesh, the 2:1
@@ -252,7 +256,7 @@ balance, the closed gas loop, the effectiveness and blower design curves.
 
 ---
 
-## 🛠️ Development
+## Development
 
 ```bash
 python -m pytest tests/ -q                                   # 416 cases, ~6 minutes, head-less
@@ -270,6 +274,6 @@ design gas temperature, no natural convection in the roof air or in the pores.
 
 ---
 
-## 📄 License
+## Licence
 
-PolyForm Noncommercial License 1.0.0 - see [LICENSE](LICENSE).  Author: **PhyTom**.
+PolyForm Noncommercial License 1.0.0, see [LICENSE](LICENSE).  Author: Tommaso D'Acunzio ([tomdacu](https://github.com/tomdacu)).

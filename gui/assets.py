@@ -16,7 +16,10 @@ def asset(*parts: str):
 
 
 def window_icon_path():
-    """Application icon, tolerating the historical file-name variation."""
+    """Application icon: the house-style icon, else the historical ones."""
+    found = asset("assets", "icon.png")
+    if found is not None:
+        return found
     for name in ("Icona Thermal Battery 2.png", "Icona Thermal Battery.png",
                  "Icon3.png"):
         found = asset("photo", name)
