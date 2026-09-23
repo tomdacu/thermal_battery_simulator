@@ -42,6 +42,12 @@ def rich(text: str) -> str:
     return f"<p style='max-width: 420px'>{html.escape(text)}</p>"
 
 
+def rich_lines(lines: Sequence[str]) -> str:
+    """A tooltip of several lines, each one wrapped on its own."""
+    body = "<br>".join(html.escape(line) for line in lines)
+    return f"<p style='max-width: 520px'>{body}</p>" if body else ""
+
+
 def _tip(widget: QWidget, tooltip: str) -> None:
     if tooltip:
         widget.setToolTip(rich(tooltip))

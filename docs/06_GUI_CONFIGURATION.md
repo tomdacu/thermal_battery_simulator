@@ -94,7 +94,7 @@ gas film instead.
 | Flow split | Equal per branch | 4 rules | `split_mode` |
 | Sectors ⓘ | 4 | 1–16 | `n_sectors`, enabled for the sector split |
 | *Rebuild the network on the mesh* | – | – | repaints on the current mesh (Build mesh does it too) |
-| Network | read-out | – | `summary()`, the paint report, the wall heat flux |
+| Network ⓘ | read-out | – | two lines (risers, tube area, flow spread, painted cells); the full `summary()`, paint report, wall heat flux and design notes - each once - are its tooltip |
 
 Every edit of the Vessel and Plant pages redraws the geometry preview after 250 ms, with
 the network as the panels describe it now (laid out on a throw-away tree of eight

@@ -34,7 +34,8 @@ from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
 from src.core.pipes import pipe_surface_power_w_cm2
 from src.solver.fluid import Fluid
 
-from ..widgets import FormPanel, button, check, combo, double_spin, hint, int_spin
+from ..widgets import (INFO, FormPanel, button, check, combo, double_spin, hint, int_spin,
+                       rich_lines)
 
 #: air kept around the vessel [m]: the outer film sits on the first excluded leaves
 AIR_MARGIN = 0.3
@@ -219,6 +220,7 @@ class GeometryPanel(QWidget):
                              "Voxelise the network on the current mesh (Build mesh "
                              "does it too)"))
         self.pipe_info = pipes.add("Network", hint("build the mesh: it paints the network"))
+        self._pipe_caption = pipes.form.labelForField(self.pipe_info)
         self._pipe_mode()
 
     def _pipe_mode(self, *_args) -> None:
@@ -356,21 +358,38 @@ class GeometryPanel(QWidget):
         self._pipe_network = network
         if network is None:
             self.pipe_info.setText(message or "build the mesh: it paints the network")
+            self._set_pipe_details("")
             self.circuit_info.setText(message or "build the network to size it")
             return
         problems = [problem for problem in network.config.validate()
                     if problem.startswith(WARNING)]
         problems.extend(network.validate())
-        lines = [network.summary()]
+        lines = network.summary().splitlines()
         if report is not None:
-            lines.append(report.summary())
+            lines.extend(report.summary().splitlines())
         lines.append(self.circuit_line())
-        if problems:
-            lines.append("check: " + "; ".join(problems))
+        lines.extend("check: " + problem for problem in problems)
         if message:
             lines.append(message)
-        self.pipe_info.setText("\n".join(lines))
+        # the network and the paint report both carry the design notes: each once
+        details = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+        notes = sum(line.startswith(("note:", "check:")) for line in details)
+        # two lines in the form, the whole report behind the info mark
+        brief = [f"{network.n_risers} risers, {network.total_area:.0f} m2 of tube "
+                 f"({network.riser_area:.0f} m2 on the risers), flow spread "
+                 f"{network.path_spread():.3f}x"]
+        if report is not None:
+            brief.append(f"{report.cells:,} tube cells, {report.area:.0f} m2 painted")
+        brief.append(f"{INFO} details" + (f" - {notes} notes" if notes else ""))
+        self.pipe_info.setText("\n".join(brief))
+        self._set_pipe_details(rich_lines(details))
         self.circuit_info.setText(self._circuit_summary())
+
+    def _set_pipe_details(self, tooltip: str) -> None:
+        """The full network report behind the info mark of the Network row."""
+        self.pipe_info.setToolTip(tooltip)
+        self._pipe_caption.setToolTip(tooltip)
+        self._pipe_caption.setText(f"Network {INFO}" if tooltip else "Network")
 
     def circuit_line(self) -> str:
         """The mean heat flux through the tube wall at the rated power.
