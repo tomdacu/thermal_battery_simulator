@@ -1,8 +1,14 @@
-"""Materials and operating-condition panel."""
+"""Materials of the vessel's layers, and the site the vessel stands in.
+
+Two pages: the **materials** of the storage bed, the insulation and the shell - laid out
+by the window on the Vessel page, next to the shape they fill - and the **site**: the
+ambient air, the ground and the wind the outer surface exchanges with.  The site is not
+a material: it is the one place the ambient values are defined, and every analysis
+reads them from here.
+"""
 from __future__ import annotations
 
-
-from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from src.core.materials import INSULATION_MATERIALS, MATERIALS, STORAGE_MATERIALS
 from src.units import c_to_k
@@ -24,51 +30,55 @@ def _index_of(items, key: str) -> int:
 
 
 class MaterialsPanel(QWidget):
-    """Medium selection plus the single source of truth for the ambient conditions."""
+    """Layer materials plus the single source of truth for the ambient conditions."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        self.materials_page = FormPanel()
+        bed = self.materials_page.section(
+            "Materials",
+            "The bed is a packed bed of the medium: its conductivity, density and heat "
+            "capacity are those of the grains at the packing fraction, with the voids "
+            "(compute_packed_bed_properties).  The insulation and the shell are solid.")
+        self.storage_material = bed.add("Storage medium", combo(
+            _STORAGE, _index_of(_STORAGE, "steatite"), self.refresh_info))
+        self.packing = bed.add("Packing [%]", int_spin(
+            63, 20, 90, 1, on_change=self.refresh_info,
+            tooltip="Solid fraction of the bed: 60-65 % for poured sand or crushed rock"))
+        self.storage_info = bed.add("Bed", hint("-"))
+        self.insulation_material = bed.add("Insulation", combo(
+            _INSULATION, 0, self.refresh_info))
+        self.shell_material = bed.add("Shell", combo(_STRUCTURAL))
+        self.insulation_info = bed.add("Insulation k", hint("-"))
 
-        storage = FormPanel()
-        self.storage_material = storage.add("Storage medium",
-                                            combo(_STORAGE, _index_of(_STORAGE, "steatite")))
-        self.packing = storage.add("Packing [%]", int_spin(63, 20, 90, 1))
-        self.storage_info = storage.add("Properties", hint("-"))
-        self.tabs.addTab(storage, "Storage")
-
-        insulation = FormPanel()
-        self.insulation_material = insulation.add("Insulation", combo(_INSULATION))
-        self.shell_material = insulation.add("Shell", combo(_STRUCTURAL))
-        self.insulation_info = insulation.add("Properties", hint("-"))
-        self.tabs.addTab(insulation, "Insulation")
-
-        conditions = FormPanel()
-        self.t_ambient = conditions.add("Ambient [°C]", double_spin(20.0, -40.0, 80.0, 1.0, 1))
-        self.t_ground = conditions.add("Ground [°C]", double_spin(10.0, -20.0, 60.0, 1.0, 1))
-        self.wind = conditions.add("Wind speed [m/s]", double_spin(
+        self.site_page = FormPanel()
+        site = self.site_page.section(
+            "Site",
+            "The only ambient values the model uses.  The outer surface exchanges with the "
+            "air through a film computed from the correlations - natural convection on the "
+            "vessel plus the wind (ISO 6946, 4 + 4 v) - which the log reports after every "
+            "build; the ground is held at its temperature under the foundation.")
+        self.t_ambient = site.add("Ambient [°C]", double_spin(20.0, -40.0, 80.0, 1.0, 1))
+        self.t_ground = site.add("Ground [°C]", double_spin(
+            10.0, -20.0, 60.0, 1.0, 1,
+            tooltip="Held under the foundation: the ground below a plant is close to the "
+                    "annual mean air temperature"))
+        self.wind = site.add("Wind speed [m/s]", double_spin(
             0.0, 0.0, 30.0, 0.5, 1,
             tooltip="Forced part of the outer film, 4 + 4 v (ISO 6946), added to the "
                     "natural convection of the vessel (Churchill-Chu)"))
-        conditions.add_hint("These are the only ambient/ground values used: they feed "
-                            "BatteryGeometry and every analysis.  The outer surface of the "
-                            "vessel exchanges with the ambient through a film computed "
-                            "from the correlations (the log reports it after a build); "
-                            "the radiative share is switched on in Tools > Solver.")
-        self.tabs.addTab(conditions, "Conditions")
         self.refresh_info()
 
-    def refresh_info(self) -> None:
-        storage = MATERIALS[self.storage_material.currentData()]
+    def refresh_info(self, *_args) -> None:
+        from src.core.materials import MaterialManager
+
+        bed = MaterialManager().compute_packed_bed_properties(
+            self.storage_material.currentData(), self.packing_fraction())
         insulation = MATERIALS[self.insulation_material.currentData()]
         self.storage_info.setText(
-            f"k {storage.k:.3f} W/(m·K) · rho {storage.rho:.0f} kg/m³ · "
-            f"cp {storage.cp:.0f} J/(kg·K) · T_max {storage.t_max - 273.15:.0f} °C")
+            f"k {bed.k:.3f} W/(m·K) · rho {bed.rho:.0f} kg/m³ · cp {bed.cp:.0f} J/(kg·K)")
         self.insulation_info.setText(
-            f"k {insulation.k:.3f} W/(m·K) · rho {insulation.rho:.0f} kg/m³ · "
-            f"cp {insulation.cp:.0f} J/(kg·K) · T_max {insulation.t_max - 273.15:.0f} °C")
+            f"{insulation.k:.3f} W/(m·K) · up to {insulation.t_max - 273.15:.0f} °C")
 
     # -------------------------------------------------------------- accessors
     def storage_key(self) -> str:

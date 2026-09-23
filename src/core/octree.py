@@ -99,6 +99,33 @@ class Leaf:
         return code
 
 
+def locate_in_tables(tables: list[tuple[np.ndarray, np.ndarray]], n: int,
+                     points: np.ndarray) -> np.ndarray:
+    """Index of the leaf covering each point, from per-level sorted corner tables.
+
+    ``tables[level]`` is ``(sorted level-normalised codes, leaf positions)`` as
+    :meth:`Octree._leaf_arrays` builds them; the lookup is one ``searchsorted`` per level,
+    coarsest first.  A table of a *previous* tree answers "which old leaf holds this
+    point", which is how a refinement carries its fields.  Points outside get -1.
+    """
+    points = np.asarray(points, dtype=np.int64).reshape(-1, 3)
+    out = np.full(points.shape[0], -1, dtype=np.int64)
+    inside = np.all((points >= 0) & (points < n), axis=1)
+    for level in range(len(tables) - 1, -1, -1):
+        codes, positions = tables[level]
+        pending = np.flatnonzero(inside & (out < 0))
+        if pending.size == 0:
+            break
+        if codes.size == 0:
+            continue
+        shifted = points[pending] >> level
+        wanted = shifted[:, 0] | (shifted[:, 1] << 21) | (shifted[:, 2] << 42)
+        where = np.minimum(np.searchsorted(codes, wanted), codes.size - 1)
+        hit = codes[where] == wanted
+        out[pending[hit]] = positions[where[hit]]
+    return out
+
+
 def _leaf_key(leaf: Leaf) -> tuple[int, int, int, int]:
     """The sort key of a leaf: its dataclass order as a tuple."""
     return (leaf.level, leaf.x, leaf.y, leaf.z)
@@ -306,29 +333,30 @@ class Octree:
         splits = 0
         frontier = {leaf for leaf in seeds if leaf in self._index}
         while frontier:
-            to_split: set[Leaf] = set()
-            for leaf in frontier:
-                size, half = leaf.size, leaf.size // 2
-                corner = (leaf.x, leaf.y, leaf.z)
-                centre = (leaf.x + half, leaf.y + half, leaf.z + half)
-                for axis in range(3):
-                    # a seed is a child of a split: along each axis one of its faces is
-                    # shared with a sibling (same level, never a violation) and only the
-                    # other one looks outside the parent
-                    outward = (corner[axis] >> leaf.level) & 1
-                    point = list(centre)
-                    point[axis] = corner[axis] + size if outward else corner[axis] - 1
-                    if not 0 <= point[axis] < self.n:
-                        continue                       # the wall of the box
-                    # only a neighbour two or more levels coarser breaks the rule, so
-                    # only those levels are looked up (a finer one covers no face)
-                    cells = self._level_cells
-                    for level in range(self.max_level, leaf.level + 1, -1):
-                        index = cells[level].get((point[0] >> level, point[1] >> level,
-                                                  point[2] >> level))
-                        if index is not None:
-                            to_split.add(self.leaves[index])
-                            break
+            # every seed's three outward faces, probed at once: a seed is a child of a
+            # split, so along each axis one face is shared with a sibling (same level,
+            # never a violation) and only the other one looks outside the parent
+            seeds_array = np.array([(leaf.x, leaf.y, leaf.z, leaf.level)
+                                    for leaf in frontier], dtype=np.int64).reshape(-1, 4)
+            corner, level = seeds_array[:, :3], seeds_array[:, 3]
+            size = np.left_shift(np.int64(1), level)
+            centre = corner + (size // 2)[:, None]
+            corners_all, levels_all = self._leaf_arrays()
+            to_split_index: list[np.ndarray] = []
+            for axis in range(3):
+                outward = (corner[:, axis] >> level) & 1
+                point = centre.copy()
+                point[:, axis] = np.where(outward == 1, corner[:, axis] + size,
+                                          corner[:, axis] - 1)
+                inside = (point[:, axis] >= 0) & (point[:, axis] < self.n)
+                found = self.locate_many(point[inside])
+                own = level[inside]
+                ok = found >= 0
+                # a neighbour two or more levels coarser breaks the rule
+                coarse = ok & (levels_all[np.where(ok, found, 0)] > own + 1)
+                to_split_index.append(found[coarse])
+            indices = np.unique(np.concatenate(to_split_index)) if to_split_index else []
+            to_split = {self.leaves[int(index)] for index in indices}
             if not to_split:
                 break
             new: list[Leaf] = []
@@ -454,21 +482,113 @@ class Octree:
         """
         if self._faces is not None:
             return self._faces
-        out: list[tuple[int, int, int, float, float]] = []
-        for index, leaf in enumerate(self.leaves):
-            for face in FACES:
-                axis = FACE_AXIS[face]
-                for other in self._face_neighbours(leaf, face):
-                    neighbour = self.leaves[other]
-                    if leaf.size < neighbour.size:
-                        continue                       # the coarse side lists the sub-faces
-                    if leaf.size == neighbour.size and other < index:
-                        continue                       # one entry per equal pair
-                    side = min(leaf.size, neighbour.size)
-                    out.append((index, other, axis, float(side * side),
-                                0.5 * (leaf.size + neighbour.size)))
-        self._faces = out
-        return out
+        i, j, axis, area, distance = self._face_arrays()
+        self._faces = list(zip(i.tolist(), j.tolist(), axis.tolist(), area.tolist(),
+                               distance.tolist(), strict=True))
+        return self._faces
+
+    # ------------------------------------------------ vectorised neighbour search
+    def _leaf_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(corners (n, 3), levels (n,))`` as integer arrays, cached per tree state."""
+        if getattr(self, "_arrays_version", None) != self.version:
+            leaves = self.leaves
+            self._corner_array = np.array([(leaf.x, leaf.y, leaf.z) for leaf in leaves],
+                                          dtype=np.int64).reshape(-1, 3)
+            self._level_array = np.array([leaf.level for leaf in leaves], dtype=np.int64)
+            tables = []
+            for level in range(self.max_level + 1):
+                positions = np.flatnonzero(self._level_array == level)
+                shifted = self._corner_array[positions] >> level
+                codes = shifted[:, 0] | (shifted[:, 1] << 21) | (shifted[:, 2] << 42)
+                order = np.argsort(codes, kind="stable")
+                tables.append((codes[order], positions[order]))
+            self._level_tables = tables
+            self._arrays_version = self.version
+        return self._corner_array, self._level_array
+
+    def locate_many(self, points: np.ndarray) -> np.ndarray:
+        """Index of the leaf covering each point (finest-cell units, ``(m, 3)``), or -1.
+
+        :meth:`_locate` for many points at once: every level is one sorted table of
+        level-normalised corners, and a point is looked up in all of them with one
+        ``searchsorted`` per level, from the coarsest down.  Points outside the box get -1.
+        """
+        self._leaf_arrays()
+        return locate_in_tables(self._level_tables, self.n, points)
+
+    def _face_arrays(self) -> tuple[np.ndarray, ...]:
+        """The conservative face list as arrays, built without a loop over the leaves.
+
+        The same probes as :meth:`_face_neighbours` - the centre of every face just
+        outside the leaf, then the four sub-face points when the leaf found there is finer
+        - evaluated for all the leaves of a face direction at once with
+        :meth:`locate_many`, and the same entry rules: an equal pair is listed by its lower
+        index, a coarse/fine pair by the coarse side.  The entries come out in the order
+        the per-leaf loop produced them (leaf, face, sub-face), so the list is the same list.
+        """
+        corners, levels = self._leaf_arrays()
+        sizes = np.left_shift(np.int64(1), levels)
+        parts: list[tuple[np.ndarray, ...]] = []
+        for face_index, face in enumerate(FACES):
+            axis = FACE_AXIS[face]
+            tangent_a, tangent_b = _FACE_TANGENTIAL[face]
+            near = corners[:, axis]
+            if FACE_SIGN[face] > 0:
+                coord = near + sizes
+                valid = coord < self.n
+            else:
+                coord = near - 1
+                valid = near > 0
+            rows = np.flatnonzero(valid)
+            if rows.size == 0:
+                continue
+            centre = corners[rows] + (sizes[rows] // 2)[:, None]
+            centre[:, axis] = coord[rows]
+            first = self.locate_many(centre)
+            found = first >= 0
+            rows, first = rows[found], first[found]
+            own, other = levels[rows], levels[first]
+            # a neighbour at least as large covers the whole face: one pair, listed only
+            # by the lower index of an equal pair (a coarser neighbour lists it itself)
+            equal = (other == own) & (first > rows)
+            if equal.any():
+                size = sizes[rows[equal]]
+                parts.append((rows[equal], first[equal], np.full(size.size, axis),
+                              (size * size).astype(float), size.astype(float),
+                              np.full(size.size, face_index), np.zeros(size.size, int)))
+            # a finer neighbour: the face is tiled by the leaves the sub-face probes find
+            coarse = rows[other < own]
+            if coarse.size == 0:
+                continue
+            step = np.maximum(sizes[coarse] // 2, 1)
+            previous: list[np.ndarray] = []
+            for sub, (offset_a, offset_b) in enumerate(((0, 0), (0, 1), (1, 0), (1, 1))):
+                point = corners[coarse].copy()
+                point[:, axis] = coord[coarse]
+                point[:, tangent_a] += offset_a * step
+                point[:, tangent_b] += offset_b * step
+                neighbour = self.locate_many(point)
+                keep = neighbour >= 0
+                for earlier in previous:
+                    keep &= neighbour != earlier
+                previous.append(neighbour)
+                if not keep.any():
+                    continue
+                i, j = coarse[keep], neighbour[keep]
+                side = np.minimum(sizes[i], sizes[j])
+                parts.append((i, j, np.full(i.size, axis), (side * side).astype(float),
+                              0.5 * (sizes[i] + sizes[j]).astype(float),
+                              np.full(i.size, face_index), np.full(i.size, sub)))
+        if not parts:
+            empty = np.empty(0)
+            return (empty.astype(np.int64), empty.astype(np.int64), empty.astype(np.int64),
+                    empty, empty)
+        i, j, axis, area, distance, face_key, sub_key = (np.concatenate(column)
+                                                         for column in zip(*parts,
+                                                                           strict=True))
+        order = np.lexsort((sub_key, face_key, i))
+        return (i[order], j[order], axis[order].astype(np.int64), area[order],
+                distance[order])
 
     def face_array(self) -> np.ndarray:
         """:meth:`faces` as one ``(n_faces, 5)`` float array, cached with the list.
@@ -477,7 +597,12 @@ class Octree:
         and read-only: callers index it and never write into it.
         """
         if self._face_array is None:
-            self._face_array = np.asarray(self.faces(), dtype=float).reshape(-1, 5)
+            if self._faces is None:
+                self._face_array = np.column_stack(
+                    [np.asarray(column, dtype=float) for column in self._face_arrays()]
+                ).reshape(-1, 5)
+            else:
+                self._face_array = np.asarray(self.faces(), dtype=float).reshape(-1, 5)
             self._face_array.setflags(write=False)
         return self._face_array
 

@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QFileDialog,
-    QHBoxLayout,
+    QGridLayout,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -39,11 +39,12 @@ from .assets import window_icon_path
 from .controller import RunConfig, SimulationController
 from .safe import safe_slot
 from .views.analysis_panel import AnalysisPanel
-from .views.geometry_panel import GeometryPanel
+from .views.geometry_panel import GeometryPanel, nearest_leaf
 from .views.materials_panel import MaterialsPanel
 from .views.results_panel import ResultsPanel
 from .views.solver_panel import SolverPanel
 from .views.viz_view import VizView
+from .widgets import scrollable
 
 if TYPE_CHECKING:
     from src.analysis.convergence import AdaptivePlan
@@ -52,20 +53,17 @@ HELP_TEXT = """
 <b>The plant</b>: electric resistors heat a gas in a closed circuit; the gas runs
 through pipes buried in the sand and hands the heat to the bed across the pipe
 walls.  On discharge an exchanger on the same circuit takes the heat back out.
-<b>Workflow</b>
 <ol>
-<li><b>Geometry</b>: the vessel (Cylinder, Insulation), the circuit (Gas circuit:
-power, gas, flow, pressure, blower), the buried network (Pipes) and the mesh
-(an octree refined on the sand, the insulation, the shell and the pipes).</li>
-<li><b>Materials</b>: storage medium, insulation, shell; ambient, ground, wind.</li>
-<li><b>Analysis</b>: steady state (the circuit at its power), losses (the power
-that holds a temperature) or transient (power and extraction profiles).</li>
-<li><b>Build mesh</b> - it paints the pipe network too - then <b>Run</b>.</li>
+<li><b>Vessel</b>: the storage bed, its insulation and shell, their materials.</li>
+<li><b>Plant</b>: the gas circuit (rated power, gas, flow, pressure, blower) and the
+buried pipes.  The preview follows every edit.</li>
+<li><b>Site</b>: ambient air, ground, wind.</li>
+<li><b>Mesh</b>: the octree; <b>Build mesh</b> builds it and paints the pipes.</li>
+<li><b>Analysis</b>: steady standby (hold the bed at T, get the losses) or a
+transient (Charge = the resistors, Discharge = the exchanger); then <b>Run</b>.</li>
 </ol>
-<b>Units</b>: the interface is in degC, the model works in Kelvin; conversion
-happens only at this boundary. Powers are W, lengths m, time s.
-<b>Results</b>: statistics, energy balance (envelope losses, the gas loop),
-materials, time series; the field exports to VTK for ParaView.
+Every control with an &#9432; explains itself on hover.  The interface is in degC,
+the model in Kelvin; powers are W or kW, lengths m, times s.
 """
 
 
@@ -99,46 +97,79 @@ class ThermalBatteryGUI(QMainWindow):
 
     # ------------------------------------------------------------- layout
     def _build_layout(self) -> None:
+        """Six pages, one per thing: the vessel, the plant, the site, the mesh, the run
+        and the solver - each scrolls instead of being cut by a short screen."""
         left = QWidget()
         column = QVBoxLayout(left)
+        column.setContentsMargins(4, 4, 4, 4)
         self.left_tabs = QTabWidget()
-        self.left_tabs.addTab(self.geometry_panel, "1. Geometry")
-        self.left_tabs.addTab(self.materials_panel, "2. Materials")
-        self.left_tabs.addTab(self.analysis_panel, "3. Analysis")
-        tools = QTabWidget()
-        tools.addTab(self.solver_panel, "Solver")
-        help_view = QWidget()
-        help_layout = QVBoxLayout(help_view)
-        from PyQt6.QtWidgets import QTextEdit
+        self.left_tabs.setUsesScrollButtons(True)
+        vessel = QWidget()
+        vessel_layout = QVBoxLayout(vessel)
+        vessel_layout.setContentsMargins(0, 0, 0, 0)
+        vessel_layout.addWidget(self.geometry_panel.vessel_page)
+        vessel_layout.addWidget(self.materials_panel.materials_page)
+        vessel_layout.addStretch(1)
+        for page, title, tip in (
+                (vessel, "Vessel", "The storage bed, its insulation and shell, their "
+                                   "materials"),
+                (self.geometry_panel.plant_page, "Plant", "The gas circuit and the buried "
+                                                          "pipes"),
+                (self.materials_panel.site_page, "Site", "Ambient air, ground and wind"),
+                (self.geometry_panel.mesh_page, "Mesh", "The octree and the automatic "
+                                                        "search"),
+                (self.solver_panel.page, "Solver", "Accuracy, threads, radiation")):
+            index = self.left_tabs.addTab(scrollable(page), title)
+            self.left_tabs.setTabToolTip(index, tip)
+        self.left_tabs.insertTab(4, self.analysis_panel, "Analysis")
+        self.left_tabs.setTabToolTip(4, "Standby or transient, charge, discharge, states")
+        column.addWidget(self.left_tabs, 1)
 
-        text = QTextEdit(HELP_TEXT)
-        text.setReadOnly(True)
-        help_layout.addWidget(text)
-        tools.addTab(help_view, "Help")
-        self.left_tabs.addTab(tools, "4. Tools")
-        column.addWidget(self.left_tabs)
-
-        buttons = QHBoxLayout()
+        buttons = QGridLayout()
         self.build_btn = QPushButton("Build mesh")
-        self.preview_btn = QPushButton("Preview geometry")
+        self.preview_btn = QPushButton("Show geometry")
         self.run_btn = QPushButton("Run")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
-        for btn in (self.build_btn, self.preview_btn, self.run_btn, self.cancel_btn):
-            buttons.addWidget(btn)
+        for index, btn in enumerate((self.build_btn, self.preview_btn, self.run_btn,
+                                     self.cancel_btn)):
+            buttons.addWidget(btn, index // 2, index % 2)
         column.addLayout(buttons)
         self.progress = QProgressBar()
         column.addWidget(self.progress)
-        left.setMaximumWidth(560)
+        left.setMinimumWidth(360)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(self.viz)
         splitter.addWidget(self.results)
-        splitter.setSizes([520, 560, 420])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Workflow", self._show_help)
+        self._fit_to_screen(splitter)
+
+    def _fit_to_screen(self, splitter: QSplitter) -> None:
+        """Open inside the screen's free area, whatever its size, and share it out."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1400, 850)
+            splitter.setSizes([440, 560, 400])
+            return
+        area = screen.availableGeometry()
+        width = int(min(1500, 0.95 * area.width()))
+        height = int(min(950, 0.90 * area.height()))
+        self.resize(width, height)
+        self.move(area.x() + (area.width() - width) // 2,
+                  area.y() + (area.height() - height) // 2)
+        splitter.setSizes([int(0.32 * width), int(0.42 * width), int(0.26 * width)])
+
+    def _show_help(self) -> None:
+        QMessageBox.information(self, "Workflow", HELP_TEXT)
 
     def _connect(self) -> None:
         self.build_btn.clicked.connect(self.build_mesh)
@@ -154,20 +185,13 @@ class ThermalBatteryGUI(QMainWindow):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(250)
         self._preview_timer.timeout.connect(self._geometry_edited)
-        for index in range(self.geometry_panel.tabs.count()):
-            if self.geometry_panel.tabs.tabText(index) == "Mesh":
-                continue
-            tab = self.geometry_panel.tabs.widget(index)
-            for widget in tab.findChildren((QDoubleSpinBox, QSpinBox)):
+        for page in (self.geometry_panel.vessel_page, self.geometry_panel.plant_page):
+            for widget in page.findChildren((QDoubleSpinBox, QSpinBox)):
                 widget.valueChanged.connect(self._preview_timer.start)
-            for widget in tab.findChildren(QComboBox):
+            for widget in page.findChildren(QComboBox):
                 widget.currentIndexChanged.connect(self._preview_timer.start)
-            for widget in tab.findChildren(QCheckBox):
+            for widget in page.findChildren(QCheckBox):
                 widget.toggled.connect(self._preview_timer.start)
-        self.materials_panel.storage_material.currentIndexChanged.connect(
-            self.materials_panel.refresh_info)
-        self.materials_panel.insulation_material.currentIndexChanged.connect(
-            self.materials_panel.refresh_info)
         self.analysis_panel.save_requested.connect(self.save_state)
         self.analysis_panel.load_requested.connect(self.load_state)
         self.analysis_panel.analysis_changed.connect(self._on_analysis_changed)
@@ -211,11 +235,17 @@ class ThermalBatteryGUI(QMainWindow):
         plans = plan_regions(battery, MaterialManager(), cells_per_layer=1.0)
         panel = self.geometry_panel
         panel.set_plan_targets({plan.name: plan.target for plan in plans})
+        # the leaf each region gets, not the size it asked for: leaves are powers of two
+        finest = panel.adaptive_plan().physical_size
         targets: dict[str, float] = {}
         for region in panel.mesh_regions():
-            targets[region.name] = min(targets.get(region.name, np.inf), region.target)
-        panel.plan_info.setText(" | ".join(f"{name} {size * 1000:.0f} mm"
-                                           for name, size in targets.items()))
+            leaf = nearest_leaf(region.target, finest)
+            targets[region.name] = min(targets.get(region.name, np.inf), leaf)
+        names = {"sand": "sand", "slab_bottom": "bottom slab", "slab_top": "top slab",
+                 "insulation_radial": "insulation", "shell": "shell", "roof": "roof",
+                 "foundation": "foundation", "pipe_wall": "around the pipes"}
+        panel.plan_info.setText(", ".join(f"{names.get(name, name)} {size * 1000:.0f} mm"
+                                          for name, size in targets.items()))
 
     @safe_slot
     def build_mesh(self) -> None:
@@ -505,7 +535,7 @@ class ThermalBatteryGUI(QMainWindow):
 
     @safe_slot
     def _on_analysis_changed(self, analysis: str) -> None:
-        self.run_btn.setText({"standby": "Run steady standby",
+        self.run_btn.setText({"standby": "Run standby",
                               "transient": "Run transient"}[analysis])
 
     @safe_slot

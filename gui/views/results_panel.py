@@ -28,6 +28,7 @@ class ResultsPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
         layout.addWidget(self.tabs)
         self.stats_text = self._add_tab("Statistics")
         self.energy_text = self._add_tab("Energy balance")
@@ -35,8 +36,9 @@ class ResultsPanel(QWidget):
         self.transient_text = self._add_tab("Transient")
         self.log_text = self._add_tab("Log", size=10)
         row = QHBoxLayout()
-        row.addWidget(button("Export time series (CSV)...", self._export_csv))
-        row.addWidget(button("Export field (VTK)...", self.export_requested.emit,
+        row.addWidget(button("Series CSV...", self._export_csv,
+                             "The time series of the last transient"))
+        row.addWidget(button("Field VTK...", self.export_requested.emit,
                              "Every leaf and every field, for ParaView"))
         layout.addLayout(row)
 

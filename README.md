@@ -114,10 +114,10 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 - **Temperature display in Celsius**, colormap fixed to `coolwarm`, single vertical colorbar
 
 ### User Interface
-- **PyQt6 GUI** with a left column of four tabs - *1. Geometry* (Cylinder,
-  Insulation, Gas circuit, Pipes, Mesh), *2. Materials* (Storage, Insulation,
-  Conditions), *3. Analysis* (Type, Initial condition, Power, Extraction,
-  Save/Load), *4. Tools* (Solver, Losses, Help)
+- **PyQt6 GUI** with a left column of six tabs - *Vessel* (shape and layer
+  materials), *Plant* (gas circuit, buried pipes), *Site* (ambient, ground, wind),
+  *Mesh*, *Analysis* (Type, Initial, Charge, Discharge, Save/Load), *Solver*; every page
+  scrolls, explanations sit in ⓘ tooltips, the window opens inside the screen
 - **Threaded simulation** - responsive UI during computation, cancellable
 - **Results panel**: Statistics, Energy balance (with the gas loop), Materials,
   Transient, Log
@@ -259,28 +259,20 @@ python run_gui.py
 
 ### Basic Workflow
 
-1. **Configure Geometry** (*1. Geometry* tab, five sub-tabs)
-   - *Cylinder*: domain (Lx, Ly, Lz), centre, storage radius and height, roof
-   - *Insulation*: radial insulation, steel shell, bottom/top slabs, foundation
-   - *Gas circuit*: rated power (**200 kW**, the Kankaanpää pilot's charge), gas, mass
-     flow (1 kg/s), pressure, blower
-   - *Pipes*: buried pipe-network layout, collection mode, tube and ducts
-   - *Mesh*: cells across the regions, cell budget, plus *Find the mesh*
+1. **Vessel**: storage radius and height (the box around it is derived: the vessel
+   plus 0.3 m of air, centred), insulation, shell, slabs, roof, and the materials of
+   those layers (steatite at 63 % packing by default)
+2. **Plant**: rated power (**200 kW**, the Kankaanpää pilot's charge), gas, mass flow
+   (1 kg/s), pressure, fan; the buried pipe network (layout, collection, tube, ducts)
+3. **Site**: ambient 20 °C, ground 10 °C, wind speed
+4. **Mesh**: cells across the bed, the insulation and the tube, the leaf budget, plus
+   *Find the mesh*
+5. **Analysis**: steady standby (hold the bed at T, get the losses) or transient;
+   initial condition; *Charge* (the resistors) and *Discharge* (the exchanger); save/load
+6. **Solver**: temperature tolerance (0.1 K), linear residual (1e-6), threads, radiation;
+   the method is CG + AMG V(1,1)
 
-2. **Set Materials** (*2. Materials* tab)
-   - *Storage*: medium (steatite by default) and packing fraction (63 %)
-   - *Insulation*: insulation and shell material
-   - *Conditions*: ambient 20 °C, ground 10 °C, wind speed
-
-3. **Configure Analysis** (*3. Analysis* tab)
-   - *Type*: steady standby (hold the bed at T, get the losses) or transient
-   - *Initial condition*: uniform, per material, the current field, or the standby state
-   - *Power* / *Extraction*: the resistors and the exchanger of the transient
-   - *Save / Load*: HDF5 state with a geometry hash
-
-4. **Solver** (*4. Tools > Solver*): tolerance, iterations, threads, radiation; the
-   method is CG + AMG. *Tools > Losses*: the iteration controls of the losses analysis
-
+7. **Build & Run**
 5. **Build & Run**
    - *Build mesh* builds the octree and paints the battery and the pipe network
    - *Run* (the button text follows the selected analysis)
@@ -589,12 +581,12 @@ pip install -r requirements.txt
 
 # Run the test suite (no display, no GPU needed)
 python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # without the GUI sweep (378 cases)
-python -m pytest tests/ -q                                    # + the GUI control sweep (389)
+python -m pytest tests/ -q                                    # + the GUI control sweep (390)
 python -m ruff check src tests gui --select F,E9,B,SIM,UP      # lint
 ```
 
 Measured on this working tree (2026-09-23, `python -m pytest tests/ --collect-only -q`):
-**378 tests** without `tests/test_gui_sweep.py` and **389** in total; the whole suite
+**379 tests** without `tests/test_gui_sweep.py` and **390** in total; the whole suite
 passes in about two minutes, head-less.  The count moves while work is in flight:
 re-run the command instead of trusting the number.
 

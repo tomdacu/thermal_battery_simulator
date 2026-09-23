@@ -118,6 +118,7 @@ class TransientSolver:
         elif not mesh.uniform:
             self._scale = mesh.V.ravel(order="F")
         self.notes = []
+        self._balance_memo: dict = {}
         #: outcome of the last fluid-loop march (None when no loop is configured)
         self.fluid_result = None
         #: energies carried by the loop over the run [J]: the blower work and what the
@@ -239,7 +240,7 @@ class TransientSolver:
             self.fluid_result, self.mesh, linear.T,
             lambda e: solve_linear(a, e, self.solver_config, cache=self._cache,
                                    scale=self._scale).T,
-            pinned_cells(self.mesh, self.index))
+            pinned_cells(self.mesh, self.index), memo=self._balance_memo, operator=a)
 
     # -------------------------------------------------------------------- run
     def run(self, progress_callback: Callable[[int, str], None] | None = None,

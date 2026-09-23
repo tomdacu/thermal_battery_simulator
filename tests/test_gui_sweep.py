@@ -156,9 +156,6 @@ def restore_sane_configuration(window) -> None:
     geometry, analysis, materials = (window.geometry_panel, window.analysis_panel,
                                      window.materials_panel)
     geometry.max_cells.setValue(10_000)
-    geometry.domain_lx.setValue(6.0)
-    geometry.domain_ly.setValue(6.0)
-    geometry.domain_lz.setValue(6.5)
     geometry.radius.setValue(2.0)
     geometry.height.setValue(5.0)
     geometry.base_z.setValue(0.3)

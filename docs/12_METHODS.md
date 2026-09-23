@@ -112,6 +112,23 @@ predictability wins.
 be compared honestly.  A run that hits `max_iterations` is reported as
 `converged=False` and the field is not silently presented as a solution.
 
+**Cycle.** The Ruge-Stüben hierarchy runs a V(1,1) cycle - one forward Gauss-Seidel sweep
+on the way down, one backward sweep on the way up, which keeps the preconditioner
+symmetric for CG.  Measured on the default tree (214 089 unknowns): 0.93 s of setup and
+0.65 s per solve, against 1.36 s and 1.09 s with pyamg's default symmetric sweeps; CG +
+Jacobi needs no setup but 1.17 s per solve; smoothed aggregation 2.07 s + 1.09 s.
+
+**Accuracy in kelvin.** The GUI asks for a temperature tolerance (0.1 K) for the coupled
+iterations and the standby target, and a relative residual of 1e-6 for the linear solves
+(a few hundredths of a kelvin on the field); 1e-8 remains available as the reference.
+
+**Work not repeated.** The tree's operator is assembled once per state of the properties
+(a digest of k, materials, exclusions, films and boundary conditions keys it) and only the
+right-hand side is rebuilt per sweep or step; the face list is built vectorised and
+cached; the symmetrised operator and its AMG hierarchy are reused for the same matrix
+object; the second solve that holds the loop balance is the same for every step and is
+done once.  Default model: standby 25 s, a transient step ~0.5 s.
+
 **Cache.** The AMG hierarchy is the dominant setup cost, so it is kept while the matrix
 *content* is unchanged (a hash of the CSR arrays).  It used to be keyed on the matrix
 object as well, and the symmetrised operator of a graded mesh is a new object at every

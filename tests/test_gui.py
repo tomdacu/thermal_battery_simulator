@@ -109,18 +109,19 @@ def test_transient_run_produces_a_time_series(window):
 
 
 def test_invalid_geometry_is_refused_without_clipping(window):
-    """A domain that cannot host the roof must raise, not silently cut it."""
+    """A domain that cannot host the roof must raise, not silently cut it; the panel's
+    own domain always holds the vessel (it is derived from it)."""
     from src.core.mesh import Mesh3D
 
-    window.geometry_panel.domain_lz.setValue(2.0)
     battery = window._battery_from_panels()
     assert battery is not None
-    problems = battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=2.0, spacing=0.5))
+    problems = battery.validate(Mesh3D(Lx=6.5, Ly=6.5, Lz=2.0, spacing=0.5))
     assert any("Lz" in problem for problem in problems), (
         f"apex={battery.cylinder.z_cone_apex:.2f} problems={problems}")
-    window.geometry_panel.domain_lz.setValue(6.5)
-    battery = window._battery_from_panels()
-    assert battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=6.5, spacing=0.5)) == []
+    lx, ly, lz = window.geometry_panel.domain()
+    assert battery.validate(Mesh3D(Lx=lx, Ly=ly, Lz=lz, spacing=0.5)) == []
+    cyl = battery.cylinder
+    assert cyl.center_x == cyl.center_y == 0.5 * lx      # the vessel is centred
 
 
 def test_the_window_solves_the_standby_case_on_a_tree(window):
@@ -186,6 +187,7 @@ def test_the_automatic_search_refines_a_tree(window):
     # the manual targets alone: the a priori plan of a built mesh asks for millimetres at
     # the shell, which a 375 mm floor could never refine towards
     panel.set_plan_targets({})
+    panel.cells_sheath.setValue(2)          # the plan this test was sized on: 25 mm pipes
     plan = AdaptivePlan(n_finest=16, physical_size=0.4375,   # a 7 m box: the default vessel
                         bands=region_bands(panel.mesh_regions())).scaled(20.0)
     try:
@@ -203,8 +205,53 @@ def test_the_automatic_search_refines_a_tree(window):
 
         assert "converged" in panel.auto_result.text()
         assert isinstance(panel.auto_spec(), AdaptivePlan)
+        # the budget caps the build now: give the adopted plan room to be realised
+        panel.max_cells.blockSignals(True)
+        panel.max_cells.setValue(200_000)
+        panel.max_cells.blockSignals(False)
         window.build_mesh()
         assert isinstance(window.mesh, AdaptiveMesh)
         assert window.mesh.n_cells > 512, "the rounds must have refined the plan"
     finally:
         panel.set_auto_spec(None)
+        panel.max_cells.setValue(10_000)
+        panel.cells_sheath.setValue(1)
+
+
+def test_the_window_fits_the_screen_and_explanations_take_no_room(window):
+    """Opened on the screen it fits, every page scrolls, every explanation is a tooltip.
+
+    The owner's review: the window was taller than the desktop and paragraphs of help cut
+    the forms.  The window is sized on the screen's free area, every left page sits in a
+    scroll area, a labelled control with an explanation says so with the info mark, and
+    no wrapped paragraph of help is left in a form.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication, QFormLayout, QLabel, QScrollArea
+
+    from gui.widgets import INFO
+
+    area = (window.screen() or QApplication.primaryScreen()).availableGeometry()
+    assert window.height() <= area.height()
+    tabs = window.left_tabs
+    assert [tabs.tabText(i) for i in range(tabs.count())] == [
+        "Vessel", "Plant", "Site", "Mesh", "Analysis", "Solver"]
+    for index in range(tabs.count()):
+        if tabs.tabText(index) != "Analysis":
+            assert isinstance(tabs.widget(index), QScrollArea)
+    for form in window.findChildren(QFormLayout):
+        for row in range(form.rowCount()):
+            label = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            field = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+            if label is None or field is None or label.widget() is None:
+                continue
+            caption, control = label.widget(), field.widget()
+            if isinstance(caption, QLabel) and control is not None and control.toolTip():
+                assert INFO in caption.text(), caption.text()
+    # a read-out (selectable: the network summary, the mesh counts) may be long; a
+    # paragraph of explanation may not
+    readout = Qt.TextInteractionFlag.TextSelectableByMouse
+    help_paragraphs = [label for label in window.findChildren(QLabel)
+                       if label.wordWrap() and len(label.text()) > 200
+                       and not label.textInteractionFlags() & readout]
+    assert help_paragraphs == [], [label.text()[:120] for label in help_paragraphs]

@@ -46,7 +46,7 @@ class VizView(QWidget):
                 from pyvistaqt import QtInteractor
 
                 self.plotter = QtInteractor(self)
-                self.plotter.setMinimumSize(600, 450)
+                self.plotter.setMinimumSize(320, 240)
                 layout.addWidget(self.plotter.interactor)
                 self.plotter.add_axes()
             except Exception as exc:  # pragma: no cover - display dependent
@@ -54,7 +54,7 @@ class VizView(QWidget):
         if self.plotter is None:
             placeholder = QLabel(self._disabled_reason or "3D view unavailable")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            placeholder.setMinimumSize(400, 300)
+            placeholder.setMinimumSize(240, 180)
             layout.addWidget(placeholder)
         layout.addWidget(self._controls())
         self.controls.setEnabled(self.plotter is not None)
@@ -88,7 +88,7 @@ class VizView(QWidget):
         self.slice_slider = QSlider(Qt.Orientation.Horizontal)
         self.slice_slider.setRange(1, 99)
         self.slice_slider.setValue(50)
-        self.slice_slider.setMinimumWidth(220)
+        self.slice_slider.setMinimumWidth(80)
         self.slice_slider.setToolTip("Move the cutting plane through the domain")
         self.slice_slider.valueChanged.connect(self.render)
         self.position_label = QLabel("--")
@@ -96,7 +96,7 @@ class VizView(QWidget):
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(5, 100)
         self.opacity_slider.setValue(80)
-        self.opacity_slider.setMinimumWidth(120)
+        self.opacity_slider.setMinimumWidth(60)
         self.opacity_slider.setToolTip("Transparency of the volume")
         self.opacity_slider.valueChanged.connect(self.render)
         self.opacity_label = QLabel("80%")

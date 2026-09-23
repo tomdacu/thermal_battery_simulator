@@ -24,6 +24,28 @@ docs/12 §3 and §11.
 | 13 | The exchanger's delivered energy was `max(-net loop power, 0)`: zero whenever the resistors ran at the same time, and the explicit march estimate in the return-temperature mode | a 24 h discharge "delivered" 1344 kWh from 1137 kWh stored | the exchanger delivers its set power; in the return-temperature mode, the net exchange of the solved field |
 | 14 | The coupled steady state drifted from the resistors' power (60 sweeps, 2069 W of 5000 into the bed) | default model | the loop balance is held in every sweep: 11 sweeps, 5000.0 W |
 
+### Third pass (GUI layout, resolution, speed)
+
+* **GUI**: six tabs, one per thing - Vessel (shape and layer materials), Plant (gas
+  circuit, pipes), Site (ambient, ground, wind - it was "Conditions" under Materials),
+  Mesh, Analysis (Type, Initial, Charge, Discharge, Save/Load), Solver.  Every page scrolls;
+  the window opens inside the screen's free area; explanations are tooltips behind an ⓘ
+  instead of paragraphs; the controls a layout does not read are disabled; Help is a menu.
+* **Removed as redundant**: Lx, Ly, Lz, Centre X/Y (the box is the vessel plus 0.3 m of
+  excluded air, the vessel centred in it), the method/preconditioner, under-relaxation and
+  initial-density knobs, the 3-8 W/cm2 judgement of a gas-heated tube wall.
+* **Accuracy in kelvin**: 0.1 K for the coupled iterations and the standby, 1e-6 linear.
+* **Resolution where it matters**: the finest leaf is the finest region's target (52 mm
+  around the pipes) and the budget caps the leaves; targets snap to the largest leaf
+  within 1.6x.  Default: 214 089 leaves.
+* **Speed**: vectorised face list (identical to the loop, pinned), operator cached per
+  property state, AMG V(1,1) Gauss-Seidel cycle, the balance solve done once, the loop
+  march vectorised (the area property was recomputed per cell), rasterised pipes cached,
+  vectorised octree balance, field mapping and rasteriser.  Default model: build 12 s,
+  standby 25 s, transient ~0.5 s per step - at 2.4x the leaves of the previous pass.
+* **Found on the way**: the mesh plan passed the packing fraction as the *porosity* (its
+  bed was 63 % air, 0.15 W/(m K) instead of 0.52; the simulation itself always used 0.52).
+
 ### Second pass (the owner's review of the running app)
 
 | # | Found | Evidence | Fix |

@@ -46,8 +46,10 @@ class RunConfig:
     convergence: dict = field(default_factory=dict)
     method: str = "cg"
     preconditioner: str = "amg_rs"
-    tolerance: float = 1e-8
+    tolerance: float = 1e-6
     max_iterations: int = 2000
+    #: [K] the coupled iterations (gas loop, radiation) stop below this field change
+    picard_tolerance: float = 0.1
     n_threads: int = -1
     radiation: bool = False
     losses: dict = field(default_factory=dict)
@@ -73,7 +75,8 @@ class RunConfig:
     def solver_config(self) -> SolverConfig:
         return SolverConfig(method=self.method, preconditioner=self.preconditioner,
                             tolerance=self.tolerance, max_iterations=self.max_iterations,
-                            n_threads=self.n_threads, radiation=self.radiation)
+                            n_threads=self.n_threads, radiation=self.radiation,
+                            picard_tolerance=self.picard_tolerance)
 
 
 class SimulationJob(QThread):
@@ -212,7 +215,8 @@ class SimulationController(QObject):
                 # temperature, and the power that holds it - the losses - is what the
                 # mesh has to get right (a tight hold, so its own tolerance does not
                 # pass for a discretisation error)
-                result = hold(tree, networks.get(id(tree)), tolerance=0.02)
+                result = hold(tree, networks.get(id(tree)),
+                              tolerance=min(0.02, config.picard_tolerance))
                 balance = compute_balance(tree, config.battery.t_ambient,
                                           radiation=config.radiation)
                 return {"t_mean_storage": balance.t_mean_storage,

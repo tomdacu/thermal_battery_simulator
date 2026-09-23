@@ -193,6 +193,9 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
         raise ValueError("a pipe run needs at least two 3-D points")
     run = PipeRun(name=name, points=pts, diameter=float(diameter))
 
+    if not isinstance(mesh, Mesh3D):
+        return _rasterize_on_tree(mesh, run, pts, substeps)
+
     lengths: dict[int, float] = {}
     for a, b in zip(pts[:-1], pts[1:], strict=True):
         span = float(np.linalg.norm(b - a))
@@ -218,6 +221,49 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
         order = sorted(lengths, key=lambda idx: leaves[idx].z + 0.5 * leaves[idx].size)
     run.cells = np.asarray(order, dtype=np.int64)
     run.length = np.asarray([lengths[idx] for idx in order], dtype=float)
+    return run
+
+
+def _rasterize_on_tree(mesh: AdaptiveMesh, run: PipeRun, pts: np.ndarray,
+                       substeps: float) -> PipeRun:
+    """:func:`rasterize_pipe` on a tree, every sample located at once.
+
+    The same samples (``substeps`` per local leaf edge, midpoints of equal pieces), the
+    same placement rule as :func:`cell_of` (a point on a face belongs to the leaf below
+    it) and the same order of the result (by elevation, then by first crossing): only the
+    loop over the samples is gone.
+    """
+    size, n = float(mesh.physical_size), mesh.tree.n
+    cells_parts: list[np.ndarray] = []
+    length_parts: list[np.ndarray] = []
+    for a, b in zip(pts[:-1], pts[1:], strict=True):
+        span = float(np.linalg.norm(b - a))
+        if span <= 0.0:
+            continue
+        cell_here = mesh.cell_size_at(0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]),
+                                      0.5 * (a[2] + b[2]))
+        count = max(int(substeps * span / max(cell_here, 1e-9)), 2)
+        edges = np.linspace(0.0, 1.0, count + 1)
+        mids = a[None, :] + (0.5 * (edges[:-1] + edges[1:]))[:, None] * (b - a)[None, :]
+        corner = np.ceil(mids / size).astype(np.int64) - 1
+        inside = np.all((corner >= 0) & (corner < n), axis=1)
+        index = np.full(count, -1, dtype=np.int64)
+        index[inside] = mesh.tree.locate_many(corner[inside])
+        keep = index >= 0
+        cells_parts.append(index[keep])
+        length_parts.append(np.diff(edges)[keep] * span)
+    if not cells_parts:
+        return run
+    cells = np.concatenate(cells_parts)
+    pieces = np.concatenate(length_parts)
+    unique, first, inverse = np.unique(cells, return_index=True, return_inverse=True)
+    totals = np.zeros(unique.size)
+    np.add.at(totals, inverse, pieces)
+    leaves = mesh.tree.leaves
+    elevation = np.array([leaves[int(i)].z + 0.5 * leaves[int(i)].size for i in unique])
+    order = np.lexsort((first, elevation))
+    run.cells = unique[order].astype(np.int64)
+    run.length = totals[order]
     return run
 
 

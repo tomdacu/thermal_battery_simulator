@@ -73,7 +73,10 @@ def plan_regions(geometry: BatteryGeometry, materials: MaterialManager,
     the plan is conservative: it never asks for fewer cells than the physics needs.
     """
     cyl = geometry.cylinder
-    storage = materials.compute_effective_properties(
+    # the packed bed the painter paints (the packing fraction is the *solid* share: it
+    # used to be handed to compute_effective_properties as the porosity, which made the
+    # plan's bed 63 % air - 0.15 W/(m K) instead of 0.52 for steatite)
+    storage = materials.compute_packed_bed_properties(
         geometry.storage_material, geometry.packing_fraction)
     insulation = materials.get(geometry.insulation_material)
     shell = materials.get(geometry.shell_material)

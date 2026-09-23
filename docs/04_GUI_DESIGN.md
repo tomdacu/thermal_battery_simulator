@@ -8,23 +8,18 @@ displays results.
 ```
 ┌────────────────────────┬───────────────────────────┬──────────────────┐
 │ left column            │  3D view (PyVista)        │ results tabs     │
-│  1. Geometry           │  field / cut / position   │  Statistics      │
-│     Cylinder           │  opacity / reset camera   │  Energy balance  │
-│     Insulation         │  (colormap fixed)         │  Materials       │
-│     Gas circuit        │                           │  Transient       │
-│     Pipes (network)    │                           │  Log             │
-│     Mesh               │                           │                  │
-│  2. Materials          │                           │                  │
-│     Storage            │                           │                  │
-│     Insulation         │                           │                  │
-│     Conditions         │                           │                  │
-│  3. Analysis           │                           │                  │
+│  Vessel  (shape +      │  field / cut / position   │  Statistics      │
+│          materials)    │  opacity / reset camera   │  Energy balance  │
+│  Plant   (gas circuit, │  (colormap fixed)         │  Materials       │
+│          buried pipes) │                           │  Transient       │
+│  Site    (ambient,     │                           │  Log             │
+│          ground, wind) │                           │                  │
+│  Mesh                  │                           │                  │
+│  Analysis              │                           │                  │
 │     Type, Initial      │                           │                  │
-│     Power, Extraction  │                           │                  │
-│     Save / Load        │                           │                  │
-│  4. Tools              │                           │                  │
-│     Solver, Losses     │                           │  CSV / VTK export│
-│     Help               │                           │                  │
+│     Charge, Discharge  │                           │                  │
+│     Save / Load        │                           │  CSV / VTK export│
+│  Solver                │                           │                  │
 ├────────────────────────┤                           │                  │
 │ Build mesh             │                           │                  │
 │ Preview geometry       │                           │                  │
@@ -37,21 +32,27 @@ The three panes sit in a `QSplitter` (initial sizes 520 / 560 / 420; the left co
 is capped at 560 px so the 3D view keeps the room).  The window is 1500 x 950 by
 default.
 
-* **Geometry** – domain, cylinder, insulation, the gas circuit (`Gas circuit`), the
-  buried pipe network (`Pipes`) and the octree mesh (`GeometryPanel`, five sub-tabs).
-  The circuit and the network are the plant: the resistors heat the gas, the gas crosses
-  the tube walls, and the same network charges and discharges the bed through the
-  exchanger on the circuit.
-* **Materials** – storage medium, insulation and shell, ambient, ground and wind.  This
-  tab is the *only* place where the ambient values are defined; the analyses read them.
-* **Analysis** – analysis type, initial condition, power profile (the resistors),
-  extraction (the exchanger), state save/load.
-* **Tools** – tolerance, threads and radiation (the linear method is fixed: CG + AMG),
-  losses-iteration controls, help text.
+* **Vessel** – the bed, insulation, shell, slabs and roof, with the materials of those
+  layers (`GeometryPanel.vessel_page` above `MaterialsPanel.materials_page`).  The box is
+  derived from the vessel (`GeometryPanel.domain`: vessel + 0.3 m of air, centred).
+* **Plant** – the gas circuit and the buried pipe network (`GeometryPanel.plant_page`):
+  the resistors heat the gas, the gas crosses the tube walls, and the same network
+  charges and discharges the bed through the exchanger on the circuit.
+* **Site** – ambient, ground and wind (`MaterialsPanel.site_page`), the *only* place where
+  the ambient values are defined; the analyses read them.
+* **Mesh** – the octree targets, the leaf budget and the automatic search
+  (`GeometryPanel.mesh_page`).
+* **Analysis** – analysis type, initial condition, charge (the resistors), discharge (the
+  exchanger), state save/load.
+* **Solver** – temperature tolerance, linear residual, threads and radiation
+  (`SolverPanel.page`; the linear method is fixed: CG + AMG V(1,1)).  Help is a menu.
 
-The action row is `Build mesh`, `Preview geometry`, `Run`, `Cancel` plus a progress
-bar; `Run` renames itself to `Run steady state` / `Run losses analysis` /
-`Run transient` when the analysis type changes (`_on_analysis_changed`).
+Explanations are tooltips (`widgets.info`, the ⓘ on a label); every page is wrapped in
+`widgets.scrollable`; `_fit_to_screen` keeps the window inside the available geometry.
+
+The action row is a 2x2 grid of `Build mesh`, `Preview geometry`, `Run`, `Cancel` plus a
+progress bar; `Run` renames itself to `Run standby` / `Run transient` when the analysis
+type changes (`_on_analysis_changed`).
 
 ## 2. Panels and getters
 

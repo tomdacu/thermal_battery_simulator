@@ -5,7 +5,6 @@ from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLineEdit,
     QRadioButton,
@@ -19,7 +18,7 @@ from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from src.units import c_to_k
 
 from ..safe import safe_slot
-from ..widgets import FormPanel, button, check, combo, double_spin, hint
+from ..widgets import FormPanel, button, check, combo, double_spin, hint, scrollable
 
 _IC_MATERIALS = (
     ("Sand", int(MaterialID.SAND), 20.0),
@@ -43,6 +42,7 @@ class AnalysisPanel(QWidget):
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
         layout.addWidget(self.tabs)
         self._build_type_tab()
         self._build_initial_tab()
@@ -60,34 +60,35 @@ class AnalysisPanel(QWidget):
         for radio in (self.radio_standby, self.radio_transient):
             self.type_group.addButton(radio)
             panel.add_row(radio)
-        self.losses_group = QGroupBox("Standby")
-        losses = FormPanel(self.losses_group)
-        self.losses_target = losses.add("Mean storage T [°C]",
-                                        double_spin(500.0, 20.0, 1200.0, 10.0, 1))
-        self.transient_group = QGroupBox("Time stepping")
-        transient = FormPanel(self.transient_group)
-        self.duration = transient.add("Duration", double_spin(10.0, 0.01, 100000.0, 1.0, 2))
-        self.duration_unit = transient.add("Unit", combo(_DURATION_UNITS, 2,
-                                                         self._on_duration_unit))
-        self.dt = transient.add("Time step dt [s]", double_spin(60.0, 0.1, 86400.0, 10.0, 2))
-        self.save_interval = transient.add("Save interval [s]",
-                                           double_spin(600.0, 1.0, 86400.0, 60.0, 1))
-        self.save_field = transient.add("Full fields", check("save T field per sample", False))
-        panel.add_row(self.losses_group)
-        panel.add_row(self.transient_group)
-        for radio in (self.radio_standby, self.radio_transient):
-            radio.toggled.connect(self._update_visibility)
-        self.radio_standby.setChecked(True)
         panel.add_hint("Steady standby: the only steady state a storage has is the one "
                        "where the power in equals the losses, so it is asked as a "
                        "temperature - the bed held at T - and the answer is the power "
                        "that holds it, i.e. the standby losses, with the field that goes "
                        "with them.  (A steady state at a charging power would sit at "
                        "whatever temperature makes the losses that large: thousands of "
-                       "degrees for a real plant.)  Transient: the resistors' power "
-                       "(Power) and the exchanger (Extraction) drive the gas loop.  "
-                       "Ambient and ground come from Materials > Conditions.")
-        self.tabs.addTab(panel, "Type")
+                       "degrees for a real plant.)  Transient: the resistors (Charge) and "
+                       "the exchanger (Discharge) drive the gas loop.")
+        losses = panel.section("Standby")
+        self.losses_group = losses.parentWidget()
+        self.losses_target = losses.add("Mean storage T [°C]",
+                                        double_spin(500.0, 20.0, 1200.0, 10.0, 1))
+        transient = panel.section("Time stepping")
+        self.transient_group = transient.parentWidget()
+        self.duration = transient.add("Duration", double_spin(24.0, 0.01, 100000.0, 1.0, 2))
+        self.duration_unit = transient.add("Unit", combo(_DURATION_UNITS, 2,
+                                                         self._on_duration_unit))
+        self.dt = transient.add("Time step dt [s]", double_spin(
+            900.0, 0.1, 86400.0, 60.0, 1,
+            tooltip="An accuracy choice, not a stability limit: the gas-bed coupling is "
+                    "implicit.  900 s is within minutes of the converged discharge time "
+                    "on the test silo; halve it to see whether an answer moves"))
+        self.save_interval = transient.add("Save interval [s]",
+                                           double_spin(3600.0, 1.0, 86400.0, 60.0, 1))
+        self.save_field = transient.add("Full fields", check("save T field per sample", False))
+        for radio in (self.radio_standby, self.radio_transient):
+            radio.toggled.connect(self._update_visibility)
+        self.radio_standby.setChecked(True)
+        self.tabs.addTab(scrollable(panel), "Type")
 
     @safe_slot
     def _on_duration_unit(self) -> None:
@@ -127,7 +128,7 @@ class AnalysisPanel(QWidget):
             radio.toggled.connect(self._update_ic_visibility)
         self.radio_uniform.setChecked(True)
         self._update_ic_visibility()
-        self.tabs.addTab(panel, "Initial condition")
+        self.tabs.addTab(scrollable(panel), "Initial")
 
     @safe_slot
     def _update_ic_visibility(self) -> None:
@@ -156,8 +157,8 @@ class AnalysisPanel(QWidget):
     def _build_power_tab(self) -> None:
         panel = FormPanel()
         self.power_off = QRadioButton("Off")
-        self.power_constant = QRadioButton("Constant: the circuit's rated power "
-                                           "(Geometry > Gas circuit)")
+        self.power_constant = QRadioButton("Constant (the rated power)")
+        self.power_constant.setToolTip("The rated power of Plant > Gas circuit")
         self.power_schedule = QRadioButton("Scheduled profile")
         self.power_csv = QRadioButton("From CSV (t, P)")
         self.power_group = QButtonGroup(self)
@@ -180,7 +181,7 @@ class AnalysisPanel(QWidget):
             radio.toggled.connect(self._update_power_visibility)
         self.power_constant.setChecked(True)
         self._update_power_visibility()
-        self.tabs.addTab(panel, "Power")
+        self.tabs.addTab(scrollable(panel), "Charge")
 
     @safe_slot
     def _update_power_visibility(self) -> None:
@@ -237,7 +238,7 @@ class AnalysisPanel(QWidget):
             radio.toggled.connect(self._update_extraction_visibility)
         self.extract_off.setChecked(True)
         self._update_extraction_visibility()
-        self.tabs.addTab(panel, "Extraction")
+        self.tabs.addTab(scrollable(panel), "Discharge")
 
     @safe_slot
     def _update_extraction_visibility(self) -> None:
@@ -269,7 +270,7 @@ class AnalysisPanel(QWidget):
         panel.add_hint("A saved state records the geometry hash: loading it into a "
                        "different model is refused.  A loaded field is the start of the "
                        "next transient with Initial condition > Current field.")
-        self.tabs.addTab(panel, "Save / Load")
+        self.tabs.addTab(scrollable(panel), "Save / Load")
 
     save_requested = pyqtSignal(str, str)
     load_requested = pyqtSignal()

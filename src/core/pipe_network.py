@@ -1347,9 +1347,21 @@ class PipeNetwork:
         :meth:`split` lines up with the run order of :class:`FluidLoop`.
         """
         bore = self.inner_diameter
-        runs = self.risers if mesh is None else [
-            rasterize_pipe(mesh, run.points, run.diameter, name=run.name)
-            for run in self.risers]
+        if mesh is None:
+            runs = self.risers
+        else:
+            # the rasterisation on a mesh is kept: every analysis on the same mesh builds
+            # its loop from the same runs, and a tree's version says when it changed
+            import weakref
+
+            version = getattr(getattr(mesh, "tree", None), "version", None)
+            memo = getattr(self, "_raster_memo", None)
+            if memo is not None and memo[0]() is mesh and memo[1] == version:
+                runs = memo[2]
+            else:
+                runs = [rasterize_pipe(mesh, run.points, run.diameter, name=run.name)
+                        for run in self.risers]
+                self._raster_memo = (weakref.ref(mesh), version, runs)
         if bore <= 0.0:
             return list(runs)
         return [PipeRun(name=run.name, points=run.points, diameter=bore,

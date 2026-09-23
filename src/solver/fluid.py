@@ -267,7 +267,8 @@ class FluidResult:
 
 def hold_loop_balance(result: FluidResult, mesh, x: np.ndarray,
                       solve: Callable[[np.ndarray], np.ndarray],
-                      pinned: np.ndarray) -> np.ndarray:
+                      pinned: np.ndarray, memo: dict | None = None,
+                      operator: object = None) -> np.ndarray:
     """The field that makes the implicit film deposit exactly the loop's external power.
 
     The march fixes the gas entering every cell from the walls it was marched on, so the
@@ -281,6 +282,10 @@ def hold_loop_balance(result: FluidResult, mesh, x: np.ndarray,
     cells whose rows the elimination fixed.  ``result`` and the mesh's film temperatures
     are updated to the new inlet; the new field is returned.  A prescribed inlet
     (``result.balanced`` False) leaves everything as it is.
+
+    ``memo`` (a dict the caller keeps) stores ``y`` for ``operator``: ``G`` and ``alpha``
+    do not depend on the wall temperatures, so with the same operator the second solve
+    is the same solve, and a transient or a Picard loop pays it once.
     """
     if not result.balanced or result.conductance is None:
         return x
@@ -292,7 +297,13 @@ def hold_loop_balance(result: FluidResult, mesh, x: np.ndarray,
     alpha = result.gas_slope
     e = np.zeros(g.size)
     e[cells] = g[cells] * alpha[cells] / volume[cells]
-    y = np.asarray(solve(e), dtype=float)
+    key = hash(e.tobytes())
+    if memo is not None and memo.get("operator") is operator and memo.get("key") == key:
+        y = memo["y"]
+    else:
+        y = np.asarray(solve(e), dtype=float)
+        if memo is not None:
+            memo.update(operator=operator, key=key, y=y)
     x = np.asarray(x, dtype=float)
     deposit = float(np.sum(g[cells] * (result.t_gas[cells] - x[cells])))
     slope = float(np.sum(g[cells] * (alpha[cells] - y[cells])))
@@ -377,17 +388,26 @@ class FluidLoop:
                 continue
             mc = m_dot * fluid.cp
             count = run.cells.size
+            walls = wall_flat[run.cells].astype(float)
+            ntu = h * np.asarray(run.area, dtype=float) / mc
+            decay = np.exp(-ntu)
+            mean_factor = np.divide(1.0 - decay, ntu, out=np.ones(count), where=ntu > 0.0)
+            # the inlet of every piece is affine in the loop inlet, T = a T_in + b: the
+            # slope is the product of the decays upstream, the offset follows the one
+            # recurrence the march cannot vectorise (a plain float loop)
+            in_a = np.concatenate(([1.0], np.cumprod(decay)[:-1]))
+            in_b = np.empty(count)
+            b = 0.0
+            for index, (t_wall, d) in enumerate(zip(walls.tolist(), decay.tolist(),
+                                                    strict=True)):
+                in_b[index] = b
+                b = t_wall + (b - t_wall) * d
+            a = float(in_a[-1] * decay[-1])
             # columns: in_a, in_b, out_a, out_b, mean_a, mean_b, decay
-            coeff = np.empty((count, 7), dtype=float)
-            a, b = 1.0, 0.0
-            for index in range(count):
-                t_wall = float(wall_flat[run.cells[index]])
-                ntu = h * float(run.area[index]) / mc
-                decay = float(np.exp(-ntu))
-                mean_factor = (1.0 - decay) / ntu if ntu > 0.0 else 1.0
-                coeff[index] = (a, b, decay * a, t_wall + (b - t_wall) * decay,
-                                a * mean_factor, t_wall + (b - t_wall) * mean_factor, decay)
-                a, b = decay * a, t_wall + (b - t_wall) * decay
+            coeff = np.column_stack((in_a, in_b, decay * in_a,
+                                     walls + (in_b - walls) * decay,
+                                     in_a * mean_factor,
+                                     walls + (in_b - walls) * mean_factor, decay))
             marches.append((m_dot, h, coeff, a, b))
             slope += mc * (a - 1.0)
             offset += mc * b

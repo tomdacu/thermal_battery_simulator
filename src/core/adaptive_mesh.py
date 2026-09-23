@@ -63,7 +63,7 @@ from ..solver.octree_solver import _NOISE_FLOOR, OctreeSteadySolver, _mark
 from ..units import check_kelvin
 from .mesh import FACES, BoundaryType, FaceBC
 from .mesh_api import FaceRow, is_interior_tube
-from .octree import FACE_AXIS, FACE_SIGN, Leaf, Octree, uniform_tree
+from .octree import FACE_AXIS, FACE_SIGN, Leaf, Octree, locate_in_tables, uniform_tree
 from .physics import half_cell_h
 
 #: the per-leaf fields :meth:`AdaptiveMesh.refine` carries to the new leaves
@@ -265,10 +265,9 @@ class AdaptiveMesh:
         self.V = self.sizes ** 3
         self._h_char = np.cbrt(self.V)
         n = self.tree.n
-        self.on_box_face = np.array(
-            [any(corner == 0 or corner + leaf.size == n
-                 for corner in (leaf.x, leaf.y, leaf.z))
-             for leaf in self.tree.leaves], dtype=bool)
+        corners, levels = self.tree._leaf_arrays()
+        upper = corners + np.left_shift(np.int64(1), levels)[:, None]
+        self.on_box_face = np.any((corners == 0) | (upper == n), axis=1)
 
     @classmethod
     def uniform(cls, n_finest: int, physical_size: float, level: int) -> AdaptiveMesh:
@@ -369,10 +368,15 @@ class AdaptiveMesh:
         else:
             rule = indicator
         previous = {name: getattr(self, name).copy() for name in FIELDS}
-        ancestors = {leaf: position for position, leaf in enumerate(self.tree.leaves)}
+        # the old tree's lookup tables: a new leaf lies inside exactly one old leaf (a
+        # refinement only splits), found by locating the new leaf's corner in them
+        self.tree._leaf_arrays()
+        old_tables = self.tree._level_tables
         self.tree.refine(rule, threshold, levels=levels)
-        mapping = np.array([_ancestor_leaf(leaf, ancestors, self.tree.max_level)
-                            for leaf in self.tree.leaves])
+        corners, _levels = self.tree._leaf_arrays()
+        mapping = locate_in_tables(old_tables, self.tree.n, corners)
+        if np.any(mapping < 0):
+            raise ValueError("a leaf of the refined tree lies in no leaf of the previous one")
         for name in FIELDS:
             setattr(self, name, previous[name][mapping])
         self._rebuild_caches()
@@ -699,6 +703,18 @@ class AdaptiveMesh:
         else ``g == g_base``, which is what keeps this mesh's flux report equal to the
         octree solver's.
         """
+        import hashlib
+
+        digest = hashlib.blake2b(digest_size=16)
+        for array in (self.k, self.material_id, self.excluded):
+            digest.update(np.ascontiguousarray(array).tobytes())
+        digest.update(repr((self.tree.version, self.h_contact)).encode())
+        key = digest.hexdigest()
+        memo = getattr(self, "_face_memo", None)
+        if memo is not None and memo[0] == key:
+            # the conductances depend on the properties, not on the field: a balance per
+            # step asked for the same table several times
+            return memo[1]
         tables = self._tree_tables()
         i, j = tables["i"], tables["j"]
         area, distance = tables["area"], tables["distance"]
@@ -711,8 +727,10 @@ class AdaptiveMesh:
                              size_a=self.sizes[i], size_b=self.sizes[j],
                              material_a=self.material_id[i], material_b=self.material_id[j],
                              h_contact=self.h_contact, excluded_b=excluded)
-        return _FaceTable(i=i, j=j, axis=tables["axis"], area=area,
-                          distance=distance, g_base=g_base, g=g)
+        table = _FaceTable(i=i, j=j, axis=tables["axis"], area=area,
+                           distance=distance, g_base=g_base, g=g)
+        self._face_memo = (key, table)
+        return table
 
     def face_conductances(self, faces: _FaceTable | None = None) -> np.ndarray:
         """The conductance [W/K] of every face entry, as the assembly uses it."""
@@ -795,23 +813,77 @@ class AdaptiveMesh:
         :func:`src.solver.matrix.apply_dirichlet` - the same elimination, so a fixed leaf
         is exact instead of relaxed.
         """
+        key = None if radiation else self._operator_key()
+        entry = getattr(self, "_assembly", None)
+        if entry is None or key is None or entry["key"] != key:
+            entry = self._build_operator(radiation)
+            entry["key"] = key
+            self._assembly = entry if key is not None else None
+        else:
+            # the same operator: the film written back is the one it was built with
+            if entry["film"] > 0.0:
+                self.h_out = entry["film"]
+        b = (self.Q_source + self.Q_sink).astype(float).copy()
+        for name, positions, coefficient in entry["films"]:
+            np.add.at(b, positions, coefficient * self._film_reference(name, positions))
+        for face, bc in self.face_bc.items():
+            if bc.kind == BoundaryType.NEUMANN and bc.value != 0.0:
+                positions = self.wall_indices(face)
+                if positions.size:
+                    b[positions] += bc.value / self.sizes[positions]
+        if not enforce_dirichlet:
+            return entry["a"], b
+        # the elimination's share of the right-hand side, exactly as apply_dirichlet
+        # computes it: the known columns move to the free rows, the pinned rows hold
+        rows, contributions, mask, values = entry["moved"]
+        if rows.size:
+            np.subtract.at(b, rows, contributions)
+        b[mask] = values[mask]
+        return entry["a_eliminated"], b
+
+    def _operator_key(self) -> str:
+        """A digest of everything the operator depends on (not the right-hand side).
+
+        The conduction, the film coefficients and the pinned set change only when a field
+        they are made of changes - the conductivities, the materials, the excluded leaves,
+        the film coefficients, the box conditions, the outer film - while a transient step
+        or a Picard sweep only moves the film *temperatures*.  Keyed on this, the operator
+        is assembled once and reused.
+        """
+        import hashlib
+
+        digest = hashlib.blake2b(digest_size=16)
+        for array in (self.k, self.material_id, self.excluded, self.boundary_type,
+                      self.bc_h):
+            digest.update(np.ascontiguousarray(array).tobytes())
+        digest.update(repr((self.tree.version, self.h_out, self.h_out_conv,
+                            self.h_contact, self.t_ambient, self.environment_emissivity,
+                            sorted((face, bc.kind, bc.h, bc.value, bc.emissivity)
+                                   for face, bc in self.face_bc.items()))).encode())
+        return digest.hexdigest()
+
+    def _film_reference(self, name: str, positions: np.ndarray) -> np.ndarray:
+        """The reference temperature of one film at its positions, from the current state."""
+        if name == "environment":
+            return np.full(positions.size, float(self.t_ambient))
+        if name == "tube":
+            return self.bc_T_inf[positions]
+        return np.full(positions.size, float(self.face_bc[name].value))
+
+    def _build_operator(self, radiation: bool) -> dict:
+        """The operator of the current state, unpinned and pinned, and the films' parts."""
         faces = self._face_table()
         a = self.matrix(faces).tocsr()
-        b = (self.Q_source + self.Q_sink).astype(float).copy()
         # the film the operator carries, written back to the mesh exactly as the
         # structured assembly does, so ``h_out`` always says what the last solve applied
         film = self.outer_film(faces, radiation)
         if film > 0.0:
             self.h_out = film
         diagonal = np.zeros(self.tree.n_cells)
-        for _name, positions, coefficient, reference in self._films(faces):
+        films = []
+        for name, positions, coefficient, _reference in self._films(faces):
             np.add.at(diagonal, positions, coefficient)
-            np.add.at(b, positions, coefficient * reference)
-        for face, bc in self.face_bc.items():
-            if bc.kind == BoundaryType.NEUMANN and bc.value != 0.0:
-                positions = self.wall_indices(face)
-                if positions.size:
-                    b[positions] += bc.value / self.sizes[positions]
+            films.append((name, positions, coefficient))
         if diagonal.any():
             # the film joins the triplet list of the conduction operator instead of being
             # added to the assembled matrix: a sparse *sum* drops the explicit zeros that
@@ -823,10 +895,16 @@ class AdaptiveMesh:
                 (np.concatenate((coo.data, diagonal)),
                  (np.concatenate((coo.row, index)), np.concatenate((coo.col, index)))),
                 shape=coo.shape).tocsr()
-        if not enforce_dirichlet:
-            return a, b
         mask, values = self._fixed_arrays()
-        return apply_dirichlet(a, b, mask, values), b
+        ordered = a.tocsr(copy=True)
+        ordered.sort_indices()
+        row = np.repeat(np.arange(ordered.shape[0]), np.diff(ordered.indptr))
+        col = ordered.indices
+        moved = mask[col] & ~mask[row]
+        contributions = ordered.data[moved] * values[col[moved]]
+        eliminated = apply_dirichlet(a, np.zeros(self.tree.n_cells), mask, values)
+        return {"a": a, "a_eliminated": eliminated, "films": films, "film": film,
+                "moved": (row[moved], contributions, mask, values)}
 
     # ---------------------------------------------------------------- transient
     def volume_scale(self) -> np.ndarray | None:
@@ -1012,17 +1090,3 @@ class AdaptiveMesh:
                 f"leaf edge {self.sizes.min():.4f}-{self.sizes.max():.4f} m")
 
 
-def _ancestor_leaf(leaf: Leaf, ancestors: dict[Leaf, int], max_level: int) -> int:
-    """Position of the previous-tree leaf containing ``leaf`` (a split's parent).
-
-    A leaf of the new tree is inside exactly one leaf of the previous one, and the walk
-    upwards ends at ``max_level`` at the latest - the leaf that is the whole box, which
-    any tree of the same box has.
-    """
-    for level in range(leaf.level, max_level + 1):
-        corner = Leaf(level, (leaf.x >> level) << level, (leaf.y >> level) << level,
-                      (leaf.z >> level) << level)
-        position = ancestors.get(corner)
-        if position is not None:
-            return position
-    raise ValueError(f"no leaf of the previous tree contains {leaf}")

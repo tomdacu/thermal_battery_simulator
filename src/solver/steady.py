@@ -94,6 +94,7 @@ class SteadyStateSolver:
         if not self.adaptive and not mesh.uniform:
             self._scale = mesh.V.ravel(order="F")
         self._x0: np.ndarray | None = None
+        self._balance_memo: dict = {}
 
     def solve(self, rebuild: bool = True) -> SolverResult:
         """Solve the current mesh state; warm-starts from the previous solution."""
@@ -177,7 +178,8 @@ class SteadyStateSolver:
                 self.fluid_result, self.mesh, field,
                 lambda e: solve_linear(matrix, e, self.config, cache=self._cache,
                                        scale=scale).T,
-                pinned_cells(self.mesh, self.index))
+                pinned_cells(self.mesh, self.index), memo=self._balance_memo,
+                operator=matrix)
         return field, result.residual, result.converged
 
     def temperature_stats(self, T_flat: np.ndarray = None) -> dict[str, float]:

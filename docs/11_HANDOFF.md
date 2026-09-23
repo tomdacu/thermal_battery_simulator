@@ -123,10 +123,19 @@ every run sets its own state on the mesh, the AMG cache and the thread setting w
 the GUI shows only the plant (octree, Gas circuit, Pipes, an exchanger) with CG + AMG as
 its linear solver.  Suite: 389 passed (378 without the GUI sweep), ruff clean.
 
+Later the same day (third pass): six tabs (Vessel, Plant, Site, Mesh, Analysis, Solver),
+explanations in ⓘ tooltips, scrolling pages, the window fitted to the screen, Lx/Ly/Lz and
+the centre derived from the vessel; accuracy in kelvin (0.1 K, linear 1e-6); the finest
+leaf is the tube's (52 mm) and the budget a cap (214 089 leaves by default); vectorised
+tree, rasteriser and loop march, a cached operator and an AMG V(1,1) cycle.  Default
+model: build ~12 s, standby ~25 s, transient ~0.5 s per step.  Suite: 390 passed (379
+without the GUI sweep), ruff clean.
+
 Open, in order: (1) gas properties that follow the gas temperature along the loop
 ([12](12_METHODS.md) §11 "Limits"); (2) the standby paths of [13](13_REDESIGN.md) §7;
-(3) the loop march is a Python loop over the cells of each run - fine for the default
-network (42 risers), worth vectorising for a network of thousands of runs.
+(3) the octree is a list of Python objects - building it is now the slowest step; an
+array-only tree (Morton codes) would make it ~10x faster; (4) the headers are not
+marched with the loop; (5) the risers are 5 m against the ~4 m of the guideline.
 
 ## 4. Work in progress / next
 
