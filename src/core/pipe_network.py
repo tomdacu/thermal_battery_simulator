@@ -111,6 +111,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy import sparse
 
 from .mesh import BoundaryType, MaterialID, Mesh3D
 from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULAR,
@@ -119,6 +120,7 @@ from .pipes import (HEADER_LIMIT, HEADER_SAFE, PITCH_HORIZONTAL, PITCH_TRIANGULA
 
 if TYPE_CHECKING:                       # the solver layer imports this module's layer
     from ..solver.fluid import Fluid, FluidLoop, GasGraph
+    from ..solver.hydraulics import HydraulicNetwork
     from .adaptive_mesh import AdaptiveMesh
 
 # ---------------------------------------------------------------------- vocabulary
@@ -133,8 +135,11 @@ COLLECTION_DIRECT = "distributor_collector"
 COLLECTION_REVERSE = "reverse_return"
 COLLECTION_CENTRAL = "central_header"
 COLLECTION_TWO_LEVEL = "two_level_rings"
+#: the rings fed in parallel by a straight trunk along the inlet diameter, which meets
+#: every ring at its two taps on that diameter (the collector mirrors it at the top)
+COLLECTION_MANIFOLD = "radial_manifold"
 COLLECTIONS = (COLLECTION_DIRECT, COLLECTION_REVERSE, COLLECTION_CENTRAL,
-               COLLECTION_TWO_LEVEL)
+               COLLECTION_TWO_LEVEL, COLLECTION_MANIFOLD)
 
 #: the collections that run the return in the *same* order as the feed (Tichelmann):
 #: every branch then travels the same header length.  The direct return walks it the
@@ -145,7 +150,9 @@ SPLIT_EQUAL = "equal"
 SPLIT_PATH = "path"
 SPLIT_RING = "ring"
 SPLIT_SECTOR = "sector"
-SPLITS = (SPLIT_EQUAL, SPLIT_PATH, SPLIT_RING, SPLIT_SECTOR)
+#: the flow each riser gets is what the network's pressures give it (solved, not imposed)
+SPLIT_HYDRAULIC = "hydraulic"
+SPLITS = (SPLIT_EQUAL, SPLIT_PATH, SPLIT_RING, SPLIT_SECTOR, SPLIT_HYDRAULIC)
 
 #: prefix of the non-blocking messages returned by ``validate()``
 WARNING = "warning: "
@@ -244,6 +251,20 @@ class PipeNetworkConfig:
     n_sectors: int = 4                      # sectors of the `sector` split
     insulated_headers: bool = False         # the headers exchange nothing with the bed
     junction_refinement: float | None = None  # [m] cell size asked at the junctions
+    #: outer diameter of every header group [m], as the sizing engine chose it
+    #: (:func:`design_headers`); a group missing from it takes ``duct_d``
+    header_sizes: dict[str, float] | None = None
+    #: how far the two headers sit inside the sand [m]: the distributor's centreline
+    #: above the bottom of the band, the collector's below its top.  0 puts a header on
+    #: the slab, half in the insulation; the engine lifts it one header diameter in
+    header_lift: float = 0.0
+    #: the loss coefficient of a balancing orifice at the inlet of every riser [-],
+    #: referred to the tube velocity, in branch order (the engine's; None = none)
+    riser_orifices: tuple[float, ...] | None = None
+    #: the state the hydraulic split and the sizing are evaluated at: the circuit's mass
+    #: flow [kg/s] and a gas temperature [K]
+    design_flow: float = 1.0
+    design_temperature: float = 773.15
 
     # ------------------------------------------------------------- derived sizes
     @property
@@ -312,14 +333,25 @@ class PipeNetworkConfig:
 
     @property
     def z_bottom(self) -> float:
-        """Elevation of the distributor (bottom of the active band) [m]."""
-        return self.base_z + self.band_bottom
+        """Elevation of the distributor [m]: the bottom of the band, plus the lift."""
+        return self.base_z + self.band_bottom + max(self.header_lift, 0.0)
 
     @property
     def z_top(self) -> float:
-        """Elevation of the collector (top of the active band) [m]."""
+        """Elevation of the collector [m]: the top of the band, minus the lift."""
         top = self.height - self.band_bottom if self.band_top is None else self.band_top
-        return self.base_z + top
+        return self.base_z + top - max(self.header_lift, 0.0)
+
+    @property
+    def header_wall(self) -> float:
+        """Wall of the headers and the ducts [m]: the tube's, at least 3 mm."""
+        return max(self.wall_thickness, 0.003)
+
+    def header_d(self, group: str) -> float:
+        """Outer diameter of a header group [m]: the engine's size, or ``duct_d``."""
+        if self.header_sizes and group in self.header_sizes:
+            return float(self.header_sizes[group])
+        return self.duct_d
 
     @property
     def roof_z(self) -> float:
@@ -474,6 +506,10 @@ class PipeNetworkConfig:
             problems.append(
                 f"the {SPLIT_RING!r} distribution gives every ring main the same "
                 f"flow, so it needs layout={LAYOUT_RINGS!r}, not {self.layout!r}")
+        if self.collection == COLLECTION_MANIFOLD and self.layout != LAYOUT_RINGS:
+            problems.append(
+                f"the radial manifold feeds concentric rings, so it needs "
+                f"layout={LAYOUT_RINGS!r}, not {self.layout!r}")
         if self.collection == COLLECTION_TWO_LEVEL and self.layout != LAYOUT_RINGS:
             problems.append(
                 f"the two-level collection stacks concentric rings, so it needs "
@@ -969,6 +1005,12 @@ class PipeNetwork:
         if count == 0:
             return np.empty(0)
         mode = self.config.split_mode
+        if mode == SPLIT_HYDRAULIC:
+            from ..solver.fluid import Fluid as FluidType
+
+            state = self.hydraulic_network().solve(
+                self.config.design_flow, FluidType(), self.config.design_temperature)
+            return state.riser_flow / float(np.sum(state.riser_flow))
         if mode == SPLIT_PATH:
             weights = self.paths()
             total = float(np.sum(weights))
@@ -1370,144 +1412,229 @@ class PipeNetwork:
         return [PipeRun(name=run.name, points=run.points, diameter=bore,
                         cells=run.cells, length=run.length) for run in runs]
 
-    def gas_graph(self, mesh: Mesh3D | AdaptiveMesh) -> GasGraph:
-        """The whole circuit as the gas walks it, on ``mesh`` (:class:`GasGraph`).
+    def hydraulic_network(self) -> HydraulicNetwork:
+        """The circuit as the pipes the gas flows through (:mod:`src.solver.hydraulics`).
 
-        Inlet duct, distributor, risers, collector and outlet duct, as straight segments
-        between nodes, each with its share of the flow: the branch split of
-        :meth:`split` on the risers, and on the headers the sum of the branches that
-        still have to leave (distributor) or have already joined (collector).  A ring
-        is fed at its entry tap and divides both ways round to its exit tap, where the
-        two halves meet and leave by the jumper; the collector mirrors it.  Only the
-        cells inside the vessel exchange (a nozzle stub in the excluded air carries the
-        gas and nothing else), and a lagged network exchanges on its risers alone.
+        Inlet duct, distributor, risers, collector and outlet duct as straight pipes
+        between nodes - a ring main is its chords between consecutive taps, closed, so
+        its two halves are two parallel paths the hydraulics divides the flow between.
+        Every header pipe carries its sizing group (``dist_ring_3``, ``coll_jumper_2``,
+        ``inlet_duct``, ``dist_section_1`` ...) and the group's diameter; the risers are
+        the user's tubes and carry the tees' losses.
         """
-        from ..solver.fluid import GasGraph, GasSegment
+        from ..solver.hydraulics import (K_DUCT, K_JUMPER, K_RISER, HydraulicNetwork,
+                                         Pipe)
 
         config = self.config
-        split = self.split()
-        bore, duct_bore = self.inner_diameter, config.duct_inner_diameter
-        tube, duct = config.diameter, config.duct_d
-        lagged = bool(self.insulated)
-        segments: list[GasSegment] = []
-        counter = [2]                       # 0: after the heater, 1: before it
+        wall = config.header_wall
+        tube, bore = config.diameter, self.inner_diameter
+        pipes: list[Pipe] = []
+        counter = [2]                        # 0: the inlet, 1: the outlet
 
         def node() -> int:
             counter[0] += 1
             return counter[0] - 1
 
-        def line(points, flow: float, start: int, end: int, name: str, riser: bool
-                 ) -> None:
-            """A polyline as a chain of straight segments from ``start`` to ``end``."""
+        def line(points, a: int, b: int, name: str, group: str, kind: str, k: float,
+                 riser: int = -1) -> None:
             points = [np.asarray(point, dtype=float) for point in points]
             points = [pt for index, pt in enumerate(points)
                       if index == 0 or np.linalg.norm(pt - points[index - 1]) > 1e-12]
             if len(points) < 2:
-                points = [points[0], points[0]]
-            ends = [start] + [node() for _ in range(len(points) - 2)] + [end]
-            for piece, (a, b) in enumerate(zip(points[:-1], points[1:], strict=True)):
-                span = b - a
-                cells, length = self._piece_cells(mesh, a, b, tube if riser else duct)
-                segments.append(GasSegment(
+                points = [points[0], points[0] + np.array([0.0, 0.0, 1e-6])]
+            ends = [a] + [node() for _ in range(len(points) - 2)] + [b]
+            outer = tube if kind == "riser" else config.header_d(group)
+            inner = bore if kind == "riser" else outer - 2.0 * wall
+            for piece, (p0, p1) in enumerate(zip(points[:-1], points[1:], strict=True)):
+                pipes.append(Pipe(
                     name=f"{name}.{piece}" if len(points) > 2 else name,
-                    source=ends[piece], target=ends[piece + 1], flow=float(flow),
-                    bore=bore if riser else duct_bore, outer=tube if riser else duct,
-                    axis=int(np.argmax(np.abs(span))) if np.any(span) else 2,
-                    cells=cells, length=length, exchanges=riser or not lagged))
+                    a=ends[piece], b=ends[piece + 1], start=p0, end=p1, bore=inner,
+                    outer=outer, k_local=k if piece == 0 else 0.0,
+                    group="" if kind == "riser" else group, kind=kind, riser=riser))
 
         count = len(self.branches)
         groups = self._group_labels()
-        if self.distributors and len(self.distributors) > 1 or (
-                self.distributors and self.config.layout == LAYOUT_RINGS):
+        rings = self.config.layout == LAYOUT_RINGS
+        orifices = config.riser_orifices
+
+        def orifice(branch: int) -> float:
+            if orifices is None or branch >= len(orifices):
+                return 0.0
+            return float(orifices[branch])
+
+        if rings:
             n_groups = len(self.distributors)
             taps = [[b for b in range(count) if groups[b] == g] for g in range(n_groups)]
-            ring_flow = [float(sum(split[b] for b in taps[g])) for g in range(n_groups)]
             dist_order = list(range(n_groups - 1, -1, -1))
             balanced = config.collection in BALANCED_COLLECTIONS
             coll_order = dist_order if balanced else list(reversed(dist_order))
             d_node = [[node() for _ in taps[g]] for g in range(n_groups)]
             c_node = [[node() for _ in taps[g]] for g in range(n_groups)]
-            line(self.inlet.points, 1.0, 0, d_node[dist_order[0]][0], "inlet_duct", False)
+            manifold = config.collection == COLLECTION_MANIFOLD
+            if manifold:
+                entry = {("bottom", g): self.distributors[g].points[0]
+                         for g in range(n_groups)}
+                leaving = {("bottom", g): self.distributors[g].points[len(taps[g]) // 2]
+                           for g in range(n_groups)}
+                stops = _manifold_crossings(entry, leaving, n_groups, self.center,
+                                            config.azimuth_in)
 
-            def ring(run, g: int, nodes: list[int], downstream: float, collector: bool
-                     ) -> None:
-                """The two halves of one ring: taps 0 -> n/2 both ways round."""
-                n = len(taps[g])
-                half = n // 2
-                f = [float(split[b]) for b in taps[g]]
-                pts = [run.points[t] for t in range(n)]
-                for side in (list(range(0, half + 1)),
-                             [0] + list(range(n - 1, half - 1, -1))):
-                    if len(side) < 2:
-                        continue
-                    share = 0.5 * ((downstream + f[0]) if collector
-                                   else (downstream + f[half]))
-                    inner = side[1:-1]
-                    for step, (t0, t1) in enumerate(zip(side[:-1], side[1:], strict=True)):
-                        if collector:
-                            flow = share + sum(f[t] for t in inner[:step])
-                        else:
-                            flow = share + sum(f[t] for t in inner[step:])
-                        a, b = (nodes[t0], nodes[t1])
-                        line([pts[t0], pts[t1]], flow, a, b,
-                             f"{run.name}.{t0}-{t1}", False)
+                def stop_node(nodes, g, tap):
+                    return nodes[g][0 if tap == 0 else len(taps[g]) // 2]
 
-            remaining = 1.0
-            for position, g in enumerate(dist_order):
-                downstream = remaining - ring_flow[g]
-                ring(self.distributors[g], g, d_node[g], downstream, collector=False)
-                remaining = downstream
-                if position + 1 < len(dist_order):
-                    nxt = dist_order[position + 1]
+                def stop_point(runs, g, tap):
+                    return runs[g].points[0 if tap == 0 else len(taps[g]) // 2]
+
+                line(self.inlet.points, 0, stop_node(d_node, *stops[0]), "inlet_duct",
+                     "inlet_duct", "duct", K_DUCT)
+            else:
+                line(self.inlet.points, 0, d_node[dist_order[0]][0], "inlet_duct",
+                     "inlet_duct", "duct", K_DUCT)
+            for side, runs, nodes in (("dist", self.distributors, d_node),
+                                      ("coll", self.collectors, c_node)):
+                for g in range(n_groups):
                     n = len(taps[g])
-                    line([self.distributors[g].points[n // 2],
-                          self.distributors[nxt].points[0]], downstream,
-                         d_node[g][n // 2], d_node[nxt][0], f"distributor_jumper_{g}", False)
+                    pts = runs[g].points
+                    for t in range(n):
+                        # the ring's polyline is its taps and the first tap again
+                        line([pts[t], pts[t + 1]], nodes[g][t], nodes[g][(t + 1) % n],
+                             f"{runs[g].name}.{t}", f"{side}_ring_{g}", "header", 0.0)
+            for side, runs, nodes, order in (("dist", self.distributors, d_node,
+                                              dist_order),
+                                             ("coll", self.collectors, c_node,
+                                              coll_order)):
+                if manifold:
+                    for k, (first, second) in enumerate(zip(stops[:-1], stops[1:],
+                                                            strict=True)):
+                        line([stop_point(runs, *first), stop_point(runs, *second)],
+                             stop_node(nodes, *first), stop_node(nodes, *second),
+                             f"{side}_trunk_{k}", f"{side}_trunk_{k}", "jumper", K_JUMPER)
+                    continue
+                for position, g in enumerate(order[:-1]):
+                    following = order[position + 1]
+                    half = len(taps[g]) // 2
+                    line([runs[g].points[half], runs[following].points[0]],
+                         nodes[g][half], nodes[following][0], f"{side}_jumper_{g}",
+                         f"{side}_jumper_{g}", "jumper", K_JUMPER)
             for g in range(n_groups):
                 for t, b in enumerate(taps[g]):
-                    line(self.risers[b].points, float(split[b]), d_node[g][t], c_node[g][t],
-                         self.risers[b].name, True)
-            upstream = 0.0
-            for position, g in enumerate(coll_order):
-                ring(self.collectors[g], g, c_node[g], upstream, collector=True)
-                upstream += ring_flow[g]
-                n = len(taps[g])
-                if position + 1 < len(coll_order):
-                    nxt = coll_order[position + 1]
-                    line([self.collectors[g].points[n // 2],
-                          self.collectors[nxt].points[0]], upstream,
-                         c_node[g][n // 2], c_node[nxt][0], f"collector_jumper_{g}", False)
-                else:
-                    line(self.outlet.points, 1.0, c_node[g][n // 2], 1, "outlet_duct",
-                         False)
+                    line(self.risers[b].points, d_node[g][t], c_node[g][t],
+                         self.risers[b].name, "", "riser", K_RISER + orifice(b),
+                         riser=b)
+            if manifold:
+                line(self.outlet.points, stop_node(c_node, *stops[-1]), 1,
+                     "outlet_duct", "outlet_duct", "duct", K_DUCT)
+            else:
+                last = coll_order[-1]
+                line(self.outlet.points, c_node[last][len(taps[last]) // 2], 1,
+                     "outlet_duct", "outlet_duct", "duct", K_DUCT)
         else:
-            # a ladder: one distributor through the feet in branch order, one collector
-            # through the heads, walked the same way (reverse return) or back (direct)
             d_node = [node() for _ in range(count)]
             c_node = [node() for _ in range(count)]
-            f = [float(v) for v in split]
             bottom = self.distributors[0].points
             top = self.collectors[0].points
-            line(self.inlet.points, 1.0, 0, d_node[0], "inlet_duct", False)
+            sections = max(min(8, count - 1), 1)
+
+            def section(b: int) -> int:
+                return min(b * sections // max(count - 1, 1), sections - 1)
+
+            line(self.inlet.points, 0, d_node[0], "inlet_duct", "inlet_duct", "duct",
+                 K_DUCT)
             for b in range(count - 1):
-                line([bottom[b], bottom[b + 1]], sum(f[b + 1:]), d_node[b], d_node[b + 1],
-                     f"distributor.{b}", False)
+                line([bottom[b], bottom[b + 1]], d_node[b], d_node[b + 1],
+                     f"distributor.{b}", f"dist_section_{section(b)}", "header", 0.0)
+                line([top[b], top[b + 1]], c_node[b], c_node[b + 1],
+                     f"collector.{b}", f"coll_section_{section(b)}", "header", 0.0)
             for b in range(count):
-                line(self.risers[b].points, f[b], d_node[b], c_node[b],
-                     self.risers[b].name, True)
-            if config.collection in BALANCED_COLLECTIONS:
-                for b in range(count - 1):
-                    line([top[b], top[b + 1]], sum(f[:b + 1]), c_node[b], c_node[b + 1],
-                         f"collector.{b}", False)
-                line(self.outlet.points, 1.0, c_node[count - 1], 1, "outlet_duct", False)
-            else:
-                for b in range(count - 1, 0, -1):
-                    line([top[b], top[b - 1]], sum(f[b:]), c_node[b], c_node[b - 1],
-                         f"collector.{b}", False)
-                line(self.outlet.points, 1.0, c_node[0], 1, "outlet_duct", False)
+                line(self.risers[b].points, d_node[b], c_node[b], self.risers[b].name,
+                     "", "riser", K_RISER + orifice(b), riser=b)
+            exit_node = (c_node[count - 1] if config.collection in BALANCED_COLLECTIONS
+                         else c_node[0])
+            line(self.outlet.points, exit_node, 1, "outlet_duct", "outlet_duct", "duct",
+                 K_DUCT)
+        return HydraulicNetwork(pipes, counter[0], 0, 1, self.roughness)
+
+    def gas_graph(self, mesh: Mesh3D | AdaptiveMesh, mass_flow: float | None = None,
+                  fluid: Fluid | None = None, state=None) -> GasGraph:
+        """The whole circuit as the gas walks it, on ``mesh`` (:class:`GasGraph`).
+
+        The flows are the hydraulics' (:meth:`hydraulic_network`, solved at the design
+        state unless ``state`` is given): every pipe becomes a segment oriented the way
+        its gas flows, with the share of the flow it carries.  A split imposed by the
+        configuration (equal, path, ring, sector) is honoured on the risers instead and
+        the headers carry what mass conservation leaves them.  Only the cells inside the
+        vessel exchange; a lagged network exchanges on its risers alone.
+        """
+        from ..solver.fluid import Fluid as FluidType
+        from ..solver.fluid import GasGraph, GasSegment
+
+        network = self.hydraulic_network()
+        flow_total = float(self.config.design_flow if mass_flow is None else mass_flow)
+        if state is None:
+            state = network.solve(flow_total, fluid or FluidType(),
+                                  self.config.design_temperature)
+        flows = np.asarray(state.flow, dtype=float)
+        if self.config.split_mode != SPLIT_HYDRAULIC:
+            flows = self._imposed_flows(network, flows, flow_total)
+        lagged = bool(self.insulated)
+        segments = []
+        for index, pipe in enumerate(network.pipes):
+            m = float(flows[index])
+            forward = m >= 0.0
+            start, end = (pipe.start, pipe.end) if forward else (pipe.end, pipe.start)
+            cells, length = self._piece_cells(mesh, start, end, pipe.outer)
+            span = end - start
+            segments.append(GasSegment(
+                name=pipe.name, source=pipe.a if forward else pipe.b,
+                target=pipe.b if forward else pipe.a,
+                flow=abs(m) / flow_total if flow_total > 0 else 0.0,
+                bore=pipe.bore, outer=pipe.outer,
+                axis=int(np.argmax(np.abs(span))) if np.any(span) else 2,
+                cells=cells, length=length,
+                exchanges=pipe.kind == "riser" or not lagged, pipe=index,
+                forward=forward))
         graph = GasGraph(segments)
-        graph.check()
+        graph.check(tolerance=1e-6)
         return graph
+
+    def _imposed_flows(self, network: HydraulicNetwork, flows: np.ndarray,
+                       total: float) -> np.ndarray:
+        """Pipe flows with the risers at the configured split (the headers follow).
+
+        The riser flows are fixed; the header flows are the ones that conserve mass with
+        them, found on the same network by solving the hydraulics with each riser
+        replaced by a fixed draw - here in the least-squares sense of a flow network:
+        the node balances with the riser flows given, solved for the header pipes.
+        """
+        split = self.split()
+        out = flows.copy()
+        riser = np.array([pipe.riser for pipe in network.pipes])
+        header = riser < 0
+        for position in np.flatnonzero(~header):
+            out[position] = total * float(split[riser[position]])
+        # the header flows: node balance B m_header = injection - B_riser m_riser
+        n = network.n_nodes
+        a = np.array([pipe.a for pipe in network.pipes])
+        b = np.array([pipe.b for pipe in network.pipes])
+        rhs = np.zeros(n)
+        rhs[network.inlet] += total
+        rhs[network.outlet] -= total
+        np.subtract.at(rhs, a[~header], out[~header])
+        np.add.at(rhs, b[~header], out[~header])
+        cols = np.flatnonzero(header)
+        incidence = sparse.coo_matrix(
+            (np.concatenate((np.ones(cols.size), -np.ones(cols.size))),
+             (np.concatenate((a[cols], b[cols])),
+              np.concatenate((np.arange(cols.size), np.arange(cols.size))))),
+            shape=(n, cols.size)).tocsr()
+        # the minimum-norm header flows closest to the hydraulic ones
+        from scipy.sparse.linalg import lsqr
+
+        guess = flows[cols]
+        correction = lsqr(incidence, rhs - incidence @ guess, atol=1e-14,
+                          btol=1e-14)[0]
+        out[cols] = guess + correction
+        return out
 
     def _piece_cells(self, mesh: Mesh3D | AdaptiveMesh, a: np.ndarray, b: np.ndarray,
                      diameter: float) -> tuple[np.ndarray, np.ndarray]:
@@ -1571,7 +1698,10 @@ class PipeNetwork:
         circuit = self.hydraulics(mass_flow, fluid)
         runs = self._gas_runs(mesh)
         material = self.config.pipe_material
-        graph = self.gas_graph(mesh) if mesh is not None and whole_circuit else None
+        graph = (self.gas_graph(mesh, mass_flow, fluid) if mesh is not None
+                 and whole_circuit else None)
+        hydraulic = (self.hydraulic_network() if graph is not None
+                     and self.config.split_mode == SPLIT_HYDRAULIC else None)
         return FluidLoop(runs=runs, mass_flow=float(mass_flow), fluid=fluid,
                          h_fluid=h_fluid, external_power=float(external_power),
                          t_in=t_in, split=self.split(), roughness=self.roughness,
@@ -1580,7 +1710,7 @@ class PipeNetwork:
                          well_model=well_model,
                          wall_thickness=float(self.config.wall_thickness),
                          k_wall=21.0 if material is None else material.k_wall,
-                         variable_properties=variable_properties)
+                         variable_properties=variable_properties, hydraulic=hydraulic)
 
 
 # -------------------------------------------------------------- the two reports
@@ -1707,6 +1837,34 @@ def _wall_point(config: PipeNetworkConfig, center: tuple[float, float],
             elevation)
 
 
+def _manifold_crossings(entry: dict, leaving: dict, n_groups: int,
+                        center: tuple[float, float], azimuth_deg: float
+                        ) -> list[tuple[int, int]]:
+    """``(ring, tap)`` of the trunk's stops, from the inlet side to the far side.
+
+    Every ring has its entry tap (0) and its exit tap (``n/2``) on the inlet diameter; the
+    trunk visits them in the order of their projection on that diameter, starting from
+    the inlet wall.
+    """
+    theta = float(np.deg2rad(azimuth_deg))
+    direction = np.array([np.cos(theta), np.sin(theta)])
+    stops = []
+    for g in range(n_groups):
+        for tap, table in ((0, entry), (1, leaving)):
+            point = np.asarray(table[("bottom", g)], dtype=float)
+            projection = float(np.dot(point[:2] - np.asarray(center), direction))
+            stops.append((projection, g, tap))
+    stops.sort(key=lambda item: -item[0])
+    # two taps of the innermost ring can coincide in projection only if it has one tap
+    unique, seen = [], set()
+    for _projection, g, tap in stops:
+        key = (g, tap)
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
 def riser_positions(config: PipeNetworkConfig,
                     center: tuple[float, float]) -> list[tuple[float, float]]:
     """Plan positions of the risers [m] about ``center``, without a mesh.
@@ -1774,7 +1932,9 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
                                   ("top", collectors, z_top)):
                 points = [local(index, z + levels[group]) for index in taps]
                 points.append(points[0])                  # close the ring main
-                runs.append(rasterize_pipe(mesh, points, duct,
+                prefix = "dist" if side == "bottom" else "coll"
+                runs.append(rasterize_pipe(mesh, points,
+                                           config.header_d(f"{prefix}_ring_{group}"),
                                            name=f"{side}_ring_{group}"))
                 entry[(side, group)] = np.asarray(points[0], dtype=float)
                 # an even tap count puts the exit on a tap, diametrically opposite
@@ -1815,20 +1975,47 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
                                           - entry[(side, following)]))
             position += jumper
             if rings:
+                prefix = "dist" if side == "bottom" else "coll"
                 connectors.append(rasterize_pipe(
-                    mesh, [leaving[(side, group)], entry[(side, following)]], duct,
+                    mesh, [leaving[(side, group)], entry[(side, following)]],
+                    config.header_d(f"{prefix}_jumper_{group}"),
                     name=f"{name}_jumper_{group}_{following}"))
         return offsets, position
 
     # a balancing collection walks the collector in the same order as the distributor,
     # so the branch fed first is the branch returned last and every path adds up the same
     coll_order = dist_order if balanced else list(reversed(dist_order))
-    off_dist, _ = chain(dist_order, "bottom", "distributor")
-    off_coll, total_coll = chain(coll_order, "top", "collector")
+    manifold = rings and config.collection == COLLECTION_MANIFOLD
+    if manifold:
+        # a straight trunk along the inlet diameter through the two taps of every ring
+        # on it: the rings are fed in parallel, each carrying its own flow only
+        crossings = _manifold_crossings(entry, leaving, plan.n_groups, (cx, cy),
+                                        config.azimuth_in)
+        for side, name in (("bottom", "distributor"), ("top", "collector")):
+            chain_points = [(entry if tap == 0 else leaving)[(side, g)]
+                            for g, tap in crossings]
+            prefix = "dist" if side == "bottom" else "coll"
+            for k, (p0, p1) in enumerate(zip(chain_points[:-1], chain_points[1:],
+                                             strict=True)):
+                connectors.append(rasterize_pipe(
+                    mesh, [p0, p1], config.header_d(f"{prefix}_trunk_{k}"),
+                    name=f"{name}_trunk_{k}"))
+        first_g, first_tap = crossings[0]
+        last_g, last_tap = crossings[-1]
+        off_dist = {g: 0.0 for g in range(plan.n_groups)}
+        off_coll = {g: 0.0 for g in range(plan.n_groups)}
+        total_coll = 0.0
+    else:
+        off_dist, _ = chain(dist_order, "bottom", "distributor")
+        off_coll, total_coll = chain(coll_order, "top", "collector")
 
     # -------------------------------------------------------------------- ducts
-    feed_vertex = entry[("bottom", dist_order[0])]
-    discharge_vertex = leaving[("top", coll_order[-1])]
+    if manifold:
+        feed_vertex = (entry if first_tap == 0 else leaving)[("bottom", first_g)]
+        discharge_vertex = (entry if last_tap == 0 else leaving)[("top", last_g)]
+    else:
+        feed_vertex = entry[("bottom", dist_order[0])]
+        discharge_vertex = leaving[("top", coll_order[-1])]
     inlet_points: list[tuple[float, float, float]] = [
         _wall_point(config, (cx, cy), config.azimuth_in, config.inlet_elevation,
                     WALL_STUB),
@@ -1839,13 +2026,15 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
         inlet_points.append((cx, cy, float(feed_vertex[2])))
     inlet_points.append((float(feed_vertex[0]), float(feed_vertex[1]),
                          float(feed_vertex[2])))
-    inlet = rasterize_pipe(mesh, inlet_points, duct, name="inlet_duct")
+    inlet = rasterize_pipe(mesh, inlet_points, config.header_d("inlet_duct"),
+                           name="inlet_duct")
 
     outlet_points: list[tuple[float, float, float]] = [
         (float(discharge_vertex[0]), float(discharge_vertex[1]),
          float(discharge_vertex[2])),
     ]
-    if rings and not central and coll_order[-1] != max(range(plan.n_groups)):
+    if (rings and not central and not manifold
+            and coll_order[-1] != max(range(plan.n_groups))):
         # the chain ends inside: rise to the outlet level first, so the duct crosses
         # the outer rings above them instead of through them
         outlet_points.append((float(discharge_vertex[0]), float(discharge_vertex[1]),
@@ -1857,14 +2046,21 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
                                      config.outlet_elevation))
     outlet_points.append(_wall_point(config, (cx, cy), config.outlet_azimuth,
                                      config.outlet_elevation, WALL_STUB))
-    outlet = rasterize_pipe(mesh, outlet_points, duct, name="outlet_duct")
+    outlet = rasterize_pipe(mesh, outlet_points, config.header_d("outlet_duct"),
+                            name="outlet_duct")
 
     # ----------------------------------------------------------------- branches
     link_in, link_out = inlet.total_length, outlet.total_length
     branches: list[Branch] = []
     for index in range(len(plan.points)):
         group = plan.group[index]
-        if rings:
+        if manifold:
+            # a ring fed at both of its trunk taps: the branch takes the nearer one
+            forward = plan.forward[index] % max(half[group], 1e-12)
+            turn = min(forward, half[group] - forward)
+            onward = turn
+            distributor_run, collector_run = distributors[group], collectors[group]
+        elif rings:
             # a ring fed at one point divides its flow both ways round: the branch
             # takes the shorter arc in and the rest of its half out
             turn = min(plan.forward[index], plan.perimeter[group] - plan.forward[index])
@@ -1915,3 +2111,151 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
             f"({box[0]:.2f} x {box[1]:.2f} m): what falls outside is dropped from "
             f"the voxelisation")
     return network
+
+
+# ------------------------------------------------------------------ the engine
+#: sand left under a lifted header, in header diameters (and at least HEADER_COVER_MIN)
+HEADER_COVER = 0.25
+HEADER_COVER_MIN = 0.05
+#: room kept between two ring mains [m]
+RING_GAP = 0.05
+
+
+@dataclass
+class HeaderDesign:
+    """What :func:`design_headers` chose, and what it achieves."""
+
+    config: PipeNetworkConfig
+    sizing: object                       # src.solver.hydraulics.SizingResult
+    lift: float                          # [m] header centreline into the sand
+    rounds: int
+
+    def summary(self) -> str:
+        return (f"{self.sizing.summary()}; headers {self.lift * 1000:.0f} mm into the "
+                f"sand")
+
+    def details(self) -> list[str]:
+        lines = [self.summary()]
+        for group, size in sorted(self.sizing.sizes.items()):
+            lines.append(f"{group}: {size * 1000:.1f} mm outer")
+        lines.append(f"collection: {self.config.collection}")
+        if self.sizing.orifices_needed:
+            k = self.sizing.k_orifice
+            lines.append(f"orifices: K from {float(np.min(k)):.1f} to {float(np.max(k)):.1f} "
+                         f"(the most throttled riser drops "
+                         f"{float(np.max(self.sizing.orifice_dp)):.0f} Pa across it)")
+        worst = np.argsort(-np.abs(self.sizing.shares / self.sizing.targets - 1.0))[:3]
+        for b in worst:
+            lines.append(f"riser {int(b)}: {100 * self.sizing.shares[b]:.3f} % of the "
+                         f"flow for {100 * self.sizing.targets[b]:.3f} % of the bed")
+        lines.extend(self.sizing.notes)
+        return lines
+
+
+def design_headers(config: PipeNetworkConfig, center: tuple[float, float],
+                   mass_flow: float, fluid: Fluid | None = None, *,
+                   tolerance: float = 0.05, max_velocity: float = 20.0,
+                   temperature: float | None = None, pressure: float = 101325.0,
+                   rounds: int = 4) -> HeaderDesign:
+    """Size the headers and lift them into the sand: the network's hydraulic engine.
+
+    The risers' target flows are the shares of the bed they serve (their Voronoi areas in
+    plan, :func:`src.solver.hydraulics.voronoi_shares`); the diameters of the ring mains,
+    the jumpers, the header sections and the ducts are chosen by
+    :func:`src.solver.hydraulics.size_headers` so every riser gets its target within
+    ``tolerance`` and no header exceeds ``max_velocity``.  The headers are then lifted
+    into the sand - the centreline one radius plus a cover of a quarter diameter (at
+    least 50 mm) above the bottom slab and below the top one - so a header lies in the bed it
+    charges instead of on the insulation.  The lift shortens the risers, which moves
+    the pressures, so the two are iterated until the lift stops moving (two or three
+    rounds).  Returns the configuration with ``header_sizes``, ``header_lift`` and the
+    hydraulic split, and the report.
+    """
+    from dataclasses import replace as _replace
+
+    from ..solver.fluid import Fluid as FluidType
+    from ..solver.hydraulics import voronoi_shares
+    from .adaptive_mesh import AdaptiveMesh
+
+    fluid = fluid or FluidType()
+    temperature = config.design_temperature if temperature is None else temperature
+    cfg = _replace(config, split_mode=SPLIT_HYDRAULIC, design_flow=float(mass_flow),
+                   design_temperature=float(temperature), riser_orifices=None,
+                   header_sizes=None, header_lift=0.0)
+    box = 2.0 * (max(abs(center[0]), abs(center[1])) + config.radius + WALL_STUB + 1.0)
+    sketch = AdaptiveMesh.uniform(2, 0.5 * max(box, config.roof_z + 1.0), level=0)
+    plan = _plan(cfg)
+    targets = voronoi_shares(np.asarray(plan.points), cfg.inner_radius + cfg.clearance)
+    limits: dict[str, float] = {}
+    if plan.radii:
+        radii = np.asarray(plan.radii)
+        gaps = np.diff(np.concatenate(([0.0], radii)))
+        spacing = float(np.min(gaps))
+        for group in range(len(radii)):
+            for name in (f"dist_ring_{group}", f"coll_ring_{group}",
+                         f"dist_jumper_{group}", f"coll_jumper_{group}"):
+                limits[name] = max(spacing - RING_GAP, config.diameter)
+    candidates = [cfg.collection]
+    if plan.radii and COLLECTION_MANIFOLD not in candidates:
+        # a ring chain in series pushes every ring's flow through the rings before it;
+        # the manifold feeds them in parallel - the engine tries both and keeps the better
+        candidates.append(COLLECTION_MANIFOLD)
+    designs = []
+    for collection in candidates:
+        trial = _replace(cfg, collection=collection)
+        if [problem for problem in trial.validate() if not problem.startswith(WARNING)]:
+            continue
+        designs.append(_size_and_lift(trial, sketch, center, mass_flow, fluid, targets,
+                                      temperature, tolerance, max_velocity, limits,
+                                      rounds, pressure))
+    if not designs:
+        raise ValueError("no collection of the network can be sized: check the layout")
+
+    def merit(design: HeaderDesign) -> tuple:
+        sizing = design.sizing
+        # feasible first, then the cheaper circuit (the fan), then the lighter one
+        return (not sizing.feasible, sizing.max_velocity if not sizing.feasible else 0.0,
+                sizing.delta_p)
+
+    designs.sort(key=merit)
+    best = designs[0]
+    for other in designs[1:]:
+        best.sizing.notes.append(
+            f"also tried {other.config.collection}: {other.sizing.delta_p:.0f} Pa, header "
+            f"velocity {other.sizing.max_velocity:.1f} m/s"
+            f"{'' if other.sizing.feasible else ' (not feasible)'}")
+    return best
+
+
+def _size_and_lift(cfg, sketch, center, mass_flow, fluid, targets, temperature,
+                   tolerance, max_velocity, limits, rounds, pressure) -> HeaderDesign:
+    """Size one collection's headers and iterate the lift they sit at."""
+    from dataclasses import replace as _replace
+
+    from ..solver.hydraulics import size_headers
+
+    sizing = None
+    lift = cfg.header_lift
+    done = 0
+    for done in range(1, rounds + 1):  # noqa: B007 - the count is reported
+        # the sizing starts from bare risers: the orifices are its output, and a network
+        # carrying the previous round's would be balanced on top of them
+        network = build_pipe_network(sketch, _replace(cfg, riser_orifices=None),
+                                     center=center)
+        hydraulic = network.hydraulic_network()
+        sizing = size_headers(hydraulic, mass_flow, fluid, targets,
+                              temperature=temperature, pressure=pressure,
+                              tolerance=tolerance,
+                              max_velocity=max_velocity, wall=cfg.header_wall,
+                              limits=limits, minimum=cfg.diameter)
+        # the headers that lie in the bed set the lift (the ducts leave the vessel)
+        widest = max((size for group, size in sizing.sizes.items()
+                      if not group.endswith("_duct")), default=cfg.duct_d)
+        new_lift = 0.5 * widest + max(HEADER_COVER * widest, HEADER_COVER_MIN)
+        cfg = _replace(cfg, header_sizes=dict(sizing.sizes), header_lift=new_lift,
+                       riser_orifices=(tuple(float(k) for k in sizing.k_orifice)
+                                       if sizing.orifices_needed else None))
+        if abs(new_lift - lift) < 1e-3 or not sizing.feasible:
+            break
+        lift = new_lift
+    return HeaderDesign(config=cfg, sizing=sizing, lift=cfg.header_lift, rounds=done)

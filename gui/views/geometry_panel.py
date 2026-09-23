@@ -25,12 +25,13 @@ from src.analysis.mesh_plan import (MAX_TREE_LEVEL, MIN_TREE_LEVEL, active_regio
 from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import CylinderGeometry, HeaterConfig
 from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
-                                   COLLECTION_REVERSE, COLLECTION_TWO_LEVEL,
-                                   LAYOUT_GRID, LAYOUT_RADIAL, LAYOUT_RINGS,
-                                   LAYOUT_SPIRAL, LAYOUT_STAGGERED, PIPE_CARBON,
-                                   PIPE_STAINLESS, SPLIT_EQUAL, SPLIT_PATH,
-                                   SPLIT_RING, SPLIT_SECTOR, WARNING,
-                                   PipeNetworkConfig)
+                                   COLLECTION_MANIFOLD, COLLECTION_REVERSE,
+                                   COLLECTION_TWO_LEVEL, LAYOUT_GRID, LAYOUT_RADIAL,
+                                   LAYOUT_RINGS, LAYOUT_SPIRAL, LAYOUT_STAGGERED,
+                                   PIPE_CARBON, PIPE_STAINLESS, SPLIT_EQUAL,
+                                   SPLIT_HYDRAULIC, SPLIT_PATH, SPLIT_RING,
+                                   SPLIT_SECTOR, WARNING, HeaderDesign,
+                                   PipeNetworkConfig, design_headers)
 from src.core.pipes import pipe_surface_power_w_cm2
 from src.solver.fluid import Fluid
 
@@ -88,6 +89,9 @@ class GeometryPanel(QWidget):
         self._adaptive_mesh: AdaptiveMesh | None = None
         #: True when the cell budget stopped the last build short of its targets
         self._budget_short = False
+        #: the header engine's last design and the inputs it was made for
+        self._header_design: HeaderDesign | None = None
+        self._header_key: tuple | None = None
         self.vessel_page = FormPanel()
         self.plant_page = FormPanel()
         self.mesh_page = FormPanel()
@@ -190,7 +194,14 @@ class GeometryPanel(QWidget):
             (("Distributor + collector", COLLECTION_DIRECT),
              ("Reverse return (balanced)", COLLECTION_REVERSE),
              ("Central header", COLLECTION_CENTRAL),
-             ("Two level rings", COLLECTION_TWO_LEVEL)), 1, self._pipe_mode))
+             ("Two level rings", COLLECTION_TWO_LEVEL),
+             ("Radial manifold (rings in parallel)", COLLECTION_MANIFOLD)), 4,
+            self._pipe_mode,
+            tooltip="How the headers connect the risers.  The rings of a chain are in "
+                    "series and every ring's flow crosses the rings before it; the radial "
+                    "manifold feeds them in parallel from a trunk along the inlet "
+                    "diameter.  The header engine tries the chosen one and the manifold "
+                    "and keeps the better"))
         self.pipe_diameter = pipes.add("Pipe outer d [m]", double_spin(
             0.05, 0.01, 0.3, 0.005, 3, tooltip="The pitch of the dense layouts follows it"))
         self.pipe_wall = pipes.add("Wall thickness [mm]", double_spin(
@@ -205,7 +216,6 @@ class GeometryPanel(QWidget):
             0.0, 0.0, 2000.0, 5.0, 1, special="from the material",
             tooltip="Absolute roughness of the tubes, headers and ducts; at the minimum "
                     "the tube material's own value"))
-        self.pipe_duct = pipes.add("Duct d [m]", double_spin(0.15, 0.05, 0.6, 0.05, 3))
         self.pipe_insulated = pipes.add("Insulated headers", check(
             "lagged", False,
             tooltip="A lagged header carries the gas and exchanges nothing with the bed"))
@@ -214,12 +224,44 @@ class GeometryPanel(QWidget):
         self.pipe_azimuth_out = pipes.add("Outlet azimuth [deg]",
                                           double_spin(0.0, 0.0, 360.0, 15.0, 0))
         self.pipe_split = pipes.add("Flow split", combo(
-            (("Equal per branch", SPLIT_EQUAL), ("From path length", SPLIT_PATH),
-             ("Equal per ring main", SPLIT_RING),
-             ("Equal per sector", SPLIT_SECTOR)), 0, self._pipe_mode))
+            (("From the network hydraulics", SPLIT_HYDRAULIC),
+             ("Imposed: equal per branch", SPLIT_EQUAL),
+             ("Imposed: from path length", SPLIT_PATH),
+             ("Imposed: equal per ring main", SPLIT_RING),
+             ("Imposed: equal per sector", SPLIT_SECTOR)), 0, self._pipe_mode,
+            tooltip="How the flow divides between the risers: what the pressures of the "
+                    "network give (the plant), or an imposed rule for a comparison"))
         self.pipe_sectors = pipes.add("Sectors", int_spin(
             4, 1, 16, 1, tooltip="The flow is divided between the sectors about the "
                                  "inlet azimuth"))
+        engine = self.plant_page.section(
+            "Header engine",
+            "The headers are not set by hand: the engine solves the hydraulics of the "
+            "whole network (Darcy-Weisbach, the tees' losses, the draught of the hot "
+            "gas), asks every riser for the share of the flow equal to the share of the "
+            "bed it serves, and picks the header and duct diameters from the nominal pipe "
+            "sizes - as small as the velocity limit allows and as large as pays for "
+            "itself in pressure drop - adding a calibrated orifice at a riser's inlet "
+            "where the headers alone leave it off target.  It lifts the headers into the "
+            "sand by one radius and a cover, and tries the chosen collection and the "
+            "radial manifold.  Build mesh runs it when the plant changed.")
+        self.header_tolerance = engine.add("Flow uniformity [%]", double_spin(
+            5.0, 0.5, 50.0, 0.5, 1, on_change=self._engine_stale,
+            tooltip="Largest deviation of a riser's flow from its target the headers may "
+                    "leave before orifices balance it"))
+        self.header_velocity = engine.add("Max header velocity [m/s]", double_spin(
+            20.0, 3.0, 60.0, 1.0, 1, on_change=self._engine_stale,
+            tooltip="Hot-air headers and ducts are designed at 15-25 m/s: faster costs "
+                    "pressure drop and noise"))
+        self.header_temperature = engine.add("Design gas temperature [°C]", double_spin(
+            500.0, 20.0, 1000.0, 25.0, 0, on_change=self._engine_stale,
+            tooltip="The gas density the headers are sized at; the runs re-solve the "
+                    "hydraulics at the gas's real temperatures"))
+        engine.add_row(button("Size the headers", self.run_header_engine,
+                              "Run the engine now (a few seconds to half a minute)"))
+        self.engine_info = engine.add("Design", hint("not sized yet"))
+        self._engine_caption = engine.form.labelForField(self.engine_info)
+
         pipes.add_row(button("Rebuild the network on the mesh",
                              self.pipe_network_requested.emit,
                              "Voxelise the network on the current mesh (Build mesh "
@@ -297,6 +339,81 @@ class GeometryPanel(QWidget):
 
     # ----------------------------------------------------------- the pipes
     def pipe_network_config(self) -> PipeNetworkConfig:
+        """The network to build: the engine's design when it is current, else the base.
+
+        See :meth:`base_network_config` for the geometry; the design adds the header
+        sizes, the lift, the orifices and possibly another collection.
+        """
+        base = self.base_network_config()
+        if self._header_design is not None and self._header_key == self._engine_key(base):
+            return self._header_design.config
+        return base
+
+    def _engine_key(self, base: PipeNetworkConfig) -> tuple:
+        return (repr(base), round(self.flow.value(), 9), self.fluid.currentIndex(),
+                round(self.circuit_pressure.value(), 9), self.header_tolerance.value(),
+                self.header_velocity.value(), self.header_temperature.value())
+
+    def header_design(self) -> HeaderDesign | None:
+        """The engine's design if it is current (None: stale or never run)."""
+        base = self.base_network_config()
+        if self._header_design is not None and self._header_key == self._engine_key(base):
+            return self._header_design
+        return None
+
+    def _engine_stale(self, *_args) -> None:
+        if self._header_design is not None and self.header_design() is None:
+            self.engine_info.setText("the plant changed: Size the headers, or Build mesh")
+
+    def run_header_engine(self) -> HeaderDesign | None:
+        """Size the headers for the current plant (see the Header engine section)."""
+        from PyQt6.QtWidgets import QApplication
+
+        base = self.base_network_config()
+        if base.split_mode != SPLIT_HYDRAULIC:
+            self.engine_info.setText("the flow split is imposed: the headers keep the "
+                                     "base size (choose 'From the network hydraulics')")
+            return None
+        cyl = self.cylinder()
+        self.engine_info.setText("sizing the headers...")
+        QApplication.processEvents()
+        try:
+            design = design_headers(
+                base, (cyl.center_x, cyl.center_y), self.pipe_mass_flow(),
+                self.circuit_fluid(), tolerance=self.header_tolerance.value() / 100.0,
+                max_velocity=self.header_velocity.value(),
+                temperature=self.header_temperature.value() + 273.15,
+                pressure=self.circuit_pressure_pa())
+        except ValueError as exc:
+            self.engine_info.setText(f"cannot size: {exc}")
+            return None
+        self._header_design = design
+        self._header_key = self._engine_key(base)
+        chosen = design.config.collection
+        if chosen != base.collection:
+            # the engine found the other collection better: say it where it is set
+            index = self.pipe_collection.findData(chosen)
+            self.pipe_collection.blockSignals(True)
+            self.pipe_collection.setCurrentIndex(index)
+            self.pipe_collection.blockSignals(False)
+            self._header_key = self._engine_key(self.base_network_config())
+        sizing = design.sizing
+        brief = [f"{chosen}: headers {min(sizing.sizes.values()) * 1000:.0f}-"
+                 f"{max(sizing.sizes.values()) * 1000:.0f} mm, {design.lift * 1000:.0f} mm "
+                 f"into the sand",
+                 f"{sizing.delta_p:.0f} Pa, header velocity up to "
+                 f"{sizing.max_velocity:.1f} m/s, flow on target within "
+                 f"{100 * sizing.maldistribution:.1f} %"
+                 + (" with orifices" if sizing.orifices_needed else ""),
+                 f"{INFO} details" + ("" if sizing.feasible else " - not feasible")]
+        self.engine_info.setText("\n".join(brief))
+        tooltip = rich_lines(design.details())
+        self.engine_info.setToolTip(tooltip)
+        self._engine_caption.setToolTip(tooltip)
+        self._engine_caption.setText(f"Design {INFO}")
+        return design
+
+    def base_network_config(self) -> PipeNetworkConfig:
         """The buried-pipe network the panel describes, in the current vessel.
 
         The active band is the *storage* band of the cylinder: the risers span the
@@ -318,12 +435,14 @@ class GeometryPanel(QWidget):
             layout=self.pipe_layout.currentData(),
             collection=self.pipe_collection.currentData(),
             n_rings=int(self.pipe_rings.value()), n_files=int(self.pipe_files.value()),
-            duct_diameter=self.pipe_duct.value(),
+            duct_diameter=0.15,
             insulated_headers=self.pipe_insulated.isChecked(),
             azimuth_in=self.pipe_azimuth_in.value(),
             azimuth_out=self.pipe_azimuth_out.value(),
             split_mode=self.pipe_split.currentData(),
-            n_sectors=int(self.pipe_sectors.value()))
+            n_sectors=int(self.pipe_sectors.value()),
+            design_flow=max(float(self.flow.value()), 1e-6),
+            design_temperature=self.header_temperature.value() + 273.15)
 
     def pipe_mass_flow(self) -> float:
         """Total mass flow of the gas circuit [kg/s]."""

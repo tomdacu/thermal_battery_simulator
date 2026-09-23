@@ -19,6 +19,9 @@ from ..widgets import button, combo
 
 _AXES = {"x": (0, 1.0, 0.0, 0.0), "y": (1, 0.0, 1.0, 0.0), "z": (2, 0.0, 0.0, 1.0)}
 
+#: the entry of the field selector that shows the vessel and the pipes, not a field
+GEOMETRY = "Geometry"
+
 
 class VizView(QWidget):
     """Embeds a PyVista plotter and rebuilds the scene on demand.
@@ -37,7 +40,6 @@ class VizView(QWidget):
         self._mesh = None
         self._battery = None
         self._network = None
-        self._mode = "field"
         self._disabled_reason = None
         if os.environ.get("THERMAL_DISABLE_3D", "") in ("1", "true", "yes"):
             self._disabled_reason = "3D view disabled by THERMAL_DISABLE_3D"
@@ -71,11 +73,13 @@ class VizView(QWidget):
         outer.setSpacing(2)
 
         top = QHBoxLayout()
-        self.field_combo = combo(tuple((f, f) for f in FIELD_ARRAYS), 0, self.render)
+        self.field_combo = combo(tuple((f, f) for f in FIELD_ARRAYS)
+                                 + ((GEOMETRY, GEOMETRY),), 0, self.render)
         self.axis_combo = combo((("x", "x"), ("y", "y"), ("z", "z")), 2, self.render)
         self.reset_btn = button("Reset camera", self._reset_camera,
                                 "Restore the default point of view")
-        self.field_combo.setToolTip("Quantity shown on the cut plane")
+        self.field_combo.setToolTip("Quantity shown on the cut plane, or the geometry "
+                                    "of the vessel and of the pipe network")
         self.axis_combo.setToolTip("Axis of the cutting plane")
         top.addWidget(QLabel("Field"))
         top.addWidget(self.field_combo, 1)
@@ -126,7 +130,11 @@ class VizView(QWidget):
         fraction = min(max(self.slice_slider.value() / 100.0, 0.02), 0.98)
         opacity = self.opacity_slider.value() / 100.0
         self.plotter.clear()
-        if self._mode == "geometry" and self._battery is not None:
+        geometry = self.field_combo.currentData() == GEOMETRY
+        if geometry and self._battery is None:
+            self.plotter.add_text("no geometry yet: edit the vessel or press Show "
+                                  "geometry", position="upper_left", font_size=10)
+        elif geometry:
             length = (domain_extent(mesh) if mesh else
                       (self._battery.cylinder.r_shell * 2 + 1,
                        self._battery.cylinder.r_shell * 2 + 1,
@@ -170,13 +178,21 @@ class VizView(QWidget):
         return 1.0
 
     # -------------------------------------------------------------- preview
+    def _select(self, entry: str) -> None:
+        """Select an entry of the field selector without rendering twice."""
+        index = self.field_combo.findData(entry)
+        if index >= 0 and index != self.field_combo.currentIndex():
+            self.field_combo.blockSignals(True)
+            self.field_combo.setCurrentIndex(index)
+            self.field_combo.blockSignals(False)
+
     def show_mesh(self, mesh, field: str | None = None) -> None:
+        """Show a field of ``mesh`` (the selected one, Temperature after the geometry)."""
         self._mesh = mesh
-        self._mode = "field"
         if field:
-            index = self.field_combo.findData(field)
-            if index >= 0:
-                self.field_combo.setCurrentIndex(index)
+            self._select(field)
+        elif self.field_combo.currentData() == GEOMETRY:
+            self._select(FIELD_ARRAYS[0])
         self.render()
 
     def show_geometry(self, battery, mesh=None, network=None,
@@ -191,7 +207,7 @@ class VizView(QWidget):
         self._battery = battery
         if network is not None or mesh is not None:
             self._network = network
-        self._mode = "geometry"
+        self._select(GEOMETRY)
         if mesh is not None:
             self._mesh = mesh
         if self.plotter is not None and reset_camera:

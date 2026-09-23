@@ -422,6 +422,10 @@ class GasSegment:
     cells: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     length: np.ndarray = field(default_factory=lambda: np.empty(0))
     exchanges: bool = True
+    #: the pipe of the hydraulic network this segment is, and whether the gas runs
+    #: along the pipe's nominal direction (-1: no hydraulic network behind it)
+    pipe: int = -1
+    forward: bool = True
 
 
 @dataclass
@@ -545,6 +549,11 @@ class FluidLoop:
     segment_temperatures: np.ndarray | None = field(default=None, repr=False)
     #: wetted area [m^2] whose cell was too small for the well model, last march
     well_area_uncorrected: float = field(default=0.0, repr=False)
+    #: the circuit's hydraulics (:mod:`src.solver.hydraulics`): with it the flow of
+    #: every segment follows the pressures of the network at the gas's own density,
+    #: re-solved whenever the gas properties are refreshed
+    hydraulic: object | None = None
+    hydraulic_state: object | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------ helpers
     def _flow_split(self) -> np.ndarray:
@@ -716,7 +725,47 @@ class FluidLoop:
                     kept = temperatures if temperatures is not None else fresh
                     moved = np.abs(fresh - kept) > PROPERTY_STEP
                     self.segment_temperatures = np.where(moved, fresh, kept)
+                    if self.hydraulic is not None and (moved.any()
+                                                       or self.hydraulic_state is None):
+                        self._rebalance(graph)
         return self._result(graph, marches, nodes, t_in, wall_flat, volume)
+
+    def _rebalance(self, graph: GasGraph) -> None:
+        """Re-solve the hydraulics at the gas temperatures and move the segment flows.
+
+        The next march uses them: the flows lag the gas by one march, like its
+        properties.  A segment whose flow would reverse keeps its direction with no flow
+        (the graph's order is fixed), and the result says so.
+        """
+        temps = np.full(len(self.hydraulic.pipes), float(self.fluid_reference_t()))
+        for index, segment in enumerate(graph.segments):
+            if segment.pipe >= 0 and self.segment_temperatures is not None:
+                temps[segment.pipe] = self.segment_temperatures[index]
+        initial = None
+        if self.hydraulic_state is not None:
+            initial = self.hydraulic_state.flow
+        state = self.hydraulic.solve(self.mass_flow, self.fluid, temps, self.pressure,
+                                     initial=initial)
+        self.hydraulic_state = state
+        for segment in graph.segments:
+            if segment.pipe < 0:
+                continue
+            m = float(state.flow[segment.pipe]) * (1.0 if segment.forward else -1.0)
+            if m < 0.0:
+                # the gas now runs the other way along this pipe (a ring fed at both
+                # ends moves its stagnation point): turn the segment round
+                segment.source, segment.target = segment.target, segment.source
+                segment.cells = segment.cells[::-1].copy()
+                segment.length = np.asarray(segment.length)[::-1].copy()
+                segment.forward = not segment.forward
+                m = -m
+            segment.flow = m / self.mass_flow if self.mass_flow > 0 else 0.0
+
+    def fluid_reference_t(self) -> float:
+        """A gas temperature for a pipe without a march of its own [K]."""
+        if self.segment_temperatures is not None and self.segment_temperatures.size:
+            return float(np.mean(self.segment_temperatures))
+        return float(self.t_in or 773.15)
 
     def _inlet(self, marches: list, wall_flat: np.ndarray, graph: GasGraph) -> float:
         """The loop inlet: prescribed, or the one that makes the bed take ``Q_ext``."""
@@ -788,6 +837,9 @@ class FluidLoop:
                                fluid, self.roughness, self.fittings_k)
                  for run, fraction in zip(self.runs, split, strict=True)]
         delta_p = float(np.mean(drops)) if drops else 0.0
+        if self.hydraulic_state is not None:
+            # the whole circuit solved: the drop is the network's, inlet to outlet
+            delta_p = float(self.hydraulic_state.delta_p)
         result.delta_p = delta_p
         result.pressure = float(self.pressure)
         result.fan_power = fan_power(self.mass_flow, delta_p, fluid, self.fan_efficiency)

@@ -30,7 +30,7 @@ from src.analysis.mesh_plan import plan_regions
 from src.core.adaptive_mesh import AdaptiveMesh
 from src.core.geometry import BatteryGeometry
 from src.core.materials import MaterialManager
-from src.core.pipe_network import build_pipe_network
+from src.core.pipe_network import SPLIT_HYDRAULIC, build_pipe_network
 from src.io.state import StateError, StateManager
 from src.viz.scene import export_vtk, grid_lines
 
@@ -255,6 +255,16 @@ class ThermalBatteryGUI(QMainWindow):
             self.log("[mesh] a simulation is running: the mesh is being read")
             return
         self._refresh_plan()
+        panel = self.geometry_panel
+        if (panel.base_network_config().split_mode == SPLIT_HYDRAULIC
+                and panel.header_design() is None):
+            # the plant changed since the headers were sized: size them for this one
+            self.statusBar().showMessage("sizing the headers of the pipe network...")
+            design = panel.run_header_engine()
+            if design is not None:
+                self.log(f"[engine] {design.summary()}")
+                for line in design.details()[1:]:
+                    self.log(f"[engine] {line}")
         try:
             battery = self._battery_from_panels()
             mesh = self.geometry_panel.build_mesh()

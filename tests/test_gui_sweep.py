@@ -229,9 +229,13 @@ def test_three_d_view_renders_every_field_with_a_headless_plotter(window):
         view.axis_combo.setCurrentIndex(0)
         view.slice_slider.setValue(40)
         view.opacity_slider.setValue(30)
-        assert view._mode == "geometry"
+        assert view.field_combo.currentData() == "Geometry"
         view.show_mesh(window.mesh)
-        assert view._mode == "field"
+        assert view.field_combo.currentData() == "Temperature"
+        # the geometry is one entry of the selector, and the fields come back from it
+        view.field_combo.setCurrentIndex(view.field_combo.findData("Geometry"))
+        view.field_combo.setCurrentIndex(view.field_combo.findData("Conductivity"))
+        assert view.field_combo.currentData() == "Conductivity"
     finally:
         view.plotter = None
         plotter.close()
