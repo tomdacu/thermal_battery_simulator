@@ -4,10 +4,16 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt
+import numpy as np
+
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QSpinBox,
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
@@ -142,6 +148,22 @@ class ThermalBatteryGUI(QMainWindow):
         self.run_btn.clicked.connect(self.run)
         self.cancel_btn.clicked.connect(self.controller.cancel)
         self.geometry_panel.mesh_changed.connect(self._update_mesh_info)
+        # the vessel, the circuit and the pipes redraw the preview as they change: a short
+        # timer folds a burst of edits (a spin box held down) into one redraw
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(250)
+        self._preview_timer.timeout.connect(self._geometry_edited)
+        for index in range(self.geometry_panel.tabs.count()):
+            if self.geometry_panel.tabs.tabText(index) == "Mesh":
+                continue
+            tab = self.geometry_panel.tabs.widget(index)
+            for widget in tab.findChildren((QDoubleSpinBox, QSpinBox)):
+                widget.valueChanged.connect(self._preview_timer.start)
+            for widget in tab.findChildren(QComboBox):
+                widget.currentIndexChanged.connect(self._preview_timer.start)
+            for widget in tab.findChildren(QCheckBox):
+                widget.toggled.connect(self._preview_timer.start)
         self.materials_panel.storage_material.currentIndexChanged.connect(
             self.materials_panel.refresh_info)
         self.materials_panel.insulation_material.currentIndexChanged.connect(
@@ -183,15 +205,17 @@ class ThermalBatteryGUI(QMainWindow):
             battery = self._battery_from_panels()
         except ValueError:
             return
-        plans = plan_regions(battery, MaterialManager())
+        # the counts of the Mesh tab are the layer rule; the plan adds what a count
+        # cannot know - a surface film finer than the count (one cell per layer here,
+        # so only a film can bind)
+        plans = plan_regions(battery, MaterialManager(), cells_per_layer=1.0)
         panel = self.geometry_panel
-        pipe = panel.pipe_diameter.value() / max(panel.cells_sheath.value(), 1)
-        rows = [f"{plan.name} {plan.target * 1000:.0f} mm" for plan in plans]
-        rows.append(f"tube wall {pipe * 1000:.0f} mm "
-                    f"({panel.pipe_diameter.value() * 1000:.0f} mm d / "
-                    f"{panel.cells_sheath.value()} cells)")
-        panel.set_plan_targets({plan.name: plan.target for plan in plans},
-                               " | ".join(rows))
+        panel.set_plan_targets({plan.name: plan.target for plan in plans})
+        targets: dict[str, float] = {}
+        for region in panel.mesh_regions():
+            targets[region.name] = min(targets.get(region.name, np.inf), region.target)
+        panel.plan_info.setText(" | ".join(f"{name} {size * 1000:.0f} mm"
+                                           for name, size in targets.items()))
 
     @safe_slot
     def build_mesh(self) -> None:
@@ -240,7 +264,9 @@ class ThermalBatteryGUI(QMainWindow):
             panel.set_pipe_network(None, "no mesh: build the mesh first")
             return None
         try:
-            network = build_pipe_network(self.mesh, panel.pipe_network_config())
+            cyl = panel.cylinder()
+            network = build_pipe_network(self.mesh, panel.pipe_network_config(),
+                                         center=(cyl.center_x, cyl.center_y))
             report = network.paint(self.mesh)
         except ValueError as exc:
             panel.set_pipe_network(None, f"invalid: {exc}")
@@ -262,15 +288,46 @@ class ThermalBatteryGUI(QMainWindow):
         self._refresh_results()
         self.statusBar().showMessage("Pipe network painted")
 
+    def preview_network(self):
+        """The network the Pipes tab describes *now*, for drawing only (None if invalid).
+
+        It is laid out on a throw-away tree of eight leaves - the centrelines do not
+        depend on the mesh, and rasterising them on eight cells costs milliseconds - so
+        the preview follows every edit without a mesh, and without touching the network
+        painted on the run's mesh.
+        """
+        panel = self.geometry_panel
+        cyl = panel.cylinder()
+        box = max(panel.domain())
+        try:
+            sketch = AdaptiveMesh.uniform(2, 0.5 * box, level=0)
+            return build_pipe_network(sketch, panel.pipe_network_config(),
+                                      center=(cyl.center_x, cyl.center_y))
+        except ValueError as exc:
+            self.statusBar().showMessage(f"pipe network: {exc}")
+            return None
+
     @safe_slot
-    def preview_geometry(self) -> None:
+    def preview_geometry(self, quiet: bool = False) -> None:
+        """Draw the vessel and the network as the panels describe them now."""
         try:
             self.battery = self._battery_from_panels()
         except ValueError as exc:
+            if quiet:
+                self.statusBar().showMessage(f"Geometry error: {exc}")
+                return
             QMessageBox.critical(self, "Geometry error", str(exc))
             return
-        self.viz.show_geometry(self.battery, self.mesh,
-                               network=self.geometry_panel.pipe_network())
+        self.viz.show_geometry(self.battery, None, network=self.preview_network(),
+                               reset_camera=not quiet)
+
+    @safe_slot
+    def _geometry_edited(self) -> None:
+        """A vessel, circuit or pipe setting changed: redraw, and say the mesh is old."""
+        if self.mesh is not None:
+            self.statusBar().showMessage("the geometry changed: press Build mesh to "
+                                         "simulate it")
+        self.preview_geometry(quiet=True)
 
     @safe_slot
     def find_auto_mesh(self) -> None:
@@ -306,7 +363,8 @@ class ThermalBatteryGUI(QMainWindow):
                     **self.solver_panel.losses_settings()},
             transient=self.analysis_panel.transient_settings(),
             initial_condition=self.analysis_panel.initial_condition(),
-            power_profile=self.analysis_panel.power_profile(),
+            power_profile=self.analysis_panel.power_profile(
+                self.battery.heaters.power_w),
             extraction_profile=self.analysis_panel.extraction_profile(),
             start_from_steady=self.analysis_panel.wants_steady_initial_condition(),
             pipe_network=self.geometry_panel.pipe_network(),
@@ -413,9 +471,7 @@ class ThermalBatteryGUI(QMainWindow):
             self.statusBar().showMessage(f"automesh {state}")
             return
         loop = self.controller.last_loop
-        if analysis == "losses":
-            self.log(f"[losses] converged={result.converged} iterations={result.iterations} "
-                     f"power={result.power / 1000:.2f} kW")
+        if analysis == "standby":
             self.results.update_energy(self.mesh, losses=result,
                                        ambient=self.battery.t_ambient,
                                        radiation=self._radiation(), loop=loop)
@@ -449,8 +505,7 @@ class ThermalBatteryGUI(QMainWindow):
 
     @safe_slot
     def _on_analysis_changed(self, analysis: str) -> None:
-        self.run_btn.setText({"steady": "Run steady state",
-                              "losses": "Run losses analysis",
+        self.run_btn.setText({"standby": "Run steady standby",
                               "transient": "Run transient"}[analysis])
 
     @safe_slot

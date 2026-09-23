@@ -29,7 +29,6 @@ grid.
 """
 from __future__ import annotations
 
-from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -156,8 +155,9 @@ def cell_of(mesh: Mesh3D | AdaptiveMesh, x: float, y: float, z: float) -> int:
     corner = tuple(int(np.ceil(value / size)) - 1 for value in (x, y, z))
     if not all(0 <= index < n for index in corner):
         return -1
-    leaf = mesh.tree.locate(corner[0] + 0.5, corner[1] + 0.5, corner[2] + 0.5)
-    return int(bisect_left(mesh.tree.leaves, leaf))
+    # the tree's own walk from the finest cell, and its own position table
+    index = mesh.tree._locate(corner[0], corner[1], corner[2])
+    return int(index)
 
 
 def cell_index(mesh: Mesh3D | AdaptiveMesh, x: float, y: float,
@@ -208,8 +208,14 @@ def rasterize_pipe(mesh: Mesh3D | AdaptiveMesh, points: Sequence[Sequence[float]
             if index >= 0:
                 lengths[index] = lengths.get(index, 0.0) + (t1 - t0) * span
 
-    elevation = flat_cells(cell_centres(mesh)[2])
-    order = sorted(lengths, key=lambda idx: float(elevation[idx]))
+    if isinstance(mesh, Mesh3D):
+        elevation = flat_cells(cell_centres(mesh)[2])
+        order = sorted(lengths, key=lambda idx: float(elevation[idx]))
+    else:
+        # only the leaves the run crossed: the centre of one leaf is its corner plus half
+        # its edge, in finest cells
+        leaves = mesh.tree.leaves
+        order = sorted(lengths, key=lambda idx: leaves[idx].z + 0.5 * leaves[idx].size)
     run.cells = np.asarray(order, dtype=np.int64)
     run.length = np.asarray([lengths[idx] for idx in order], dtype=float)
     return run

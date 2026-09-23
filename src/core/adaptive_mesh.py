@@ -84,16 +84,34 @@ class RefinementBand:
     low: tuple[float, float, float]
     high: tuple[float, float, float]
     size: float
+    #: a *radial* band: the annulus ``r_inner <= r <= r_outer`` about the vertical axis
+    #: through ``axis`` (x, y), between ``low[2]`` and ``high[2]``; ``low``/``high`` are
+    #: then its bounding box.  ``None`` = the band is the box itself.  A cylindrical
+    #: vessel is annuli and discs: covering them with axis-aligned boxes refined the air
+    #: at the corners and missed the ring at 45 degrees
+    axis: tuple[float, float] | None = None
+    r_inner: float = 0.0
+    r_outer: float = 0.0
 
     def intersects(self, leaf: Leaf, physical_size: float) -> bool:
-        """True when the leaf's box overlaps this band (a touch on a plane counts)."""
-        corners = (leaf.x, leaf.y, leaf.z)
-        for axis in range(3):
-            low = corners[axis] * physical_size
-            high = (corners[axis] + leaf.size) * physical_size
-            if low >= self.high[axis] or high <= self.low[axis]:
-                return False
-        return True
+        """True when the leaf's box overlaps this band (a touch on a plane does not)."""
+        corner = np.array([[leaf.x, leaf.y, leaf.z]], dtype=float) * physical_size
+        edge = np.array([leaf.size * physical_size])
+        return bool(self.touching(corner, corner + edge[:, None])[0])
+
+    def touching(self, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+        """Which of the boxes ``low[i]..high[i]`` (``(n, 3)`` [m]) overlap the band."""
+        hit = np.all((low < np.asarray(self.high)) & (high > np.asarray(self.low)), axis=1)
+        if self.axis is None:
+            return hit
+        cx, cy = self.axis
+        # nearest and farthest distance of each box's plan rectangle from the axis
+        dx = np.maximum(np.maximum(low[:, 0] - cx, cx - high[:, 0]), 0.0)
+        dy = np.maximum(np.maximum(low[:, 1] - cy, cy - high[:, 1]), 0.0)
+        near = np.hypot(dx, dy)
+        far = np.hypot(np.maximum(np.abs(low[:, 0] - cx), np.abs(high[:, 0] - cx)),
+                       np.maximum(np.abs(low[:, 1] - cy), np.abs(high[:, 1] - cy)))
+        return hit & (near < self.r_outer) & (far > self.r_inner)
 
 
 def _check_bands(bands: Sequence[RefinementBand]) -> None:
@@ -245,6 +263,7 @@ class AdaptiveMesh:
         """Leaf edges, volumes and the "touches a box face" mask of the current tree."""
         self.sizes = self.tree.cell_sizes() * self.physical_size
         self.V = self.sizes ** 3
+        self._h_char = np.cbrt(self.V)
         n = self.tree.n
         self.on_box_face = np.array(
             [any(corner == 0 or corner + leaf.size == n
@@ -299,23 +318,34 @@ class AdaptiveMesh:
         that scales the plan does.
         """
         _check_bands(bands)
+        sizes = np.array([band.size for band in bands], dtype=float)
 
-        def indicator(leaf: Leaf) -> float:
-            target = min((band.size for band in bands
-                          if band.intersects(leaf, self.physical_size)), default=np.inf)
-            return 1.0 if leaf.size * self.physical_size > target else 0.0
+        def marks() -> np.ndarray:
+            """1 for every leaf still larger than the finest band it touches, else 0.
 
-        if max_cells is None:
-            self.refine(indicator, 0.5, levels=self.tree.max_level)
-            return
+            The same rule as :meth:`RefinementBand.intersects` (a touch on a plane does not
+            count), evaluated for all the leaves at once: with one box per riser the band
+            list is long, and a per-leaf loop over it was a cost of its own.
+            """
+            corner = np.array([(leaf.x, leaf.y, leaf.z) for leaf in self.tree.leaves],
+                              dtype=float).reshape(-1, 3) * self.physical_size
+            edge = self.tree.cell_sizes() * self.physical_size
+            upper = corner + edge[:, None]
+            target = np.full(edge.size, np.inf)
+            for index, band in enumerate(bands):
+                touching = band.touching(corner, upper)
+                np.minimum(target, np.where(touching, sizes[index], np.inf), out=target)
+            levels = self.tree.cell_sizes() > 1.0      # a finest leaf cannot split
+            return ((edge > target) & levels).astype(float)
+
         for _ in range(self.tree.max_level):
-            marked = sum(1 for leaf in self.tree.leaves
-                         if leaf.level > 0 and indicator(leaf) > 0.5)
-            if marked == 0:
+            marked = marks()
+            count = int(np.count_nonzero(marked))
+            if count == 0:
                 return                        # every leaf already meets its band
-            if self.n_cells + 7 * marked > max_cells:
+            if max_cells is not None and self.n_cells + 7 * count > max_cells:
                 return                        # the round would not fit: stop here
-            self.refine(indicator, 0.5)
+            self.refine(marked, 0.5)
 
     def refine(self, indicator: np.ndarray | Callable[[Leaf], float], threshold: float,
                levels: int = 1) -> None:
@@ -441,7 +471,7 @@ class AdaptiveMesh:
     @property
     def h_char(self) -> np.ndarray:
         """Characteristic leaf size ``V^(1/3)`` [m], as on :class:`Mesh3D`."""
-        return np.cbrt(self.V)
+        return self._h_char
 
     def fixed_leaves(self) -> dict[int, float]:
         """The Dirichlet set as ``{leaf position: temperature}``.
@@ -976,9 +1006,10 @@ class AdaptiveMesh:
     def summary(self) -> str:
         levels = ", ".join(f"L{level}: {count}"
                            for level, count in self.level_histogram().items())
+        # no face count: the face list costs seconds on a large tree and the summary is
+        # printed after every build, before anything needs the faces
         return (f"adaptive mesh: {self.tree.n_cells} leaves ({levels}), "
-                f"leaf edge {self.sizes.min():.4f}-{self.sizes.max():.4f} m, "
-                f"{len(self.tree.faces())} faces")
+                f"leaf edge {self.sizes.min():.4f}-{self.sizes.max():.4f} m")
 
 
 def _ancestor_leaf(leaf: Leaf, ancestors: dict[Leaf, int], max_level: int) -> int:

@@ -28,7 +28,6 @@ _IC_MATERIALS = (
     ("Concrete", int(MaterialID.CONCRETE), 20.0),
     ("Pipes", int(MaterialID.TUBES), 20.0),
 )
-_POWER_UNITS = (("W", 1.0), ("kW", 1e3), ("MW", 1e6))
 _DURATION_UNITS = (("seconds", 1.0), ("minutes", 60.0), ("hours", 3600.0), ("days", 86400.0))
 
 
@@ -55,17 +54,16 @@ class AnalysisPanel(QWidget):
     # ------------------------------------------------------------------ type
     def _build_type_tab(self) -> None:
         panel = FormPanel()
-        self.radio_steady = QRadioButton("Steady state (the circuit at its power)")
-        self.radio_losses = QRadioButton("Losses analysis (hold a target temperature)")
-        self.radio_transient = QRadioButton("Transient (power and extraction profiles)")
+        self.radio_standby = QRadioButton("Steady standby (hold the storage at a temperature)")
+        self.radio_transient = QRadioButton("Transient (charge / discharge profiles)")
         self.type_group = QButtonGroup(self)
-        for radio in (self.radio_steady, self.radio_losses, self.radio_transient):
+        for radio in (self.radio_standby, self.radio_transient):
             self.type_group.addButton(radio)
             panel.add_row(radio)
-        self.losses_group = QGroupBox("Losses target")
+        self.losses_group = QGroupBox("Standby")
         losses = FormPanel(self.losses_group)
         self.losses_target = losses.add("Mean storage T [°C]",
-                                        double_spin(400.0, 20.0, 1200.0, 10.0, 1))
+                                        double_spin(500.0, 20.0, 1200.0, 10.0, 1))
         self.transient_group = QGroupBox("Time stepping")
         transient = FormPanel(self.transient_group)
         self.duration = transient.add("Duration", double_spin(10.0, 0.01, 100000.0, 1.0, 2))
@@ -77,13 +75,17 @@ class AnalysisPanel(QWidget):
         self.save_field = transient.add("Full fields", check("save T field per sample", False))
         panel.add_row(self.losses_group)
         panel.add_row(self.transient_group)
-        for radio in (self.radio_steady, self.radio_losses, self.radio_transient):
+        for radio in (self.radio_standby, self.radio_transient):
             radio.toggled.connect(self._update_visibility)
-        self.radio_steady.setChecked(True)
-        panel.add_hint("Every analysis runs the gas loop of Geometry > Gas circuit "
-                       "through the painted pipes.  Steady: the resistors' power held until "
-                       "the bed settles.  Losses: the power that holds the target.  "
-                       "Transient: the Power and Extraction profiles drive the loop.  "
+        self.radio_standby.setChecked(True)
+        panel.add_hint("Steady standby: the only steady state a storage has is the one "
+                       "where the power in equals the losses, so it is asked as a "
+                       "temperature - the bed held at T - and the answer is the power "
+                       "that holds it, i.e. the standby losses, with the field that goes "
+                       "with them.  (A steady state at a charging power would sit at "
+                       "whatever temperature makes the losses that large: thousands of "
+                       "degrees for a real plant.)  Transient: the resistors' power "
+                       "(Power) and the exchanger (Extraction) drive the gas loop.  "
                        "Ambient and ground come from Materials > Conditions.")
         self.tabs.addTab(panel, "Type")
 
@@ -94,16 +96,12 @@ class AnalysisPanel(QWidget):
     @safe_slot
     def _update_visibility(self) -> None:
         state = self.analysis_type()
-        self.losses_group.setVisible(state == "losses")
+        self.losses_group.setVisible(state == "standby")
         self.transient_group.setVisible(state == "transient")
         self.analysis_changed.emit(state)
 
     def analysis_type(self) -> str:
-        if self.radio_losses.isChecked():
-            return "losses"
-        if self.radio_transient.isChecked():
-            return "transient"
-        return "steady"
+        return "transient" if self.radio_transient.isChecked() else "standby"
 
     # ------------------------------------------------------- initial condition
     def _build_initial_tab(self) -> None:
@@ -111,7 +109,7 @@ class AnalysisPanel(QWidget):
         self.radio_uniform = QRadioButton("Uniform temperature")
         self.radio_by_material = QRadioButton("Temperature per material")
         self.radio_current = QRadioButton("Current field (last result or loaded state)")
-        self.radio_from_steady = QRadioButton("Start from the steady solution")
+        self.radio_from_steady = QRadioButton("Start from the standby state (Type > Standby T)")
         self.ic_group = QButtonGroup(self)
         for radio in (self.radio_uniform, self.radio_by_material, self.radio_current,
                       self.radio_from_steady):
@@ -158,15 +156,14 @@ class AnalysisPanel(QWidget):
     def _build_power_tab(self) -> None:
         panel = FormPanel()
         self.power_off = QRadioButton("Off")
-        self.power_constant = QRadioButton("Constant power")
+        self.power_constant = QRadioButton("Constant: the circuit's rated power "
+                                           "(Geometry > Gas circuit)")
         self.power_schedule = QRadioButton("Scheduled profile")
         self.power_csv = QRadioButton("From CSV (t, P)")
         self.power_group = QButtonGroup(self)
         for radio in (self.power_off, self.power_constant, self.power_schedule, self.power_csv):
             self.power_group.addButton(radio)
             panel.add_row(radio)
-        self.power_value = panel.add("Power", double_spin(5.0, 0.0, 1e6, 1.0, 2))
-        self.power_unit = panel.add("Unit", combo(_POWER_UNITS, 1))
         self.schedule = QTableWidget(3, 2)
         self.schedule.setHorizontalHeaderLabels(["Time [s]", "Power [W]"])
         self.schedule.setMaximumHeight(150)
@@ -187,8 +184,6 @@ class AnalysisPanel(QWidget):
 
     @safe_slot
     def _update_power_visibility(self) -> None:
-        self.power_value.setEnabled(self.power_constant.isChecked())
-        self.power_unit.setEnabled(self.power_constant.isChecked())
         self.schedule.setEnabled(self.power_schedule.isChecked())
         self.csv_path.setEnabled(self.power_csv.isChecked())
 
@@ -197,7 +192,8 @@ class AnalysisPanel(QWidget):
         if path:
             self.csv_path.setText(path)
 
-    def power_profile(self) -> PowerProfile:
+    def power_profile(self, rated_power: float = 0.0) -> PowerProfile:
+        """The resistors' power over time [W]; ``rated_power`` is the circuit's rating."""
         if self.power_off.isChecked():
             return PowerProfile(mode="off")
         if self.power_schedule.isChecked():
@@ -210,8 +206,7 @@ class AnalysisPanel(QWidget):
             return PowerProfile(mode="schedule", times=times, powers=powers)
         if self.power_csv.isChecked():
             return PowerProfile(mode="csv", csv_path=self.csv_path.text())
-        return PowerProfile(mode="constant",
-                            constant_power=self.power_value.value() * self.power_unit.currentData())
+        return PowerProfile(mode="constant", constant_power=float(rated_power))
 
     # --------------------------------------------------------- extraction
     def _build_extraction_tab(self) -> None:
@@ -225,15 +220,16 @@ class AnalysisPanel(QWidget):
             self.extract_group.addButton(radio)
             panel.add_row(radio)
         self.extract_power_value = panel.add("Power [kW]", double_spin(
-            5.0, 0.0, 100000.0, 1.0, 2,
+            100.0, 0.0, 100000.0, 10.0, 1,
             tooltip="Heat the exchanger takes out of the gas: the loop solves the "
                     "temperature the gas re-enters the bed at, and the run stops when "
                     "the bed can no longer give that power"))
         self.extract_return_t = panel.add("Return T [°C]", double_spin(
             60.0, -20.0, 400.0, 5.0, 1,
             tooltip="Temperature the exchanger returns the gas at (40-70 degC in the "
-                    "reference plants): the power is whatever the bed gives the gas, and "
-                    "the resistors are off"))
+                    "reference plants).  Return-temperature mode: the power is whatever "
+                    "the bed gives the gas.  Power mode: the coldest the gas may come "
+                    "back - a power the bed can only give with colder gas ends the run"))
         panel.add_hint("The exchanger sits on the gas circuit of Geometry > Gas circuit: "
                        "the power profile heats the gas, the extraction cools it, and the "
                        "loop carries the difference through the pipe walls.")
@@ -246,14 +242,16 @@ class AnalysisPanel(QWidget):
     @safe_slot
     def _update_extraction_visibility(self) -> None:
         self.extract_power_value.setEnabled(self.extract_power.isChecked())
-        self.extract_return_t.setEnabled(self.extract_return.isChecked())
+        self.extract_return_t.setEnabled(not self.extract_off.isChecked())
 
     def extraction_profile(self) -> ExtractionProfile:
         t_return = c_to_k(self.extract_return_t.value())
         if self.extract_power.isChecked():
+            # the exchanger cannot return the gas colder than its return temperature: a
+            # power the bed can only give with colder gas ends the discharge
             return ExtractionProfile(mode="power",
                                      power=self.extract_power_value.value() * 1000.0,
-                                     t_inlet=t_return)
+                                     t_inlet=t_return, t_return_min=t_return)
         if self.extract_return.isChecked():
             return ExtractionProfile(mode="return_temperature", t_inlet=t_return)
         return ExtractionProfile(mode="off", t_inlet=t_return)

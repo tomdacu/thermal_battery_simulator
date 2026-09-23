@@ -60,7 +60,7 @@ def test_window_builds_the_mesh_with_the_panel_defaults(window):
 def test_run_config_is_read_from_the_widgets(window):
     window.build_mesh()
     config = window._run_config()
-    assert config.analysis in ("steady", "losses", "transient")
+    assert config.analysis in ("standby", "transient")
     assert (config.method, config.preconditioner) == ("cg", "amg_rs")
     assert 0 < config.tolerance <= 1e-4
     assert config.battery.t_ambient > 200.0          # the degC value is converted
@@ -91,7 +91,7 @@ def test_transient_run_produces_a_time_series(window):
     window.analysis_panel.dt.setValue(600.0)
     window.analysis_panel.save_interval.setValue(1800.0)
     window.analysis_panel.power_constant.setChecked(True)
-    window.analysis_panel.power_value.setValue(100.0)
+    window.geometry_panel.power.setValue(100.0)
     config = window._run_config()
     assert config.transient["t_final"] == pytest.approx(4 * 3600.0)
 
@@ -118,12 +118,12 @@ def test_invalid_geometry_is_refused_without_clipping(window):
     problems = battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=2.0, spacing=0.5))
     assert any("Lz" in problem for problem in problems), (
         f"apex={battery.cylinder.z_cone_apex:.2f} problems={problems}")
-    window.geometry_panel.domain_lz.setValue(5.6)
+    window.geometry_panel.domain_lz.setValue(6.5)
     battery = window._battery_from_panels()
-    assert battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=5.6, spacing=0.5)) == []
+    assert battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=6.5, spacing=0.5)) == []
 
 
-def test_the_window_solves_a_steady_case_on_a_tree(window):
+def test_the_window_solves_the_standby_case_on_a_tree(window):
     """The Mesh tab's adaptive mode, end to end through the controller.
 
     The whole GUI road on a tree, because none of it may assume a grid of cells per axis:
@@ -146,9 +146,9 @@ def test_the_window_solves_a_steady_case_on_a_tree(window):
         assert "leaves" in panel.mesh_info.text()
 
         config = window._run_config()
-        config.analysis = "steady"
+        config.analysis = "standby"
         window.controller.start(config, mesh)
-        assert window.controller.wait(600_000), "the steady run did not finish"
+        assert window.controller.wait(600_000), "the standby run did not finish"
         QApplication.processEvents()                     # deliver the queued finish
 
         stats = window.results.stats_text.toPlainText()
@@ -156,11 +156,12 @@ def test_the_window_solves_a_steady_case_on_a_tree(window):
         assert "Temperature" in stats and "degC" in stats
         assert "leaves" in stats and "domain" in stats
         assert "losses (envelope)" in energy and "imbalance" in energy
-        # the steady state is the plant's: the circuit carried the power into the bed
-        assert "Gas loop" in energy
+        # the standby state is the plant's: the circuit carries the holding power into
+        # the bed, and the storage sits at the temperature it was asked to hold
+        assert "Gas loop" in energy and "Steady standby" in energy
         loop = window.controller.last_loop
-        assert loop is not None
-        assert loop.power == pytest.approx(panel.power.value() * 1000.0, rel=1e-3)
+        assert loop is not None and loop.power > 0.0
+        assert "holding power" in energy
     finally:
         panel.max_cells.setValue(10_000)
 
@@ -185,7 +186,7 @@ def test_the_automatic_search_refines_a_tree(window):
     # the manual targets alone: the a priori plan of a built mesh asks for millimetres at
     # the shell, which a 375 mm floor could never refine towards
     panel.set_plan_targets({})
-    plan = AdaptivePlan(n_finest=16, physical_size=0.375,
+    plan = AdaptivePlan(n_finest=16, physical_size=0.4375,   # a 7 m box: the default vessel
                         bands=region_bands(panel.mesh_regions())).scaled(20.0)
     try:
         assert isinstance(window._run_config().mesh_spec, AdaptivePlan)

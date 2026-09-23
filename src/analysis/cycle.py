@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..constants import T_MIN_VALID
-from ..core.mesh import MaterialID, Mesh3D
+from ..core.mesh import MaterialID, Mesh3D, storage_mask
 from ..core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from ..solver.fluid import FluidLoop, FluidResult
 from ..solver.steady import SolverConfig
@@ -241,7 +241,7 @@ class CycleReport:
 
 def _storage_mean(mesh: Mesh3D | AdaptiveMesh) -> float:
     """Volume-averaged temperature of the storage material [K]."""
-    mask = mesh.material_id == int(MaterialID.SAND)
+    mask = storage_mask(mesh.material_id)
     if not mask.any():
         mask = mesh.material_id != int(MaterialID.AIR)
     return float(np.mean(mesh.T[mask]))

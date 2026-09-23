@@ -24,6 +24,29 @@ docs/12 §3 and §11.
 | 13 | The exchanger's delivered energy was `max(-net loop power, 0)`: zero whenever the resistors ran at the same time, and the explicit march estimate in the return-temperature mode | a 24 h discharge "delivered" 1344 kWh from 1137 kWh stored | the exchanger delivers its set power; in the return-temperature mode, the net exchange of the solved field |
 | 14 | The coupled steady state drifted from the resistors' power (60 sweeps, 2069 W of 5000 into the bed) | default model | the loop balance is held in every sweep: 11 sweeps, 5000.0 W |
 
+### Second pass (the owner's review of the running app)
+
+| # | Found | Evidence | Fix |
+|---|-------|----------|-----|
+| 15 | The steady analysis at a fixed power is not a state a storage reaches at its charging power | a steady run at 5 kW sat at 458 degC, at the 200 kW of a real plant it would be thousands | "Steady standby": hold the bed at T, get the holding power (= the losses); the constant power profile is the circuit's rated power |
+| 16 | The ring layout packed a set number of rings at the pitch: 3 rings inside the central 0.4 m of a 2 m vessel | the hot square in the centre of the owner's slice | a ring count spreads the rings over the radius, risers spaced like the rings |
+| 17 | The network was centred on the box, not on the cylinder | correct only while the centre is the box centre | `build_pipe_network(center=cylinder centre)` everywhere |
+| 18 | The mesh refined the whole bundle as one box: every leaf of the bed at the finest size, no octree step in the sand | 143 396 leaves, 39 s | one column per riser |
+| 19 | The insulation ring and the shell were covered by four axis-aligned boxes: air refined at their corners, the ring at 45 degrees not at all | 36 000 excluded-air leaves at the finest size | radial bands (discs and annuli about the vessel axis) |
+| 20 | The plan asked 16 mm through the whole insulation with the box-face film `h_lateral`, a film the insulation never faces | the insulation always at the floor | the surface rule only where the film sits (the casing, with the correlations' film) |
+| 21 | The painter measured the shell's cell at (cx + r, cy + r), out in the air | on a tree: a 375 mm shell painted over the insulation | the cell is measured in the shell |
+| 22 | Targets were rounded down to the next leaf size | a 200 mm request on 101.6 / 203 mm leaves refined the whole bed to 101.6 | nearest leaf size in log scale |
+| 23 | The 2:1 balance swept every face of the tree after every round, in Python | 22 s of a 33 s build | balance only around the new leaves (the same tree, pinned by a test) |
+| 24 | `h_char` recomputed a cube root of every volume per call; the rasteriser bisected Python objects | 3 s and 5 s of the build | cached; the tree's own position table |
+| 25 | A discharge whose gas would have to come back at 28 K was accepted | the default network at 100 kW | the exchanger's return temperature is the floor: the run stops there with a note |
+| 26 | The pipe cells were left out of the storage statistics once they became bed cells | a store whose pipe columns were all its leaves had "no sand" | `storage_mask` = sand + pipe cells |
+| 27 | The geometry preview did not follow the panels | the owner's report | every edit redraws the preview (250 ms debounce), with the network as the panels describe it now |
+
+Default model after the pass (Kankaanpää scale: 4 m, 5 m of bed, ~95 t): build and paint
+3.3 s (90 630 leaves), standby 25 s (7.9 kW hold 500 degC), 48 h of charge at 200 kW in
+35 s (gas in at 721 degC), a 100 kW discharge that runs 28 h and delivers 2800 kWh before
+the bed around the pipes can no longer give it with gas returning at 60 degC.
+
 ### GUI: what was removed, and why
 
 * The mesh is the octree only: the uniform and graded modes, the growth ratio, the

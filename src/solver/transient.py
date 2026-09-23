@@ -172,8 +172,11 @@ class TransientSolver:
             loop.external_power = 0.0
         else:
             loop.t_in = self._loop_t_in
-            # the resistors add to the gas, the exchanger takes from it
+            # the resistors add to the gas, the exchanger takes from it - and cannot
+            # return the gas colder than its own return temperature
             loop.external_power = float(power) - profile.power_request(t)
+            loop.t_in_min = (float(profile.t_return_min)
+                             if profile.mode == "power" and profile.t_return_min else 0.0)
         result = loop.solve(self.mesh)
         self.fluid_result = result
         if result.conductance is None:

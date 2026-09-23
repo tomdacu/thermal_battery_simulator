@@ -677,14 +677,23 @@ def _plan(config: PipeNetworkConfig) -> _Plan:
         theta_f = float(np.deg2rad(config.azimuth_in))
         fits = int(np.floor(r_eff / p_v + 1e-12))
         count = fits if config.n_rings is None else min(int(config.n_rings), fits)
+        # the rings share the radius: with a ring count below what the pitch fits, the
+        # rings are spread over the whole bed (one ring every r_eff / n) and the taps on
+        # a ring are spaced like the rings, so every riser serves about the same area of
+        # sand.  Packing them at the pitch put three rings inside the central 0.4 m of a
+        # 2 m vessel and left the rest of the bed without a pipe.  Without a count the
+        # bundle is the dense one the published pitch gives, filling the radius anyway.
+        spread = config.n_rings is not None and count > 0
+        step = r_eff / count if spread else p_v
+        arc = max(p_h, step) if spread else p_h
         points, group, forward, perimeter, radii = [], [], [], [], []
         for index in range(max(count, 0)):
-            radius = (index + 1) * p_v
+            radius = (index + 1) * step
             # an even number of taps makes the ring symmetric about the diameter that
             # joins its feed point to its exit point, so every tap travels half the
             # ring whichever way round it is fed; the floor keeps the arc spacing
-            # between neighbouring taps at or above the horizontal pitch
-            taps = 2 * max(int(np.floor(np.pi * radius / p_h + 1e-12)), 1)
+            # between neighbouring taps at or above the pitch of the ring
+            taps = 2 * max(int(np.floor(np.pi * radius / arc + 1e-12)), 1)
             spacing = 2.0 * np.pi * radius / taps
             # the entry azimuths alternate so that consecutive rings, which the chain
             # visits one after the other, are joined by a short radial hop
@@ -1508,6 +1517,18 @@ def _wall_point(config: PipeNetworkConfig, center: tuple[float, float],
     radius = config.radius + outside
     return (center[0] + radius * np.cos(theta), center[1] + radius * np.sin(theta),
             elevation)
+
+
+def riser_positions(config: PipeNetworkConfig,
+                    center: tuple[float, float]) -> list[tuple[float, float]]:
+    """Plan positions of the risers [m] about ``center``, without a mesh.
+
+    The same positions :func:`build_pipe_network` rasterises: what a mesh plan needs to
+    refine *around each riser* instead of over the whole bundle, and what a preview
+    draws before any mesh exists.
+    """
+    cx, cy = float(center[0]), float(center[1])
+    return [(cx + x, cy + y) for x, y in _plan(config).points]
 
 
 def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,

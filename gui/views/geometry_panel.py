@@ -14,6 +14,9 @@ around the vessel is excluded from the problem.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
@@ -29,11 +32,17 @@ from src.core.pipe_network import (COLLECTION_CENTRAL, COLLECTION_DIRECT,
                                    LAYOUT_SPIRAL, LAYOUT_STAGGERED, PIPE_CARBON,
                                    PIPE_STAINLESS, SPLIT_EQUAL, SPLIT_PATH,
                                    SPLIT_RING, SPLIT_SECTOR, WARNING,
-                                   PipeNetworkConfig)
+                                   PipeNetworkConfig, riser_positions)
 from src.core.pipes import pipe_surface_power_w_cm2
 from src.solver.fluid import Fluid
 
 from ..widgets import FormPanel, button, check, combo, double_spin, hint, int_spin
+
+
+def _nearest_leaf(target: float, finest: float) -> float:
+    """The leaf edge nearest to ``target`` in log scale, never below ``finest`` [m]."""
+    level = max(int(np.round(np.log2(max(target, finest) / finest))), 0)
+    return finest * 2.0 ** level
 
 
 class GeometryPanel(QWidget):
@@ -80,14 +89,14 @@ class GeometryPanel(QWidget):
                                                          on_change=self.mesh_changed.emit))
         self.domain_ly = panel.add("Ly [m]", double_spin(6.0, 1.0, 50.0, 0.5, 1,
                                                          on_change=self.mesh_changed.emit))
-        self.domain_lz = panel.add("Lz [m]", double_spin(5.6, 1.0, 50.0, 0.5, 1,
+        self.domain_lz = panel.add("Lz [m]", double_spin(6.5, 1.0, 50.0, 0.5, 1,
                                                          on_change=self.mesh_changed.emit))
         self.center_x = panel.add("Centre X [m]", double_spin(3.0, 0.1, 49.0, 0.1, 2))
         self.center_y = panel.add("Centre Y [m]", double_spin(3.0, 0.1, 49.0, 0.1, 2))
         self.base_z = panel.add("Base elevation [m]", double_spin(0.3, 0.0, 5.0, 0.1, 2,
                                                                   tooltip="Floor of the structure"))
         self.radius = panel.add("Storage radius [m]", double_spin(2.0, 0.2, 20.0, 0.1, 2))
-        self.height = panel.add("Storage height [m]", double_spin(4.0, 0.5, 30.0, 0.5, 1))
+        self.height = panel.add("Storage height [m]", double_spin(5.0, 0.5, 30.0, 0.5, 1))
         self.enable_roof = panel.add("Conical roof",
                                      check("enable", True, "Cone-shaped steel roof"))
         self.roof_angle = panel.add("Roof angle [deg]", double_spin(15.0, 0.0, 45.0, 1.0, 1))
@@ -131,14 +140,15 @@ class GeometryPanel(QWidget):
                        "On discharge the exchanger on the same circuit takes the heat "
                        "out of the gas (Analysis > Extraction). The bed is heated "
                        "through the tube walls, never by an element inside it.")
-        self.power = panel.add("Total power [kW]", double_spin(
-            5.0, 0.0, 100000.0, 10.0, 1, on_change=self._update_power,
-            tooltip="Electric power of the resistors: the steady and losses analyses "
-                    "put it into the gas; the transient takes its power profile from "
-                    "Analysis > Power"))
+        self.power = panel.add("Rated power [kW]", double_spin(
+            200.0, 0.0, 100000.0, 10.0, 1, on_change=self._update_power,
+            tooltip="Charging power of the resistors: the constant power profile of a "
+                    "transient, and the rating the tube wall is checked against.  The "
+                    "reference pilot (4 m across, 7 m tall, ~100 t of sand, 8 MWh) "
+                    "charges at 200 kW and discharges at 100 kW"))
         self.fluid = panel.add("Gas", combo(self.FLUIDS, 0, self._update_power))
         self.flow = panel.add("Mass flow [kg/s]", double_spin(
-            0.5, 0.0, 200.0, 0.05, 3, on_change=self._update_power,
+            1.0, 0.0, 200.0, 0.05, 3, on_change=self._update_power,
             tooltip="Total mass flow of the gas loop: the network's branches split it "
                     "by the rule of the Pipes tab"))
         self.circuit_pressure = panel.add("Circuit pressure [bar]", double_spin(
@@ -175,7 +185,10 @@ class GeometryPanel(QWidget):
              ("Central header", COLLECTION_CENTRAL),
              ("Two level rings", COLLECTION_TWO_LEVEL)), 1))
         self.pipe_rings = panel.add("Rings", int_spin(
-            3, 1, 12, 1, tooltip="For the ring layouts"))
+            6, 1, 20, 1, tooltip="For the ring layouts: the rings are spread over the "
+                                 "whole radius, and the risers on a ring are spaced "
+                                 "like the rings, so every riser serves a similar "
+                                 "area of sand"))
         self.pipe_files = panel.add("Radial files", int_spin(
             12, 3, 72, 1, tooltip="For the radial layout"))
         self.pipe_diameter = panel.add("Pipe outer d [m]",
@@ -453,8 +466,13 @@ class GeometryPanel(QWidget):
         if self._auto_plan is not None:
             return self._auto_plan
         n_finest, physical_size = tree_resolution(self.domain(), int(self.max_cells.value()))
-        return AdaptivePlan(n_finest=n_finest, physical_size=physical_size,
-                            bands=region_bands(self.mesh_regions()))
+        # a leaf is a power of two of the finest cell: every target is snapped to the
+        # *nearest* such size (in log scale), not to the next one below - otherwise a
+        # 200 mm request on 101.6/203 mm leaves refines the whole bed to 101.6 mm, twice
+        # finer than asked and eight times the leaves
+        bands = tuple(replace(band, size=_nearest_leaf(band.size, physical_size))
+                      for band in region_bands(self.mesh_regions()))
+        return AdaptivePlan(n_finest=n_finest, physical_size=physical_size, bands=bands)
 
     def mesh_regions(self):
         """The active regions of the model, each with the cell size the panel asks for.
@@ -473,15 +491,22 @@ class GeometryPanel(QWidget):
             "slab_bottom": self.planned(
                 "slab_bottom", cyl.insulation_slab_bottom / insulation_cells),
             "slab_top": self.planned("slab_top", cyl.insulation_slab_top / insulation_cells),
-            "shell": self.planned("shell", cyl.shell_thickness / insulation_cells),
+            # a thin steel shell needs no cells across it: the painter keeps it one cell
+            # thick whatever the mesh, so it takes the insulation's size (and its own
+            # film rule, which for steel never binds)
+            "shell": cyl.insulation_thickness / insulation_cells,
             "pipe_wall": self.pipe_diameter.value() / max(self.cells_sheath.value(), 1),
         }
         targets["casing"] = max(targets.values())
         config = self.pipe_network_config()
-        reach = config.inner_radius
-        pipe_box = ((cyl.center_x - reach, cyl.center_y - reach, config.z_bottom),
-                    (cyl.center_x + reach, cyl.center_y + reach, config.z_top))
-        return active_regions(cyl, targets, pipe_box=pipe_box)
+        # one column per riser, as wide as the pipe: the tree refines the leaves the pipe
+        # crosses and its own 2:1 balance grades the sand around them.  A single box over
+        # the whole bundle refined all the sand to the pipe's size - no octree steps
+        # anywhere in the bed, and most of the leaves of the mesh
+        half = 0.5 * config.diameter
+        pipe_boxes = [((x - half, y - half, config.z_bottom), (x + half, y + half, config.z_top))
+                      for x, y in riser_positions(config, (cyl.center_x, cyl.center_y))]
+        return active_regions(cyl, targets, pipe_boxes=pipe_boxes)
 
     def domain(self) -> tuple[float, float, float]:
         """The box the vessel sits in [m]."""

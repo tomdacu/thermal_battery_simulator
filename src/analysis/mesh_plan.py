@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..core.adaptive_mesh import RefinementBand
+from ..core.environment import h_out
 from ..core.geometry import BatteryGeometry, CylinderGeometry
 from ..core.materials import MaterialManager
 from ..core.refinement import GridSpec
@@ -86,10 +87,16 @@ def plan_regions(geometry: BatteryGeometry, materials: MaterialManager,
         "storage", storage_length, layer_target(storage_length, cells_per_layer),
         f"{cells_per_layer:.0f} cells across min(r, height), k = {storage.k:.2f}"))
 
-    # radial insulation + shell: the losses cross them and leave through h_lateral
-    radial = [("insulation_radial", cyl.insulation_thickness, insulation.k,
-               geometry.h_lateral),
-              ("shell", cyl.shell_thickness, shell.k, geometry.h_lateral)]
+    # radial insulation + shell: the losses cross them and leave through the outer film.
+    # The film sits on the *shell* - the steel casing is the surface the air touches - so
+    # the surface rule belongs to the shell, with the film the correlations give
+    # (``src/core/environment.py``).  The insulation is inside the casing and faces no
+    # film: its rule is the layer rule alone.  (It used to take the box-face film
+    # ``h_lateral`` and asked 16 mm of cells through the whole insulation for a surface
+    # that does not exist in the excluded-air model.)
+    film_h = outer_film(geometry)
+    radial = [("insulation_radial", cyl.insulation_thickness, insulation.k, 0.0),
+              ("shell", cyl.shell_thickness, shell.k, film_h)]
     for name, thickness, k, h in radial:
         if thickness <= 0:
             continue
@@ -102,8 +109,9 @@ def plan_regions(geometry: BatteryGeometry, materials: MaterialManager,
                       f"(k = {k:.2f}, h = {h:.1f})")
         plans.append(RegionPlan(name, thickness, target, reason))
 
-    # the two slabs see h_top / the ground
-    for name, thickness, h in (("slab_top", cyl.insulation_slab_top, geometry.h_top),
+    # the two slabs are inside the casing too: the top one under the steel plate and the
+    # roof, the bottom one on the foundation - no film on either
+    for name, thickness, h in (("slab_top", cyl.insulation_slab_top, 0.0),
                                ("slab_bottom", cyl.insulation_slab_bottom, 0.0)):
         if thickness <= 0:
             continue
@@ -117,6 +125,20 @@ def plan_regions(geometry: BatteryGeometry, materials: MaterialManager,
         plans.append(RegionPlan(name, thickness, target, reason))
 
     return plans
+
+
+def outer_film(geometry: BatteryGeometry) -> float:
+    """The outer film of the vessel at its design point [W/(m^2 K)].
+
+    The same correlations and the same nominal surface rise the painter uses
+    (:meth:`~src.core.geometry.BatteryGeometry.apply_environment`), evaluated without a
+    mesh: natural convection on the vessel plus the wind.
+    """
+    cyl = geometry.cylinder
+    film = h_out(geometry.t_ambient + geometry.film_delta_t, geometry.t_ambient,
+                 height=max(cyl.z_cone_apex - cyl.base_z, 0.1),
+                 width=max(2.0 * cyl.r_shell, 0.1), wind_speed=geometry.wind_speed)
+    return float(film["natural"] + film["wind"])
 
 
 def binding_target(geometry: BatteryGeometry, materials: MaterialManager,
@@ -152,9 +174,17 @@ class MeshRegion:
     low: tuple[float, float, float]
     high: tuple[float, float, float]
     reason: str = ""
+    #: a radial region: the annulus ``r_inner..r_outer`` about the vertical axis through
+    #: ``axis`` (``low``/``high`` are its bounding box); ``None`` = the box itself
+    axis: tuple[float, float] | None = None
+    r_inner: float = 0.0
+    r_outer: float = 0.0
 
     @property
     def volume(self) -> float:
+        height = max(self.high[2] - self.low[2], 0.0)
+        if self.axis is not None:
+            return float(np.pi * (self.r_outer ** 2 - self.r_inner ** 2) * height)
         return float(np.prod([max(h - low, 0.0)
                               for low, h in zip(self.low, self.high, strict=True)]))
 
@@ -165,31 +195,9 @@ class MeshRegion:
                 + (f"  ({self.reason})" if self.reason else ""))
 
 
-def _annulus_boxes(cx: float, cy: float, inner: float, outer: float,
-                   z_low: float, z_high: float
-                   ) -> list[tuple[tuple[float, ...], tuple[float, ...]]]:
-    """The four boxes covering the annulus ``inner <= r <= outer`` over a z band.
-
-    An octree band is an axis-aligned box, so a ring is covered by four of them: the
-    two x-slabs and the two y-slabs that carry its *thickness* - which is what has to be
-    resolved.  Their union is the ring plus its four corner squares (about a seventh of
-    the ring's area), which is the cheapest cover an axis-aligned box can give.
-    """
-    boxes = []
-    for centre, axis in ((cx, 0), (cy, 1)):
-        for sign in (-1.0, 1.0):
-            low = [cx - outer, cy - outer, z_low]
-            high = [cx + outer, cy + outer, z_high]
-            if sign < 0:
-                low[axis], high[axis] = centre - outer, centre - inner
-            else:
-                low[axis], high[axis] = centre + inner, centre + outer
-            boxes.append((tuple(low), tuple(high)))
-    return boxes
-
-
 def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
-                   pipe_box: tuple[Sequence[float], Sequence[float]] | None = None
+                   pipe_box: tuple[Sequence[float], Sequence[float]] | None = None,
+                   pipe_boxes: Sequence[tuple[Sequence[float], Sequence[float]]] = ()
                    ) -> list[MeshRegion]:
     """The boxes of the active model, each with the cell size it asks for [m].
 
@@ -197,7 +205,9 @@ def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
     ``slab_bottom``, ``slab_top``, ``shell``, ``casing`` and ``pipe_wall`` (the last
     one only when ``pipe_box`` is given).  A region whose key is missing keeps its own
     physical length - the sand's radius, the insulation's thickness - so a caller that
-    only wants the boxes can pass an empty mapping.
+    only wants the boxes can pass an empty mapping.  ``pipe_boxes`` are one box per riser
+    (the tree then refines a column around each pipe, not the whole bundle);
+    ``pipe_box`` is the single box of the whole bundle.
 
     The sand and the two slabs get one box each; the insulation ring and the shell are
     annuli, covered by four boxes each; the **casing** is the pair of boxes whose
@@ -212,48 +222,47 @@ def active_regions(cylinder: CylinderGeometry, targets: Mapping[str, float], *,
     def target(name: str, length: float) -> float:
         return float(targets.get(name, length))
 
+    def ring(name: str, size: float, inner: float, outer: float, z_low: float,
+             z_high: float, reason: str = "") -> MeshRegion:
+        """A radial region of the vessel: the annulus (a disc for inner = 0)."""
+        return MeshRegion(name, size, (cx - outer, cy - outer, z_low),
+                          (cx + outer, cy + outer, z_high), reason,
+                          axis=(cx, cy), r_inner=inner, r_outer=outer)
+
+    # the vessel is a cylinder: every region of it is a disc or an annulus about its
+    # axis, so a leaf is refined where the region *is* - not in the corners of a box
     regions: list[MeshRegion] = [
-        MeshRegion("sand", target("sand", cyl.r_storage),
-                   (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_storage_start),
-                   (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_storage_end),
-                   "the storage radius, resolved by the bed's own cell size"),
+        ring("sand", target("sand", cyl.r_storage), 0.0, cyl.r_storage,
+             cyl.z_storage_start, cyl.z_storage_end,
+             "the storage radius, resolved by the bed's own cell size"),
     ]
     if cyl.insulation_slab_bottom > 0:
-        regions.append(MeshRegion(
-            "slab_bottom", target("slab_bottom", cyl.insulation_slab_bottom),
-            (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_slab_bottom_start),
-            (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_storage_start)))
+        regions.append(ring("slab_bottom", target("slab_bottom", cyl.insulation_slab_bottom),
+                            0.0, cyl.r_storage, cyl.z_slab_bottom_start,
+                            cyl.z_storage_start))
     if cyl.insulation_slab_top > 0:
-        regions.append(MeshRegion(
-            "slab_top", target("slab_top", cyl.insulation_slab_top),
-            (cx - cyl.r_storage, cy - cyl.r_storage, cyl.z_slab_top_start),
-            (cx + cyl.r_storage, cy + cyl.r_storage, cyl.z_slab_top_end)))
+        regions.append(ring("slab_top", target("slab_top", cyl.insulation_slab_top),
+                            0.0, cyl.r_storage, cyl.z_slab_top_start, cyl.z_slab_top_end))
     for name, inner, outer in (("insulation_radial", cyl.r_storage, cyl.r_shell),
                                ("shell", cyl.r_insulation, cyl.r_shell)):
         if outer - inner <= 0:
             continue
-        size = target(name, outer - inner)
-        for low, high in _annulus_boxes(cx, cy, inner, outer, cyl.base_z, cyl.z_shell_top):
-            regions.append(MeshRegion(
-                name, size, low, high,
-                f"{1000.0 * (outer - inner):.0f} mm across the "
-                f"{'insulation ring' if name == 'insulation_radial' else 'shell'}"))
+        regions.append(ring(
+            name, target(name, outer - inner), inner, outer, cyl.base_z, cyl.z_shell_top,
+            f"{1000.0 * (outer - inner):.0f} mm across the "
+            f"{'insulation ring' if name == 'insulation_radial' else 'shell'}"))
     casing = target("casing", min(targets.values(), default=cyl.r_storage))
     if cyl.roof_height > 0:
-        regions.append(MeshRegion(
-            "roof", casing,
-            (cx - cyl.r_shell, cy - cyl.r_shell, cyl.z_cone_base),
-            (cx + cyl.r_shell, cy + cyl.r_shell, cyl.z_cone_apex),
-            "the cone roof carries the top film"))
+        regions.append(ring("roof", casing, 0.0, cyl.r_shell, cyl.z_cone_base,
+                            cyl.z_cone_apex, "the cone roof carries the top film"))
     if cyl.base_z > 0:
         reach = cyl.r_shell + max(cyl.foundation_margin, 0.0)
-        regions.append(MeshRegion(
-            "foundation", casing, (cx - reach, cy - reach, 0.0),
-            (cx + reach, cy + reach, cyl.base_z),
-            "the concrete under the floor carries the ground face"))
-    if pipe_box is not None:
+        regions.append(ring("foundation", casing, 0.0, reach, 0.0, cyl.base_z,
+                            "the concrete under the floor carries the ground face"))
+    boxes = list(pipe_boxes) + ([pipe_box] if pipe_box is not None else [])
+    for low, high in boxes:
         regions.append(MeshRegion("pipe_wall", target("pipe_wall", 0.05),
-                                  tuple(pipe_box[0]), tuple(pipe_box[1]),
+                                  tuple(low), tuple(high),
                                   "the network's tubes are the heat-transfer surface"))
     return regions
 
@@ -272,7 +281,9 @@ def region_bands(regions: Sequence[MeshRegion]) -> tuple[RefinementBand, ...]:
         if region.target <= 0.0 or region.volume <= 0.0:
             continue
         bands.append(RefinementBand(low=tuple(region.low), high=tuple(region.high),
-                                    size=float(region.target)))
+                                    size=float(region.target), axis=region.axis,
+                                    r_inner=float(region.r_inner),
+                                    r_outer=float(region.r_outer)))
     if not bands:
         raise ValueError("at least one active region is required")
     return tuple(bands)

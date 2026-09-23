@@ -20,7 +20,7 @@ from collections.abc import Callable
 import numpy as np
 
 from ..constants import T_AMBIENT_DEFAULT, T_GROUND_DEFAULT
-from ..core.mesh import MaterialID, Mesh3D
+from ..core.mesh import Mesh3D, storage_mask
 from ..solver.steady import SolverConfig, SteadyStateSolver
 from .balance import Balance, compute_balance
 
@@ -35,7 +35,7 @@ class LossesConfig:
     h_ground: float = 0.0               # [W/(m^2*K)]; 0 keeps the mesh BC as-is
     tolerance: float = 1.0              # [K]
     max_iterations: int = 20
-    relaxation: float = 0.7             # 0..1 under-relaxation on the power update
+    relaxation: float = 1.0             # 0..1 under-relaxation on the power update
     initial_density: float = 100.0      # [W/m^3] starting volumetric power
 
     def validate(self) -> list[str]:
@@ -78,7 +78,7 @@ def solve_losses(mesh: Mesh3D, config: LossesConfig, solver_config: SolverConfig
     problems = config.validate()
     if problems:
         raise ValueError("invalid losses configuration: " + "; ".join(problems))
-    sand = mesh.material_id == int(MaterialID.SAND)
+    sand = storage_mask(mesh.material_id)
     if not sand.any():
         raise ValueError("the mesh has no storage (SAND) cells: build the geometry first")
     if config.h_ground > 0:
@@ -93,18 +93,20 @@ def solve_losses(mesh: Mesh3D, config: LossesConfig, solver_config: SolverConfig
     converged = False
     iteration = 0
 
+    # one solver for the whole iteration: only the power changes between two solves, so
+    # the operator - and its AMG hierarchy - and the warm start carry over
+    solver = SteadyStateSolver(mesh, solver_config, fluid_loop=fluid_loop)
     for iteration in range(1, config.max_iterations + 1):
         if should_stop is not None and should_stop():
             break
         if fluid_loop is not None:
             fluid_loop.external_power = q_current
-            result = SteadyStateSolver(mesh, solver_config, fluid_loop=fluid_loop).solve()
         else:
             mesh.Q_source.fill(0.0)
             mesh.source_mask.fill(False)
             mesh.source_mask[sand] = True
             mesh.Q_source[sand] = q_current / v_sand
-            result = SteadyStateSolver(mesh, solver_config).solve()
+        result = solver.solve()
         t_mean = float(mesh.T[sand].mean())
         error = t_mean - config.t_target
         history.append({"iteration": iteration, "power": q_current,
@@ -125,6 +127,12 @@ def solve_losses(mesh: Mesh3D, config: LossesConfig, solver_config: SolverConfig
                 q_new = q_current - error / slope
             else:
                 q_new = q_current * (1.0 - 0.1 * float(np.sign(error)))
+        elif t_mean - config.t_ambient > 1.0:
+            # the first step scales the power by the rise it has to make: exact when the
+            # rise over the ambient is proportional to the power (conduction and films
+            # without radiation), so the secant that follows starts next to the answer
+            q_new = q_current * (config.t_target - config.t_ambient) / (
+                t_mean - config.t_ambient)
         else:
             q_new = q_current * (1.0 - 0.02 * float(np.sign(error)) or 1.02)
 

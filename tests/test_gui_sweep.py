@@ -145,7 +145,7 @@ def test_every_panel_getter_survives_extreme_widget_values(window):
                        for word in ("schedule", "csv", "t_", "kelvin")), exc
 
     battery = window._battery_from_panels()
-    problems = battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=5.6, spacing=0.5))
+    problems = battery.validate(Mesh3D(Lx=6.0, Ly=6.0, Lz=6.5, spacing=0.5))
     assert isinstance(problems, list)          # a list, never an exception
     restore_sane_configuration(window)
     window._run_config()                       # a valid set must assemble cleanly
@@ -158,16 +158,14 @@ def restore_sane_configuration(window) -> None:
     geometry.max_cells.setValue(10_000)
     geometry.domain_lx.setValue(6.0)
     geometry.domain_ly.setValue(6.0)
-    geometry.domain_lz.setValue(5.6)
+    geometry.domain_lz.setValue(6.5)
     geometry.radius.setValue(2.0)
-    geometry.height.setValue(4.0)
+    geometry.height.setValue(5.0)
     geometry.base_z.setValue(0.3)
     geometry.insulation_thickness.setValue(0.3)
     geometry.power.setValue(50.0)
     geometry.flow.setValue(0.5)
     analysis.power_constant.setChecked(True)
-    analysis.power_value.setValue(10.0)
-    analysis.power_unit.setCurrentIndex(1)
     analysis.radio_uniform.setChecked(True)
     analysis.extract_off.setChecked(True)
     analysis.duration.setValue(1.0)
@@ -179,13 +177,12 @@ def restore_sane_configuration(window) -> None:
 
 def test_every_analysis_type_keeps_the_panels_consistent(window):
     restore_sane_configuration(window)
-    for radio in (window.analysis_panel.radio_steady, window.analysis_panel.radio_losses,
-                  window.analysis_panel.radio_transient):
+    for radio in (window.analysis_panel.radio_standby, window.analysis_panel.radio_transient):
         radio.setChecked(True)
-        assert window.analysis_panel.analysis_type() in ("steady", "losses", "transient")
+        assert window.analysis_panel.analysis_type() in ("standby", "transient")
         assert "Run" in window.run_btn.text()
         window._run_config()
-    window.analysis_panel.radio_steady.setChecked(True)
+    window.analysis_panel.radio_standby.setChecked(True)
 
 
 def test_every_profile_mode_builds_or_explains_itself(window):
@@ -271,10 +268,10 @@ def test_every_run_kind_executes_through_the_controller(window):
     """Run each analysis through the controller's own job factory, synchronously."""
     restore_sane_configuration(window)
     panel = window.analysis_panel
-    for kind, radio in (("steady", panel.radio_steady), ("losses", panel.radio_losses),
+    for kind, radio in (("standby", panel.radio_standby),
                         ("transient", panel.radio_transient)):
         radio.setChecked(True)
-        if kind == "losses":
+        if kind == "standby":
             window.solver_panel.losses_max_iterations.setValue(2)
         if kind == "transient":
             panel.duration.setValue(0.5)
@@ -286,7 +283,7 @@ def test_every_run_kind_executes_through_the_controller(window):
         work = window.controller._make_work(config, window.mesh)
         result = work(lambda *_: None, lambda: False)
         window._on_finished(kind, result)
-    panel.radio_steady.setChecked(True)
+    panel.radio_standby.setChecked(True)
 
 
 def test_cancellation_stops_a_transient_run(window):
@@ -306,7 +303,7 @@ def test_cancellation_stops_a_transient_run(window):
 
     result = work(lambda *_: None, stop)
     assert len(result) < 50
-    panel.radio_steady.setChecked(True)
+    panel.radio_standby.setChecked(True)
 
 
 def test_state_save_and_load_round_trip_through_the_window(window, tmp_path):

@@ -58,7 +58,7 @@ class SolverPanel(QWidget):
         self.losses_tolerance = losses.add("T tolerance [K]",
                                            double_spin(1.0, 0.05, 20.0, 0.1, 2))
         self.losses_max_iterations = losses.add("Max iterations", int_spin(20, 1, 200, 1))
-        self.losses_relaxation = losses.add("Under-relaxation", double_spin(0.7, 0.1, 1.0, 0.05, 2))
+        self.losses_relaxation = losses.add("Under-relaxation", double_spin(1.0, 0.1, 1.0, 0.05, 2))
         self.losses_initial_density = losses.add("Initial power density [W/m³]",
                                                  double_spin(100.0, 1.0, 10000.0, 10.0, 1))
         losses.add_hint("The losses analysis searches the resistors' power that holds the "

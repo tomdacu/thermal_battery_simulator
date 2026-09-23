@@ -35,10 +35,11 @@ A comprehensive 3D thermal simulation tool for designing and analyzing **thermal
 ### Core Simulation
 - **Cell-centred finite volume / FDM** solver for the heat equation
   (`src/solver/matrix.py`)
-- **Steady-state and transient analysis** with a backward Euler implicit scheme,
-  both driven by the **gas loop**: the resistors heat the gas and the gas heats the bed
-  through the pipe walls, coupled implicitly and with the loop balance held per step
-- **Iterative losses analysis** with a secant update of the resistors' power
+- **Steady standby and transient analysis** (backward Euler), both driven by the **gas
+  loop**: the resistors heat the gas and the gas heats the bed through the pipe walls,
+  coupled implicitly and with the loop balance held per step
+- **Standby losses**: the bed held at a temperature, the holding power found by a secant
+  iteration (two solves on the default model)
 - **Linear solver**: conjugate gradients + AMG (Ruge-Stuben) on the volume-symmetrised
   operator - the fastest option measured on the default model, and the only one the GUI
   uses; `src/solver/linear.py` also offers direct LU, BiCGSTAB, GMRES and the Jacobi,
@@ -261,7 +262,8 @@ python run_gui.py
 1. **Configure Geometry** (*1. Geometry* tab, five sub-tabs)
    - *Cylinder*: domain (Lx, Ly, Lz), centre, storage radius and height, roof
    - *Insulation*: radial insulation, steel shell, bottom/top slabs, foundation
-   - *Gas circuit*: total power (**5 kW** by default), gas, mass flow, pressure, blower
+   - *Gas circuit*: rated power (**200 kW**, the Kankaanpää pilot's charge), gas, mass
+     flow (1 kg/s), pressure, blower
    - *Pipes*: buried pipe-network layout, collection mode, tube and ducts
    - *Mesh*: cells across the regions, cell budget, plus *Find the mesh*
 
@@ -271,8 +273,8 @@ python run_gui.py
    - *Conditions*: ambient 20 °C, ground 10 °C, wind speed
 
 3. **Configure Analysis** (*3. Analysis* tab)
-   - *Type*: steady state, losses analysis, transient
-   - *Initial condition*: uniform, per material, the current field, or from steady
+   - *Type*: steady standby (hold the bed at T, get the losses) or transient
+   - *Initial condition*: uniform, per material, the current field, or the standby state
    - *Power* / *Extraction*: the resistors and the exchanger of the transient
    - *Save / Load*: HDF5 state with a geometry hash
 
@@ -586,13 +588,13 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # Run the test suite (no display, no GPU needed)
-python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # without the GUI sweep (375 cases)
-python -m pytest tests/ -q                                    # + the GUI control sweep (386)
+python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # without the GUI sweep (378 cases)
+python -m pytest tests/ -q                                    # + the GUI control sweep (389)
 python -m ruff check src tests gui --select F,E9,B,SIM,UP      # lint
 ```
 
 Measured on this working tree (2026-09-23, `python -m pytest tests/ --collect-only -q`):
-**375 tests** without `tests/test_gui_sweep.py` and **386** in total; the whole suite
+**378 tests** without `tests/test_gui_sweep.py` and **389** in total; the whole suite
 passes in about two minutes, head-less.  The count moves while work is in flight:
 re-run the command instead of trusting the number.
 

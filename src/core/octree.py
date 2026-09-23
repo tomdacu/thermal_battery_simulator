@@ -99,6 +99,11 @@ class Leaf:
         return code
 
 
+def _leaf_key(leaf: Leaf) -> tuple[int, int, int, int]:
+    """The sort key of a leaf: its dataclass order as a tuple."""
+    return (leaf.level, leaf.x, leaf.y, leaf.z)
+
+
 def _morton_roundtrip(leaf: Leaf) -> Leaf:
     """Recover a leaf from its Morton code (used by the tests and by sorting)."""
     code = leaf.morton()
@@ -151,7 +156,9 @@ class Octree:
         its corner shifted down to its own level, which is what the neighbour search
         needs to be a couple of dictionary lookups instead of a walk over every leaf.
         """
-        self.leaves = sorted(set(leaves))
+        # the key is the dataclass order (level, x, y, z) as a plain tuple: the same order,
+        # without a Python ``__lt__`` call per comparison (millions on a large tree)
+        self.leaves = sorted(set(leaves), key=_leaf_key)
         self._index = {leaf: i for i, leaf in enumerate(self.leaves)}
         #: bumped by every mutation: consumers key their per-tree caches on it
         self.version = getattr(self, "version", 0) + 1
@@ -283,8 +290,62 @@ class Octree:
         return [self.leaves[index] for index in self._face_neighbours(leaf, face)]
 
     # -------------------------------------------------------------- balancing
+    def balance_from(self, seeds: Iterable[Leaf]) -> int:
+        """Enforce the 2:1 rule around ``seeds`` (the leaves a split just made).
+
+        A refinement can only break the rule next to the leaves it created, so only
+        their neighbours are looked at: every face of a seed is probed just outside its
+        centre, the leaf found there is the neighbour covering the whole face whenever it
+        is coarser, and it is split when it is more than one level coarser.  Its children
+        are the next seeds, so a cascade runs as far as it has to and no further.  The
+        result is the same tree :meth:`balance` gives (the minimal balanced refinement is
+        unique); the cost is the size of the change, not of the tree - a full sweep of
+        every face of every leaf per round is what made a large build take tens of
+        seconds.  Returns how many leaves were split.
+        """
+        splits = 0
+        frontier = {leaf for leaf in seeds if leaf in self._index}
+        while frontier:
+            to_split: set[Leaf] = set()
+            for leaf in frontier:
+                size, half = leaf.size, leaf.size // 2
+                corner = (leaf.x, leaf.y, leaf.z)
+                centre = (leaf.x + half, leaf.y + half, leaf.z + half)
+                for axis in range(3):
+                    # a seed is a child of a split: along each axis one of its faces is
+                    # shared with a sibling (same level, never a violation) and only the
+                    # other one looks outside the parent
+                    outward = (corner[axis] >> leaf.level) & 1
+                    point = list(centre)
+                    point[axis] = corner[axis] + size if outward else corner[axis] - 1
+                    if not 0 <= point[axis] < self.n:
+                        continue                       # the wall of the box
+                    # only a neighbour two or more levels coarser breaks the rule, so
+                    # only those levels are looked up (a finer one covers no face)
+                    cells = self._level_cells
+                    for level in range(self.max_level, leaf.level + 1, -1):
+                        index = cells[level].get((point[0] >> level, point[1] >> level,
+                                                  point[2] >> level))
+                        if index is not None:
+                            to_split.add(self.leaves[index])
+                            break
+            if not to_split:
+                break
+            new: list[Leaf] = []
+            frontier = set()
+            for leaf in self.leaves:
+                if leaf in to_split:
+                    children = self.split(leaf)
+                    new.extend(children)
+                    frontier.update(children)
+                    splits += 1
+                else:
+                    new.append(leaf)
+            self._reindex(new)
+        return splits
+
     def balance(self, rounds: int = 32) -> int:
-        """Enforce the 2:1 rule; returns how many leaves were split."""
+        """Enforce the 2:1 rule on the whole tree; returns how many leaves were split."""
         splits = 0
         for _ in range(rounds):
             to_split: set[Leaf] = set()
@@ -319,10 +380,17 @@ class Octree:
                 break
             marked_set = set(marked)
             new: list[Leaf] = []
+            children: list[Leaf] = []
             for leaf in self.leaves:
-                new.extend(self.split(leaf) if leaf in marked_set else [leaf])
+                if leaf in marked_set:
+                    split = self.split(leaf)
+                    new.extend(split)
+                    children.extend(split)
+                else:
+                    new.append(leaf)
             self._reindex(new)
-            self.balance()
+            # only the new leaves can have broken the 2:1 rule: balance around them
+            self.balance_from(children)
 
     def coarsen(self, indicator: Callable[[Leaf], float], threshold: float) -> None:
         """Merge the eight children of a parent when all of them are below threshold."""

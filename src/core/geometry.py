@@ -467,8 +467,12 @@ class BatteryGeometry:
         # radial thickness of the shell and the vertical thickness of the slabs are
         # compared with the *local* cell size, so a graded mesh measures them with
         # the cells that are actually there
-        x_shell = cyl.center_x + cyl.r_shell
-        y_shell = cyl.center_y + cyl.r_shell
+        # the cell is measured *in* the shell (on the +x radius, half a shell inside the
+        # outer surface): the point (cx + r, cy + r) this used to probe is the corner of
+        # the square, out in the air, where a tree keeps coarse leaves - a 375 mm "cell"
+        # there made the shell thicker than the insulation and painted steel over it
+        x_shell = cyl.center_x + cyl.r_shell - 0.5 * max(cyl.shell_thickness, 1e-6)
+        y_shell = cyl.center_y
         mid_lateral = 0.5 * (cyl.base_z + cyl.z_shell_top)
         cell = max(_axis_size(mesh, 0, x_shell, y_shell, mid_lateral),
                    _axis_size(mesh, 1, x_shell, y_shell, mid_lateral))

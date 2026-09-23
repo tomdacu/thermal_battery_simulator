@@ -809,3 +809,21 @@ def test_the_power_of_the_plant_is_rated_on_the_surface_of_the_pipes():
     # 1 m2 carrying 10 kW is exactly 1 W/cm2: the conversion is the point of the helper
     assert pipe_surface_power_w_cm2(10_000.0, 1.0) == pytest.approx(1.0)
     assert pipe_surface_power_w_cm2(1.0e6, 0.0) == float("inf")
+
+
+def test_a_ring_count_spreads_the_rings_over_the_whole_bed():
+    """Fewer rings than the pitch fits are spread over the radius, not packed at the axis."""
+    from src.core.pipe_network import riser_positions
+
+    config = vessel(layout=LAYOUT_RINGS, n_rings=4)
+    points = np.asarray(riser_positions(config, (0.0, 0.0)))
+    radii = np.unique(np.round(np.hypot(points[:, 0], points[:, 1]), 9))
+    assert len(radii) == 4
+    assert radii[-1] == pytest.approx(config.inner_radius, rel=1e-9)
+    assert radii[0] == pytest.approx(config.inner_radius / 4, rel=1e-9)
+    # the risers on a ring are spaced about like the rings: similar sand per riser
+    step = config.inner_radius / 4
+    for radius in radii:
+        on_ring = int(np.sum(np.isclose(np.hypot(points[:, 0], points[:, 1]), radius)))
+        assert 2 * np.pi * radius / on_ring >= step - 1e-9
+        assert 2 * np.pi * radius / on_ring < 2.5 * step

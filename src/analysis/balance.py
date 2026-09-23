@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..constants import T_AMBIENT_DEFAULT
-from ..core.mesh import MaterialID, Mesh3D
+from ..core.mesh import MaterialID, Mesh3D, storage_mask
 from ..core.grid import GridIndex
 from . import fluxes
 
@@ -139,7 +139,7 @@ def compute_balance(mesh: Mesh3D | AdaptiveMesh, t_ambient: float = T_AMBIENT_DE
     ex_stored = fluxes.stored_exergy(mesh, t_ambient)
 
     battery = mesh.material_id != int(MaterialID.AIR)
-    sand = mesh.material_id == int(MaterialID.SAND)
+    sand = storage_mask(mesh.material_id)
     insulation = mesh.material_id == int(MaterialID.INSULATION)
     steel = mesh.material_id == int(MaterialID.STEEL)
 
@@ -169,7 +169,7 @@ def compute_balance(mesh: Mesh3D | AdaptiveMesh, t_ambient: float = T_AMBIENT_DE
 
 def storage_capacity(mesh: Mesh3D | AdaptiveMesh, t_max: float, t_ambient: float = T_AMBIENT_DEFAULT) -> float:
     """Sensible storage capacity of the sand region between ambient and ``t_max`` [J]."""
-    sand = mesh.material_id == int(MaterialID.SAND)
+    sand = storage_mask(mesh.material_id)
     if not sand.any():
         return 0.0
     return float(np.sum(mesh.rho[sand] * mesh.cp[sand] * mesh.V[sand])

@@ -227,9 +227,12 @@ energy balance is monitored per step.
 iteration on the power; the loss itself comes from the envelope flux integral.
 
 **Why the secant method.** The loss is a smooth, monotone function of the power with an
-unknown derivative; secant needs no derivative and converges superlinearly in 3-6
-iterations (a Newton method would need `dQ/dP`, which costs two solves per step).
-Bisection would be slower and needs a bracket.
+unknown derivative; secant needs no derivative and converges superlinearly (a Newton
+method would need `dQ/dP`, which costs two solves per step).  The first step scales the
+power by the rise it still has to make over the ambient, which is exact for conduction
+and films without radiation, so the default model converges in **2 iterations** (it took
+6 with a 2 % first step and a 0.7 under-relaxation); one solver is kept for the whole
+iteration, so the AMG hierarchy and the warm start carry over.
 
 **Assumption to know about.** The iteration treats each solve as a steady state: the
 loss at the target temperature is computed *as if* the battery had been sitting there.

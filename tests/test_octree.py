@@ -307,3 +307,28 @@ def test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_in_a_bou
     # idle and ~1.4 s with four agents running, so the budget is deliberately loose and
     # the message reports the measurement.
     assert elapsed < 5.0, f"{elapsed:.3f} s for {tree.n_cells} leaves"
+
+
+def test_the_local_balance_gives_the_tree_the_full_sweep_gives():
+    """Balancing around the new leaves only is the same tree as a sweep of every face.
+
+    The minimal 2:1 refinement of a set of leaves is unique, so the local ripple
+    (``Octree.balance_from``, what ``refine`` runs) must land on the very leaves the full
+    sweep does - on random refinements of a mixed tree.
+    """
+    import random
+
+    random.seed(7)
+    for _ in range(3):
+        local, full = uniform_tree(32, 3), uniform_tree(32, 3)
+        for _round in range(3):
+            pick = set(random.sample(local.leaves, max(1, len(local.leaves) // 8)))
+            local.refine(lambda leaf, pick=pick: 1.0 if leaf in pick else 0.0, 0.5)
+            marked = {leaf for leaf in full.leaves if leaf.level > 0 and leaf in pick}
+            leaves = []
+            for leaf in full.leaves:
+                leaves.extend(full.split(leaf) if leaf in marked else [leaf])
+            full._reindex(leaves)
+            full.balance()
+        assert local.leaves == full.leaves
+        assert local.balance() == 0

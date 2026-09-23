@@ -121,7 +121,7 @@ test tree), the gas loop is coupled implicitly with its balance held per step, t
 and losses runs couple the loop too (no more uniform source plus a 60 degC pipe sink),
 every run sets its own state on the mesh, the AMG cache and the thread setting work, and
 the GUI shows only the plant (octree, Gas circuit, Pipes, an exchanger) with CG + AMG as
-its linear solver.  Suite: 386 passed (375 without the GUI sweep), ruff clean.
+its linear solver.  Suite: 389 passed (378 without the GUI sweep), ruff clean.
 
 Open, in order: (1) gas properties that follow the gas temperature along the loop
 ([12](12_METHODS.md) §11 "Limits"); (2) the standby paths of [13](13_REDESIGN.md) §7;

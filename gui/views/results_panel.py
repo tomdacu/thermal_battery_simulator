@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QFileDialog, QHBoxLayout, QTabWidget, QTextEdit, QV
 from src.analysis.balance import compute_balance
 from src.constants import T_AMBIENT_DEFAULT
 from src.core.materials import MaterialManager
+from src.core.mesh import storage_mask
 from src.viz.scene import MATERIAL_NAMES, grid_lines
 
 from ..units import k_to_c
@@ -55,7 +56,7 @@ class ResultsPanel(QWidget):
 
     # ---------------------------------------------------------- statistics
     def update_statistics(self, mesh) -> None:
-        storage = mesh.material_id == 1
+        storage = storage_mask(mesh.material_id)
         # the air around the vessel is excluded from the problem and held at the ambient:
         # it is not part of the battery and would only dilute the statistics
         active = ~np.asarray(mesh.excluded, dtype=bool)
@@ -122,9 +123,10 @@ class ResultsPanel(QWidget):
         if losses is not None:
             lines += [
                 "",
-                "=== Losses analysis ===",
+                "=== Steady standby ===",
                 f"converged           {losses.converged} ({losses.iterations} iterations)",
-                f"resistors' power    {losses.power / 1000:9.3f} kW",
+                f"storage held at     {k_to_c(losses.t_mean_storage):9.1f} degC",
+                f"holding power       {losses.power / 1000:9.3f} kW  (= the standby losses)",
                 f"power density       {losses.power_density:9.1f} W/m³",
             ]
         if transient is not None and len(transient):

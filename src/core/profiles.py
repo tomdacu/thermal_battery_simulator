@@ -104,6 +104,9 @@ class ExtractionProfile:
     fluid_rho: float = 1000.0
     times: list[float] = field(default_factory=list)
     powers: list[float] = field(default_factory=list)
+    #: the coldest the exchanger can return the gas at in the ``power`` mode [K]; a
+    #: request the bed can only meet with colder gas stops the run.  None = no floor
+    t_return_min: float | None = None
 
     def power_request(self, t: float = 0.0) -> float:
         """Requested power at ``t`` [W] (before the availability cap)."""

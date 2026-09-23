@@ -28,10 +28,10 @@ from src.core.materials import MaterialManager
 from src.core.mesh import Mesh3D
 from src.core.pipe_network import PipeNetwork, PipeNetworkConfig, build_pipe_network
 from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
-from src.solver.steady import SolverConfig, SteadyStateSolver
+from src.solver.steady import SolverConfig
 from src.solver.transient import TransientConfig, TransientSolver
 
-ANALYSIS_TYPES = ("steady", "losses", "transient")
+ANALYSIS_TYPES = ("standby", "transient")
 
 
 @dataclass
@@ -151,38 +151,30 @@ class SimulationController(QObject):
     # --------------------------------------------------------------- engine
     def _make_work(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh) -> Callable:
         solver_config = config.solver_config()
-        power = config.battery.heaters.power_w
 
-        def steady_solve(target, loop_power: float, network, progress=None):
-            """The steady state of the plant at ``loop_power`` on ``target``."""
-            loop = self._fluid_loop(config, target, network, power=loop_power)
-            if loop is None:
-                config.battery.apply_source(target)
-            solver_config.progress_callback = progress
-            solver = SteadyStateSolver(target, solver_config, fluid_loop=loop)
-            result = solver.solve()
-            solver_config.progress_callback = None
-            self.last_loop = solver.fluid_result
+        def hold(target, network, progress=None, should_stop=None, tolerance=None):
+            """The standby state of ``target``: the power that holds the set temperature.
+
+            A storage has one steady state worth asking for - the one where the power in
+            equals the losses - so it is asked as a temperature and solved for the power
+            (a secant iteration on coupled steady solves, ``solve_losses``).
+            """
+            settings = dict(config.losses)
+            if tolerance is not None:
+                settings["tolerance"] = tolerance
+            loop = self._fluid_loop(config, target, network)
+            result = solve_losses(target, LossesConfig(**settings), solver_config,
+                                  progress, should_stop, fluid_loop=loop)
+            self.last_loop = loop.solve(target) if loop is not None else None
             return result
 
-        def steady(progress, should_stop):
-            self.log.emit(f"[steady] solving at {power / 1000:.2f} kW")
-            result = steady_solve(mesh, power, config.pipe_network, progress)
-            self.log.emit(f"[steady] converged={result.converged} "
-                          f"residual={result.residual:.2e} in {result.solve_time:.2f} s "
-                          f"({result.iterations} sweeps)")
-            self._log_loop()
-            for note in result.notes:
-                self.log.emit(f"[solver] {note}")
-            return result
-
-        def losses(progress, should_stop):
-            cfg = LossesConfig(**config.losses)
-            loop = self._fluid_loop(config, mesh, config.pipe_network)
-            self.log.emit("[losses] iterating on the resistors' power")
-            result = solve_losses(mesh, cfg, solver_config, progress, should_stop,
-                                  fluid_loop=loop)
-            self.last_loop = loop.solve(mesh) if loop is not None else None
+        def standby(progress, should_stop):
+            t_hold = config.losses.get("t_target", 773.15) - 273.15
+            self.log.emit(f"[standby] holding the storage at {t_hold:.0f} degC")
+            result = hold(mesh, config.pipe_network, progress, should_stop)
+            self.log.emit(f"[standby] converged={result.converged} in {result.iterations} "
+                          f"iterations: {result.power / 1000:.2f} kW holds "
+                          f"{result.t_mean_storage - 273.15:.1f} degC")
             self._log_loop()
             return result
 
@@ -208,17 +200,23 @@ class SimulationController(QObject):
                                                level.bands, level.base_level)
                 config.battery.apply_to_mesh(tree)
                 if config.pipe_config is not None:
-                    network = build_pipe_network(tree, config.pipe_config)
+                    cyl = config.battery.cylinder
+                    network = build_pipe_network(tree, config.pipe_config,
+                                                 center=(cyl.center_x, cyl.center_y))
                     network.paint(tree)
                     networks[id(tree)] = network
                 return tree
 
             def observables(tree):
-                steady_solve(tree, power, networks.get(id(tree)))
+                # the standby state of every level: the storage held at the set
+                # temperature, and the power that holds it - the losses - is what the
+                # mesh has to get right (a tight hold, so its own tolerance does not
+                # pass for a discretisation error)
+                result = hold(tree, networks.get(id(tree)), tolerance=0.02)
                 balance = compute_balance(tree, config.battery.t_ambient,
                                           radiation=config.radiation)
                 return {"t_mean_storage": balance.t_mean_storage,
-                        "t_max": balance.t_max, "power": balance.q_battery}
+                        "t_max": balance.t_max, "power": result.power}
 
             report = find_mesh(build, observables, plan, target, progress, should_stop)
             for line in report.summary().splitlines():
@@ -230,10 +228,8 @@ class SimulationController(QObject):
             if loop is None:
                 config.battery.apply_source(mesh)
             if config.start_from_steady:
-                start = config.power_profile.power_at(0.0)
-                self.log.emit(f"[transient] steady pre-run at {start / 1000:.2f} kW for "
-                              f"the initial field")
-                steady_solve(mesh, start, config.pipe_network)
+                self.log.emit("[transient] standby pre-run for the initial field")
+                hold(mesh, config.pipe_network)
             settings = dict(config.transient)
             settings.setdefault("save_full_field", False)
             t_cfg = TransientConfig(
@@ -257,7 +253,7 @@ class SimulationController(QObject):
             return results
 
         self.last_loop = None
-        return {"steady": steady, "losses": losses, "transient": transient,
+        return {"standby": standby, "transient": transient,
                 "automesh": automesh}[config.analysis]
 
     def _fluid_loop(self, config: RunConfig, mesh: Mesh3D | AdaptiveMesh,

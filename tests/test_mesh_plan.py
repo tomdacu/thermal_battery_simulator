@@ -106,3 +106,29 @@ def test_the_a_priori_plan_of_the_test_battery_is_physical():
     assert {"storage", "insulation_radial", "shell", "slab_top", "slab_bottom"} == names
     for plan in plans:
         assert 0.0 < plan.target <= plan.thickness + 1e-9
+
+
+def test_a_ring_region_refines_the_ring_and_not_the_air_at_its_corners():
+    """The insulation is an annulus: a leaf at 45 degrees on it is refined, one in the
+    corner of its bounding square (outside the vessel) is not.
+    """
+    import numpy as np
+
+    geometry = vessel_with()
+    cyl = geometry.cylinder
+    regions = [r for r in active_regions(cyl, {"insulation_radial": 0.05})
+               if r.name == "insulation_radial"]
+    assert len(regions) == 1
+    band = region_bands(regions)[0]
+    mid = 0.5 * (cyl.r_storage + cyl.r_shell)
+    z = 0.5 * (cyl.base_z + cyl.z_shell_top)
+    half = 0.02
+
+    def cell(x, y):
+        low = np.array([[x - half, y - half, z - half]])
+        return band.touching(low, low + 2 * half)[0]
+
+    angle = np.pi / 4
+    assert cell(cyl.center_x + mid * np.cos(angle), cyl.center_y + mid * np.sin(angle))
+    assert not cell(cyl.center_x + 0.97 * cyl.r_shell, cyl.center_y + 0.97 * cyl.r_shell)
+    assert not cell(cyl.center_x, cyl.center_y)          # the sand is not the ring

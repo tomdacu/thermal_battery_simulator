@@ -327,6 +327,9 @@ class FluidLoop:
     #: absolute pressure of the loop [Pa]: sets the density and the validity of the
     #: incompressible pressure-drop treatment (valid while dp/p < 10%)
     pressure: float = 101325.0
+    #: the coldest the gas can come back into the bed [K]: an exchanger cannot return
+    #: it colder than its own cold side, so a balance that asks for less is refused
+    t_in_min: float = 0.0
 
     # ------------------------------------------------------------------ helpers
     def _flow_split(self) -> np.ndarray:
@@ -399,12 +402,13 @@ class FluidLoop:
             if slope >= 0.0:
                 raise ValueError("the loop balance has no solution: check the flow")
             t_in = (-self.external_power - offset) / slope
-            if t_in <= 0.0:
+            if t_in <= max(self.t_in_min, 0.0):
                 raise ValueError(
                     f"the loop cannot carry {self.external_power / 1000:+.1f} kW at "
-                    f"{self.mass_flow:.3f} kg/s through a bed at "
-                    f"{np.mean(wall_flat):.0f} K: the air would have to be at "
-                    f"{t_in:.0f} K.  Increase the mass flow or reduce the power")
+                    f"{self.mass_flow:.3f} kg/s: the gas would have to come back at "
+                    f"{t_in - 273.15:.0f} degC, below the exchanger's "
+                    f"{self.t_in_min - 273.15:.0f} degC.  The bed around the pipes cannot "
+                    f"give that power any more: reduce it, or add flow or pipe surface")
         result.t_in = t_in
 
         q_fluid = np.zeros(wall_flat.shape, dtype=float)

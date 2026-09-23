@@ -46,6 +46,16 @@ class MaterialID(IntEnum):
     CONCRETE = 7
 
 
+def storage_mask(material_id: np.ndarray) -> np.ndarray:
+    """The cells of the storage bed: the sand and the pipe cells buried in it.
+
+    A pipe cell keeps the bed's properties (a pipe is a thin wall inside a cell of
+    sand, see ``PipeNetwork.paint``), so it is storage like its neighbours: the mean
+    temperature of the store, the losses target and the cycle stops all read it.
+    """
+    return np.isin(np.asarray(material_id), (int(MaterialID.SAND), int(MaterialID.TUBES)))
+
+
 class BoundaryType(IntEnum):
     INTERNAL = 0
     DIRICHLET = 1

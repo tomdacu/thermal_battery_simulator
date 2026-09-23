@@ -5,9 +5,14 @@ reported numbers are defined.  Entry points: `src/solver/steady.py`,
 `src/analysis/losses.py`, `src/solver/transient.py`, `src/analysis/convergence.py`,
 `src/analysis/cycle.py`, `src/solver/fluid.py`.
 
-## 1. Steady state
+## 1. Steady state (in the GUI: the standby of §2)
 
-**Question**: with the resistors running at the rated power, where does the heat
+The GUI no longer offers a steady state at a fixed power: a storage settles where the
+power in equals the losses, so at a charging power it would sit thousands of degrees
+high.  The steady solve below is the building block of the standby analysis (§2), which
+asks for a temperature and answers with the power.
+
+**Question**: with the resistors running at a given power, where does the heat
 go and what temperature field settles?
 
 1. `BatteryGeometry.apply_to_mesh` paints the mesh, and `PipeNetwork.paint` marks the
@@ -27,10 +32,12 @@ loss breakdown, stored energy and exergy, thermal autonomy, and the gas loop - i
 and outlet temperature, bed power, NTU, pressure drop, fan power
 (`ResultsPanel.update_energy`).
 
-## 2. Losses analysis
+## 2. Steady standby (losses analysis)
 
-**Question**: which heater power holds the storage at a target temperature - and
-how much of it leaks away?
+**Question**: which power holds the storage at a target temperature - and how much of
+it leaks away?  This is the steady analysis of the GUI ("Steady standby"): the holding
+power *is* the standby loss.  The storage is the sand plus the pipe cells buried in it
+(`storage_mask`).
 
 `solve_losses(mesh, LossesConfig, SolverConfig)`:
 

@@ -179,7 +179,8 @@ class VizView(QWidget):
                 self.field_combo.setCurrentIndex(index)
         self.render()
 
-    def show_geometry(self, battery, mesh=None, network=None) -> None:
+    def show_geometry(self, battery, mesh=None, network=None,
+                      reset_camera: bool = True) -> None:
         """Schematic preview; the cut and opacity controls apply to it too.
 
         ``network`` is the pipe network the Pipes tab built and painted: the preview
@@ -193,6 +194,7 @@ class VizView(QWidget):
         self._mode = "geometry"
         if mesh is not None:
             self._mesh = mesh
-        if self.plotter is not None:
+        if self.plotter is not None and reset_camera:
+            # an edit redraws in place: the camera stays where the user left it
             self.plotter.reset_camera()
         self.render()

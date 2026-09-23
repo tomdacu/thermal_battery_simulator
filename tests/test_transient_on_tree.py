@@ -341,12 +341,13 @@ def tube_runs(tree: AdaptiveMesh, tube: np.ndarray, diameter: float = 0.1,
 def silo_settings(**overrides) -> CycleSettings:
     """The cycle of the small silo: 20 kW in, half an hour of standby, 10 kW out.
 
-    The charge target is a couple of tenths of a kelvin above the start on purpose: the
-    bed of a miniature silo takes the heat slowly, so the criterion fires *inside* a
-    chunk - which is what shows the per-step hook of the march doing the stopping on a
-    tree - while the discharge runs to its own floor on the gas.
+    The charge target is ~22 K above the start on purpose: a step of the miniature
+    silo adds ~3.7 K to the store (the pipe columns included - they are bed cells), so
+    the criterion fires after six steps, *inside* the second chunk - which is what
+    shows the per-step hook of the march doing the stopping on a tree - while the
+    discharge runs to its own floor on the gas.
     """
-    settings = dict(charge_power=20_000.0, t_target=293.6, charge_limit=6 * 3600.0,
+    settings = dict(charge_power=20_000.0, t_target=315.0, charge_limit=6 * 3600.0,
                     standby_time=1800.0, discharge_power=10_000.0, t_delivery_min=250.0,
                     dt=1800.0, chunk=7200.0, max_chunks=2)
     settings.update(overrides)
