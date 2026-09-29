@@ -15,6 +15,11 @@ same session said 270 / 259 and then 295 / 284 as the octree solver, the pipe-ne
 extension and the cycle completion landed.  Test files and counts move while work is in
 flight, so re-run the command instead of trusting these numbers.
 
+The same commands run on every push in CI (`.github/workflows/ci.yml`): `lint` (ruff,
+the selection above), `tests` on Python 3.10 and 3.12 head-less - without the GUI sweep
+and without the wall-clock case below - and `sweep`, where that case runs as an
+informational step rather than as a red build.
+
 | file | collected cases | covers |
 |---|---|---|
 | `tests/test_pipes.py` | 72 | buried pipe networks: layout rules, header plumbing, wetted area, splits, paint, hydraulics, the loop built from the network |

@@ -275,6 +275,11 @@ Counts measured on 2026-09-23 with `--collect-only`; re-run the command instead 
 trusting the number.  `tests/test_octree.py` holds one wall-clock assertion (a
 32 768-leaf tree in under a second) that a loaded machine can miss.
 
+The same three jobs run on every push (`.github/workflows/ci.yml`): ruff, the suite on
+Python 3.10 and 3.12 - head-less, without the GUI sweep and without that wall-clock
+case - and the sweep on its own, where the wall-clock case runs as an informational
+step.
+
 **Stated limits** ([docs/18](docs/18_SOLVER.md) §10, [docs/19](docs/19_HYDRAULICS.md)
 §8): 1-D incompressible gas, one tube per cell in the well model, headers sized at one
 design gas temperature, no natural convection in the roof air or in the pores.
