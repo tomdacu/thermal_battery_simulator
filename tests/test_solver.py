@@ -7,7 +7,7 @@ import pytest
 from src.core.mesh import BoundaryType, MaterialID, Mesh3D
 from src.core.physics import half_cell_h
 from src.core.profiles import InitialCondition, PowerProfile, ExtractionProfile
-from src.solver.linear import LinearConfig, is_symmetric, solve_linear
+from src.solver.linear import HAS_PYAMG, LinearConfig, is_symmetric, solve_linear
 from src.solver.matrix import build_steady_matrix
 from src.solver.steady import SolverConfig, SteadyStateSolver
 from src.solver.transient import TransientConfig, TransientSolver
@@ -151,12 +151,20 @@ def test_direct_and_iterative_agree(slab):
     assert np.abs(direct.T - iterative.T).max() < 1e-6
 
 
+@pytest.mark.skipif(not HAS_PYAMG,
+                    reason="PyAMG is not installed: the layer falls back to Jacobi")
 def test_amg_is_used_when_available(slab):
+    """AMG is *used*: no fallback note, and the same answer as the direct solve."""
     matrix, rhs = build_steady_matrix(slab)
     result = solve_linear(matrix, rhs, LinearConfig(method="bicgstab",
                                                     preconditioner="amg_rs",
                                                     tolerance=1e-10))
     assert result.converged
+    fallback = [note for note in result.notes
+                if "falling back" in note or "not installed" in note]
+    assert fallback == [], fallback
+    direct = solve_linear(matrix, rhs, LinearConfig(method="direct"))
+    assert np.abs(result.T - direct.T).max() < 1e-8
 
 
 # ----------------------------------------------------------------- transient

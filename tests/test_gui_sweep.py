@@ -310,26 +310,6 @@ def test_every_run_kind_executes_through_the_controller(window):
     panel.radio_standby.setChecked(True)
 
 
-def test_cancellation_stops_a_transient_run(window):
-    restore_sane_configuration(window)
-    panel = window.analysis_panel
-    panel.radio_transient.setChecked(True)
-    panel.duration.setValue(5.0)
-    panel.duration_unit.setCurrentIndex(2)
-    panel.dt.setValue(60.0)
-    config = window._run_config()
-    work = window.controller._make_work(config, window.mesh)
-    calls = {"n": 0}
-
-    def stop() -> bool:
-        calls["n"] += 1
-        return calls["n"] > 1
-
-    result = work(lambda *_: None, stop)
-    assert len(result) < 50
-    panel.radio_standby.setChecked(True)
-
-
 def test_state_save_and_load_round_trip_through_the_window(window, tmp_path):
     from src.io.state import StateManager
 

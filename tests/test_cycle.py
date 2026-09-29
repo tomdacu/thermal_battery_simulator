@@ -77,7 +77,6 @@ def test_charging_through_the_loop_heats_the_bed():
     assert float(mesh.T.mean()) > 405.0
     # the resistors are the only energy input, and the loop carried it into the bed
     assert len(results) > 1
-    assert loop.external_power == pytest.approx(50_000.0)
 
 
 def test_the_cycle_reports_what_the_fan_costs():
@@ -271,8 +270,8 @@ def test_the_discharge_stops_at_the_delivery_floor_inside_a_chunk():
     mesh, loop = silo_bed()
     settings = cycle_settings(t_target=450.0, t_delivery_min=400.0, standby_time=0.0,
                               discharge_power=30_000.0)
-    charged = run_cycle(mesh, loop, replace(settings, discharge_power=0.0), SOLVER_CONFIG)
-    assert charged.discharge.notes == ["no discharge power requested: the phase is skipped"]
+    # the call charges ``mesh`` in place: the discharges below copy that state
+    run_cycle(mesh, loop, replace(settings, discharge_power=0.0), SOLVER_CONFIG)
 
     def discharge(chunk: float, dt: float):
         bed = copy.deepcopy(mesh)       # the same charged state, another discrete run

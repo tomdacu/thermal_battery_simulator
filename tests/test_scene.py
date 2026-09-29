@@ -58,7 +58,6 @@ def test_every_field_and_clip_combination_renders(plotter, model, field, axis, f
     mesh, _ = model
     plotter.clear()
     actor = scene.add_field(plotter, mesh, field, axis=axis, fraction=fraction)
-    assert actor is not None or (field == "Material" and 0.5 * mesh.Lz or True)
     if actor is None:
         assert field == "Material" and axis is not None and fraction > 0.9
 

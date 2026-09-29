@@ -45,8 +45,9 @@ def test_the_boxes_cover_the_active_model_and_never_the_air():
                 # the envelope is the shell's footprint (the foundation is wider, and it
                 # is a solid: the concrete stays in the problem)
                 reach = cyl.r_shell + cyl.foundation_margin
-                assert low >= cyl.center_x - reach - 1e-9
-                assert high <= cyl.center_x + reach + 1e-9
+                centre = (cyl.center_x, cyl.center_y)[axis]
+                assert low >= centre - reach - 1e-9
+                assert high <= centre + reach + 1e-9
 
     # the target of every region is the one the caller asked for (the panel's mixture)
     size_of = {region.name: region.target for region in regions}

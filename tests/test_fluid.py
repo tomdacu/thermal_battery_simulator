@@ -241,10 +241,6 @@ def test_the_circulation_loss_is_reported_against_both_denominators():
     result = FluidLoop(runs=[run], mass_flow=0.05, h_fluid=500.0, t_in=300.0,
                        external_power=-2000.0, fittings_k=10.0).solve(mesh)
     assert result.circulation_loss > 0.0
-    assert result.circulation_loss_electric == pytest.approx(
-        result.fan_power / abs(result.external_power), rel=1e-12)
-    assert result.circulation_loss == pytest.approx(
-        result.fan_power / abs(result.power), rel=1e-12)
 
 
 def test_a_pressurised_loop_uses_the_density_of_its_pressure():

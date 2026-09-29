@@ -73,28 +73,41 @@ Collected cases as reported by `python -m pytest tests/ --collect-only -q`
 | file | cases | content |
 |---|---|---|
 | `tests/conftest.py` | - | fixtures: 1D slab, adiabatic box, complete storage model |
-| `tests/test_scene.py` | 60 | rendering path off-screen (fields, cuts, colormaps, exports) |
-| `tests/test_pipes.py` | 72 | buried pipe networks: layouts, collection, splits, paint, hydraulics, the loop built from the network |
-| `tests/test_core.py` | 26 | units contract, mesh, materials, geometry, profiles |
+| `tests/test_pipes.py` | 73 | buried pipe networks: layouts, collection, splits, paint, hydraulics |
+| `tests/test_scene.py` | 72 | rendering path off-screen (fields, cuts, colormaps, exports) |
+| `tests/test_core.py` | 23 | units contract, mesh, materials, geometry, profiles |
 | `tests/test_fluid.py` | 23 | the gas loop and the pipe banks |
-| `tests/test_solver.py` | 22 | assembly exactness, reference matrix, analytic regressions, backends |
-| `tests/test_octree.py` | 14 | 2:1 balance, conservative faces, an octree Laplacian |
-| `tests/test_analysis.py` | 12 | flux closure, losses iteration, HDF5 round trip |
-| `tests/test_gui_sweep.py` | 12 | systematic control sweep (head-less, slow) |
-| `tests/test_refinement.py` | 10 | graded-grid generation |
-| `tests/test_cycle.py` | 11 | charge and discharge through the gas loop |
+| `tests/test_solver.py` | 23 | assembly exactness, reference matrix, analytic regressions, backends |
+| `tests/test_analysis.py` | 14 | flux closure, losses iteration, HDF5 round trip |
+| `tests/test_octree.py` | 13 | 2:1 balance, conservative faces, an octree Laplacian |
+| `tests/test_cycle.py` | 13 | charge and discharge through the gas loop |
+| `tests/test_paint_on_tree.py` | 13 | the painters on the tree against their structured twin |
 | `tests/test_octree_solver.py` | 12 | the octree wired to the physics: equivalence, conservation, refinement |
-| `tests/test_heaters.py` | 9 | hairpin bank, power deposit, validations |
-| `tests/test_environment.py` | 9 | outside film, excluded air, contact resistance |
+| `tests/test_adaptive_mesh.py` | 11 | the ``MeshAPI`` protocol, analytic cases, refinement |
+| `tests/test_environment.py` | 11 | outside film, excluded air, contact resistance |
+| `tests/test_gui_sweep.py` | 11 | systematic control sweep (head-less, slow) |
+| `tests/test_hydraulics.py` | 10 | the network's hydraulics and the header engine |
+| `tests/test_refinement.py` | 10 | graded-grid generation |
+| `tests/test_balance_on_tree.py` | 9 | the energy balance on the tree and on the structured twin |
 | `tests/test_convergence.py` | 9 | automatic mesh search and its report |
-| `tests/test_graded_mesh.py` | 6 | graded grid inside the solver |
-| `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PySide6) |
+| `tests/test_gui.py` | 9 | head-less GUI smoke test (skipped without PySide6) |
+| `tests/test_transient_on_tree.py` | 8 | the transient march on the tree |
+| `tests/test_convergence_on_tree.py` | 7 | the same search driven by an ``AdaptivePlan`` |
+| `tests/test_geometry_on_a_tree.py` | 7 | the painter on the tree against the structured twin |
+| `tests/test_box_tree.py` | 5 | the anisotropic tree of boxes against the octree |
+| `tests/test_graded_mesh.py` | 5 | graded grid inside the solver |
+| `tests/test_mesh_plan.py` | 5 | the a priori plan: active regions and bands |
+| `tests/test_packed_bed.py` | 5 | the Zehner-Bauer-Schluender bed |
+| `tests/test_steady_on_tree.py` | 5 | the steady solve on the tree and its structured twin |
+| `tests/test_well_model.py` | 4 | the Peaceman well model and the gas circuit |
+| `tests/test_thin_layers_and_soil.py` | 2 | a thin shell in series, the soil layer |
 | `scripts/benchmark.py` | - | assembly/solve timings per mesh size (`build_model`, `main`) |
 | `scripts/figures.py` | - | regenerates `docs/figures/`: `battery_with_pipes`, `temperature_field`, `graded_mesh`, `adaptive_concept`, `gas_loop_schema`, `design_curves`, `main` |
 
 The counts move while work is in flight; the table is the reading of
-`python -m pytest tests/ --collect-only -q` on **2026-09-29 (418 total, 406 without the
-GUI sweep)**; on 2026-09-20 the same command said 311/300, with 295/284 and 270/259
+`python -m pytest tests/ --collect-only -q` on **2026-09-29 (412 total, 401 without the
+GUI sweep, after the audit removed the cases that could not fail)**; earlier the same
+day the same command said 418/406, and on 2026-09-20 it said 311/300, with 295/284 and 270/259
 earlier in that session as work landed.  Re-run the command instead of trusting it;
 [09](09_TESTING.md) §1 records the same reading with its caveat and what each case
 checks.

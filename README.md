@@ -1,5 +1,9 @@
 # Thermal Battery Simulator
 
+[![CI](https://github.com/tomdacu/thermal_battery_simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/tomdacu/thermal_battery_simulator/actions/workflows/ci.yml)
+![licence: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/licence-PolyForm%20Noncommercial%201.0.0-blue)
+![python 3.10 | 3.12](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)
+
 ![Thermal Battery Simulator](assets/banner.png)
 
 **A 3D simulator of sand batteries: the bed, the envelope and the gas circuit that
@@ -262,8 +266,8 @@ balance, the closed gas loop, the effectiveness and blower design curves.
 ## Development
 
 ```bash
-python -m pytest tests/ -q                                   # 418 cases, ~6 minutes, head-less
-python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 406 without the GUI sweep
+python -m pytest tests/ -q                                   # 412 cases, ~6 minutes, head-less
+python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 401 without the GUI sweep
 python -m ruff check src tests gui --select F,E9,B,SIM,UP     # lint
 ```
 

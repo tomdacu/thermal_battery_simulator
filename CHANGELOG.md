@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-09-29 (later) - the suite audited: what could not fail
+
+An audit of every test function (a mechanical pass for duplicates, then six read-only
+reviewers over the 28 files) and the cleanup it produced.  The physics is untouched: the
+suite lost the cases that could not fail and the asserts that restated the production
+formula.
+
+* **Six cases deleted** (418 -> 412; 401 without the GUI sweep):
+  `test_the_flux_balance_is_zero_on_a_conservative_face_list` (the sum telescopes to zero
+  for *any* face list, by construction), `test_a_leaf_survives_the_morton_round_trip`
+  (pins an helper no production path uses), `test_graded_edges_keep_every_band_boundary_...`
+  (already covered on four boundaries by `test_refinement`),
+  `test_the_network_drives_the_fluid_loop_...` (covered by `test_fluid` and by the
+  network's own loop test), `test_the_specific_area_is_the_sizing_number` (two of its
+  three asserts restated the two properties), and the GUI sweep's cancellation case - the
+  config it used ended at 31 samples against an assert of `< 50`, so it passed with or
+  without cancelling (the cancellation itself is covered in `test_solver`).
+* **~55 asserts removed** across 18 files: the ones whose right-hand side was the body of
+  a production property evaluated on the same objects (`total_area == sum(perimeter *
+  length)`, `exchange_area == total_area - headers`, `report.insulated == total_area -
+  exchange_area`, `circulation_loss == fan_power / |power|`, `rayleigh == g beta dT L^3 /
+  (nu alpha)`, ...), plus field copies and forwards - the pattern `docs/09` §1 declares
+  absent, which had grown back.
+* **Three tests fixed rather than deleted**: the Rayleigh test now checks the `L^3` law as
+  a ratio (it could not see a wrong exponent), `test_amg_is_used_when_available` now skips
+  without PyAMG, rejects a fallback note and compares with the direct solve (`docs/09`
+  promised that contract; the test only asserted convergence), and the mesh-plan footprint
+  test compares the y bound with the y centre (it used `center_x` on every axis, so the y
+  check was vacuous).
+* Kept on purpose: the structured-mesh / box-tree / octree **twins** (two implementations
+  of one contract), the conservation residuals (computed, not constructed), the unit
+  conversions and the material-table values (a mistyped constant is a real bug), and the
+  `matrix() == tree.diffusion_matrix()` identity (a cross-check between two assemblies).
+* `docs/07` refreshed its table to the current reading; `docs/09` and `docs/11` follow.
+
 ## 2.1.0 - 2026-09-29
 
 The licence change, and the one dependency that ruled it out.

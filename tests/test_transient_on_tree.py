@@ -393,7 +393,6 @@ def test_the_cycle_closes_its_ledger_on_a_tree(structured_twin):
     carried = (report.dE_stored + report.energy_delivered + report.energy_loss
                + report.fan_energy)
     assert report.energy_electric == pytest.approx(carried, rel=0.01)
-    assert report.balance_residual() < 0.01
     assert report.charge.energy_in == pytest.approx(
         settings.charge_power * report.charge.seconds, rel=1e-6)
     assert report.discharge.energy_out == pytest.approx(

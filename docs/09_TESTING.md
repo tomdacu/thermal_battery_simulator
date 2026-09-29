@@ -51,7 +51,9 @@ New files of the anisotropic mesh and the plant physics:
 | `tests/test_hydraulics.py` | 10 | the network's hydraulics and the header engine: Darcy-Weisbach, parallel pipes, the draught at low and high flow, balancing orifices to 1e-8, the orifice plate, Voronoi targets, the engine (manifold chosen, velocity met, headers lifted, targets delivered, the loop following the hydraulics) |
 | `tests/test_packed_bed.py` | 5 | the Zehner-Bauer-Schlünder bed: the gas limit, the bounds without radiation, growth with temperature and grain, dry sand in the measured range, a steady bed at the conductivity of its temperature |
 
-**Update 2026-09-29** (`--collect-only`): **418** cases, **406** without the GUI sweep.
+**Update 2026-09-29** (`--collect-only`): **412** cases, **401** without the GUI sweep
+(audited later the same day: the cases that could not fail, and the asserts that restated
+the production formula, are gone - see the changelog).
 The licence release changed the GUI binding (PyQt6 -> PySide6) without touching the
 physics: the sweep gained one case - *no slot raised an exception*, which watches
 `sys.excepthook` because PySide6 prints a failing handler and carries on where PyQt6

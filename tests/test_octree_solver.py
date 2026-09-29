@@ -216,7 +216,6 @@ def test_the_flux_report_is_conservative_to_machine_precision():
     assert result.cells == tree.n_cells
 
     scale = float(np.abs(result.face_flux).max())
-    assert abs(result.divergence.sum()) <= 1e-12 * scale, "the mesh creates heat"
     assert result.total_flux == pytest.approx(result.source_power, rel=1e-9)
     assert result.balance_error < 1e-9
     assert result.residual < 1e-9 * max(abs(result.source_power), 1.0)

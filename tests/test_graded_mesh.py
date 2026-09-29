@@ -13,7 +13,7 @@ import pytest
 from src.analysis.balance import compute_balance
 from src.core.geometry import create_small_test_geometry
 from src.core.mesh import Mesh3D
-from src.core.refinement import Band, GridSpec, graded_edges
+from src.core.refinement import Band, GridSpec
 from src.solver.steady import SolverConfig, SteadyStateSolver
 
 
@@ -122,10 +122,3 @@ def test_the_energy_balance_closes_on_a_graded_mesh():
     balance = compute_balance(mesh)
     assert abs(balance.imbalance) < 1e-9 * balance.p_input
 
-
-def test_graded_edges_keep_every_band_boundary_on_a_grid_line():
-    """Masks stay clean only if the interfaces land on grid lines exactly."""
-    edges = graded_edges(6.0, [Band(0, 2.5, 0.05), Band(0, 6.0, 0.4)], growth=1.3)
-    assert np.any(np.isclose(edges, 2.5, atol=1e-12))
-    assert edges[0] == 0.0 and edges[-1] == pytest.approx(6.0, abs=1e-12)
-    assert np.all(np.diff(edges) > 0)
