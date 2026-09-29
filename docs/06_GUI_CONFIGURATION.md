@@ -2,7 +2,8 @@
 
 Every control, its default, its range and what it configures.  **Defaults are the
 live widget values**, read by instantiating the window off-screen and walking the form
-rows of every section (2026-09-23, PyQt6 + `QT_QPA_PLATFORM=offscreen`):
+rows of every section (2026-09-23, re-measured on PySide6 2026-09-29, with
+`QT_QPA_PLATFORM=offscreen`):
 
 ```python
 from gui.main_window import ThermalBatteryGUI

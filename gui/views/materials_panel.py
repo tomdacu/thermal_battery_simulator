@@ -8,7 +8,7 @@ reads them from here.
 """
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 from src.core.materials import INSULATION_MATERIALS, MATERIALS, STORAGE_MATERIALS
 from src.units import c_to_k

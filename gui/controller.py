@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from src.analysis.balance import compute_balance
 from src.analysis.convergence import AdaptivePlan, ConvergenceTarget, find_mesh
@@ -82,9 +82,9 @@ class RunConfig:
 class SimulationJob(QThread):
     """Runs one callable in a worker thread with progress and cancellation."""
 
-    progressed = pyqtSignal(int, str)
-    completed = pyqtSignal(object)
-    failed = pyqtSignal(str)
+    progressed = Signal(int, str)
+    completed = Signal(object)
+    failed = Signal(str)
 
     def __init__(self, work: Callable, parent=None) -> None:
         super().__init__(parent)
@@ -110,11 +110,11 @@ class SimulationJob(QThread):
 class SimulationController(QObject):
     """Owns the running job, the button state and the progress fan-out."""
 
-    progressed = pyqtSignal(int, str)
-    log = pyqtSignal(str)
-    finished = pyqtSignal(str, object)
-    failed = pyqtSignal(str)
-    running_changed = pyqtSignal(bool)
+    progressed = Signal(int, str)
+    log = Signal(str)
+    finished = Signal(str, object)
+    failed = Signal(str)
+    running_changed = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

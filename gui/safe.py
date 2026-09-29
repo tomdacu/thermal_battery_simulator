@@ -1,8 +1,10 @@
-"""Slot guard: an exception inside a PyQt6 slot aborts the process by default.
+"""Slot guard: a failure inside a slot is reported where the user can see it.
 
-Wrapping user-interaction slots keeps a mistake in one handler from killing the
-application: the traceback is printed and, when the window is available, shown
-in the log tab and the status bar.
+PySide6 prints the traceback of an exception raised in a slot and keeps running, so a
+mistake in one handler no longer takes the process down - but the error lands on a
+console that a windowed or packaged run does not have, and a handler that silently does
+nothing is a defect the user cannot report.  Wrapping the user-interaction slots keeps
+the traceback *and* routes the message to the log tab and the status bar.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import traceback
 
 
 def safe_slot(func):
-    """Decorator for Qt slots; reports failures instead of aborting.
+    """Decorator for Qt slots; reports failures instead of letting them vanish.
 
     Qt may pass signal arguments the slot does not declare, so the wrapper
     forwards only as many positional arguments as the method accepts.

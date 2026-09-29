@@ -3,8 +3,9 @@
 Purpose: turn "clicking around and hoping" into a repeatable check.  Modal
 dialogs are neutralised, the 3D view is exercised with a head-less PyVista
 plotter, and every widget is driven through its whole range while its slots are
-connected - which is where a PyQt6 application normally dies, because an
-exception inside a slot aborts the process.
+connected.  PySide6 prints the traceback of an exception raised inside a slot
+and carries on - the handler is dead but the process is not - so the sweep
+captures ``sys.excepthook`` and fails on anything a slot raised.
 """
 from __future__ import annotations
 
@@ -12,12 +13,12 @@ import os
 
 import pytest
 
-pytest.importorskip("PyQt6")
+pytest.importorskip("PySide6")
 pv = pytest.importorskip("pyvista")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("THERMAL_DISABLE_3D", "1")
 
-from PyQt6.QtWidgets import (  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
     QComboBox,
@@ -41,12 +42,34 @@ def app():
 @pytest.fixture(scope="module", autouse=True)
 def capture_qt_messages():
     """Record every Qt message so a framework warning cannot go unnoticed."""
-    from PyQt6.QtCore import qInstallMessageHandler
+    from PySide6.QtCore import qInstallMessageHandler
 
     captured: list = []
     qInstallMessageHandler(lambda mode, context, message: captured.append((mode.name, message)))
     yield captured
     qInstallMessageHandler(None)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def capture_slot_exceptions():
+    """Record the exceptions Qt hands to ``sys.excepthook`` instead of aborting.
+
+    A slot that raises leaves PySide6 running, so without this the sweep would
+    pass over a handler that never worked.
+    """
+    import sys
+    import threading
+
+    captured: list = []
+    previous = (sys.excepthook, threading.excepthook)
+
+    def record(kind, value, trace) -> None:
+        captured.append((kind.__name__, str(value)))
+
+    sys.excepthook = record
+    threading.excepthook = lambda args: record(args.exc_type, args.exc_value, args.exc_traceback)
+    yield captured
+    sys.excepthook, threading.excepthook = previous
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -327,3 +350,8 @@ def test_zz_no_qt_warning_came_from_the_application(capture_qt_messages):
              if kind in ("QtWarningMsg", "QtCriticalMsg", "QtFatalMsg")
              and "QFontDatabase" not in text]
     assert noisy == []
+
+
+def test_zz_no_slot_raised_an_exception(capture_slot_exceptions):
+    """No handler of the sweep may have died: PySide6 would have kept going."""
+    assert capture_slot_exceptions == []

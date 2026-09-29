@@ -16,8 +16,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QWidget
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
 
 from src.analysis.convergence import AdaptivePlan
 from src.analysis.mesh_plan import (MAX_TREE_LEVEL, MIN_TREE_LEVEL, active_regions,
@@ -62,11 +62,11 @@ def nearest_leaf(target: float, finest: float) -> float:
 class GeometryPanel(QWidget):
     """All geometry and plant controls; exposes accessors returning src objects."""
 
-    mesh_changed = pyqtSignal()
-    auto_mesh_requested = pyqtSignal()
+    mesh_changed = Signal()
+    auto_mesh_requested = Signal()
     #: the Pipes section asks the window - which owns the mesh - to build and paint the
     #: network; the window answers through :meth:`set_pipe_network`
-    pipe_network_requested = pyqtSignal()
+    pipe_network_requested = Signal()
 
     #: the gases the circuit can be filled with: the loop reads their cp, rho, mu and k
     #: (``src/solver/fluid.py``), and the pressure is a separate control because it is
@@ -367,7 +367,7 @@ class GeometryPanel(QWidget):
 
     def run_header_engine(self) -> HeaderDesign | None:
         """Size the headers for the current plant (see the Header engine section)."""
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         base = self.base_network_config()
         if base.split_mode != SPLIT_HYDRAULIC:

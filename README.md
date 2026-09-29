@@ -13,9 +13,12 @@ questions a designer asks of such a plant: what it loses in standby, how the bed
 and discharges, what the gas temperatures are, how the flow divides between the tubes,
 how the headers must be sized, what the fan costs and where the heat goes.
 
-Version **2.0.0** (2026-09-24): an anisotropic mesh, the tube coupled to its cell by a
-well model, the whole gas circuit with its hydraulics, a header-sizing engine, a packed
-bed that conducts like a hot one, and the mesh coupled to the model it is built from.
+Version **2.1.0** (2026-09-29): the interface runs on **PySide6** (LGPL) and the project
+is licensed under the **PolyForm Noncommercial License 1.0.0** - see
+[Licence](#licence).  Version **2.0.0** (2026-09-24) was: an anisotropic mesh, the tube
+coupled to its cell by a well model, the whole gas circuit with its hydraulics, a
+header-sizing engine, a packed bed that conducts like a hot one, and the mesh coupled to
+the model it is built from.
 
 ## Contents
 
@@ -122,7 +125,7 @@ git clone https://github.com/tomdacu/thermal_battery_simulator.git
 cd thermal_battery_simulator
 python -m venv .venv
 .venv\Scripts\activate            # Windows  (Linux/Mac: source .venv/bin/activate)
-pip install -r requirements.txt   # numpy, scipy, h5py, PyQt6, pyvista, pyvistaqt, pyamg, matplotlib
+pip install -r requirements.txt   # numpy, scipy, h5py, PySide6, pyvista, pyvistaqt, pyamg, matplotlib
 ```
 
 Without PyAMG the linear layer falls back to CG + Jacobi (slower, same answer).
@@ -259,8 +262,8 @@ balance, the closed gas loop, the effectiveness and blower design curves.
 ## Development
 
 ```bash
-python -m pytest tests/ -q                                   # 416 cases, ~6 minutes, head-less
-python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 405 without the GUI sweep
+python -m pytest tests/ -q                                   # 418 cases, ~6 minutes, head-less
+python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 406 without the GUI sweep
 python -m ruff check src tests gui --select F,E9,B,SIM,UP     # lint
 ```
 
@@ -276,4 +279,22 @@ design gas temperature, no natural convection in the roof air or in the pores.
 
 ## Licence
 
-PolyForm Noncommercial License 1.0.0, see [LICENSE](LICENSE).  Author: Tommaso D'Acunzio ([tomdacu](https://github.com/tomdacu)).
+**Code** — [PolyForm Noncommercial License 1.0.0](LICENSE): free to use, study, modify
+and share for any non-commercial purpose — personal use (research, experiment, testing,
+study, hobby) and any non-commercial organisation (charitable, educational, public
+research, public safety or health, environmental protection, government), regardless of
+their funding — with the attribution the licence carries
+(`Required Notice: Copyright 2026 Tommaso D'Acunzio`).  This is a **source-available**
+licence, not an open-source one.
+
+**Commercial use** — inside a company, in a paid product or service, or as a hosted
+service — needs a separate licence: write to <d.tommaso125@gmail.com>.  Small and
+academic cases are usually granted free of charge.
+
+**Documents, figures and images** (`docs/`, `assets/`, `photo/`) are under
+[CC BY-NC 4.0](LICENSE-CONTENT).
+
+Author: Tommaso D'Acunzio — [GitHub](https://github.com/tomdacu) —
+[LinkedIn](https://www.linkedin.com/in/tommaso-d-acunzio-344876185/) —
+<d.tommaso125@gmail.com>.  If you use this project, or you are interested in a
+collaboration, write to me.

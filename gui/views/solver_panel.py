@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 from ..widgets import FormPanel, combo, double_spin, int_spin
 

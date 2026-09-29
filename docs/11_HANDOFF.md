@@ -10,8 +10,8 @@ continue without re-reading the whole conversation.  Read this first, then
 | | |
 |---|---|
 | Repository | `C:\Users\tomma\OneDrive - Politecnico di Torino\Documenti\Progetti_prova_VisualStudio\2)Big_energy_self_projects\sand_battery_storage\battery_simulation` |
-| Tests | `python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py` → **300 collected cases** (311 with the GUI sweep); measured 2026-09-20, and 270/259 earlier the same day.  Counts move while work is in flight - re-run the command |
-| Lint | `python -m ruff check src tests gui --select F,E9,B,SIM,UP` → **all checks passed** (reading of 2026-09-20, after the six findings in the landing octree-solver files were fixed) |
+| Tests | `python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py` → **406 collected cases** (418 with the GUI sweep); measured 2026-09-29, and 300/311 on 2026-09-20.  Counts move while work is in flight - re-run the command |
+| Lint | `python -m ruff check src tests gui --select F,E9,B,SIM,UP` → **all checks passed** (reading of 2026-09-29, after the licence refactor to PySide6) |
 | Code size | reading of 2026-09-20 (before the octree solver landed): `src` 8659 lines, `gui` 2351, `tests` 3292, `scripts` 392 - python, excluding caches |
 | Docs | `docs/00_INDEX.md` … `docs/15_PIPE_NETWORKS.md` |
 | Commits | **nothing is committed**: the whole refactor lives in the working tree |

@@ -14,8 +14,8 @@ from __future__ import annotations
 import html
 from collections.abc import Callable, Sequence
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, SignalInstance
+from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -53,6 +53,26 @@ def _tip(widget: QWidget, tooltip: str) -> None:
         widget.setToolTip(rich(tooltip))
 
 
+def _slot(callback: Callable | None) -> Callable | None:
+    """Adapt a factory callback to the control signal that will call it.
+
+    Qt hands the control's own value to the callback (`valueChanged(float)`,
+    `currentIndexChanged(int)`, `toggled(bool)`, `clicked(bool)`).  PySide6 forwards it
+    to a Python callable that takes it and drops it for one that does not - but a bound
+    ``Signal.emit`` is a builtin it cannot inspect, so a value-less signal *refuses* the
+    argument where PyQt6 dropped it silently and the notification stops arriving.  Those
+    are wrapped to be called with no arguments at all.
+
+    A callback that wants the value simply declares the parameter; a signal that takes
+    arguments is connected with its own arity (as ``controller.py`` does), not here.
+    """
+    if isinstance(getattr(callback, "__self__", None), SignalInstance):
+        def emit_without_value(*_args) -> None:
+            callback()
+        return emit_without_value
+    return callback
+
+
 def double_spin(value: float, lo: float, hi: float, step: float = 1.0, decimals: int = 2,
                 suffix: str = "", tooltip: str = "", on_change: Callable = None,
                 special: str = "") -> QDoubleSpinBox:
@@ -67,7 +87,7 @@ def double_spin(value: float, lo: float, hi: float, step: float = 1.0, decimals:
         box.setSpecialValueText(special)
     _tip(box, tooltip)
     if on_change is not None:
-        box.valueChanged.connect(on_change)
+        box.valueChanged.connect(_slot(on_change))
     return box
 
 
@@ -79,8 +99,17 @@ def int_spin(value: int, lo: int, hi: int, step: int = 1, tooltip: str = "",
     box.setValue(value)
     _tip(box, tooltip)
     if on_change is not None:
-        box.valueChanged.connect(on_change)
+        box.valueChanged.connect(_slot(on_change))
     return box
+
+
+def spin_boxes(page: QWidget) -> list[QWidget]:
+    """Every numeric spin box of a page, as one list.
+
+    ``findChildren`` takes a single type - PySide6 rejects the tuple of types that
+    PyQt6 accepted - and the callers want both kinds together anyway.
+    """
+    return [*page.findChildren(QDoubleSpinBox), *page.findChildren(QSpinBox)]
 
 
 def combo(items: Sequence[tuple[str, object]], index: int = 0,
@@ -92,7 +121,7 @@ def combo(items: Sequence[tuple[str, object]], index: int = 0,
     box.setCurrentIndex(min(max(index, 0), box.count() - 1))
     _tip(box, tooltip)
     if on_change is not None:
-        box.currentIndexChanged.connect(on_change)
+        box.currentIndexChanged.connect(_slot(on_change))
     return box
 
 
@@ -102,14 +131,14 @@ def check(label: str, checked: bool = False, tooltip: str = "",
     box.setChecked(checked)
     _tip(box, tooltip)
     if on_toggle is not None:
-        box.toggled.connect(on_toggle)
+        box.toggled.connect(_slot(on_toggle))
     return box
 
 
 def button(label: str, on_click: Callable = None, tooltip: str = "") -> QPushButton:
     btn = QPushButton(label)
     if on_click is not None:
-        btn.clicked.connect(on_click)
+        btn.clicked.connect(_slot(on_click))
     _tip(btn, tooltip)
     return btn
 

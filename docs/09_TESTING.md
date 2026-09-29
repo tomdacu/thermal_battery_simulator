@@ -32,7 +32,7 @@ flight, so re-run the command instead of trusting these numbers.
 | `tests/test_environment.py` | 9 | the outside film, the excluded air mask, the contact resistance |
 | `tests/test_convergence.py` | 9 | the automatic mesh search and its GCI report |
 | `tests/test_graded_mesh.py` | 6 | the graded grid inside the solver: exactness, mesh independence |
-| `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PyQt6) |
+| `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PySide6) |
 
 One case is a **wall-clock budget** rather than a physics statement:
 `tests/test_octree.py::test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_under_a_second`
@@ -50,6 +50,12 @@ New files of the anisotropic mesh and the plant physics:
 | `tests/test_thin_layers_and_soil.py` | 2 | a thin shell blended in series with the insulation, the steel's own mass; the soil layer and its boundary conditions |
 | `tests/test_hydraulics.py` | 10 | the network's hydraulics and the header engine: Darcy-Weisbach, parallel pipes, the draught at low and high flow, balancing orifices to 1e-8, the orifice plate, Voronoi targets, the engine (manifold chosen, velocity met, headers lifted, targets delivered, the loop following the hydraulics) |
 | `tests/test_packed_bed.py` | 5 | the Zehner-Bauer-Schlünder bed: the gas limit, the bounds without radiation, growth with temperature and grain, dry sand in the measured range, a steady bed at the conductivity of its temperature |
+
+**Update 2026-09-29** (`--collect-only`): **418** cases, **406** without the GUI sweep.
+The licence release changed the GUI binding (PyQt6 -> PySide6) without touching the
+physics: the sweep gained one case - *no slot raised an exception*, which watches
+`sys.excepthook` because PySide6 prints a failing handler and carries on where PyQt6
+aborted the process - and the rest of the suite is unchanged.
 
 ## 1. Strategy
 
@@ -286,7 +292,7 @@ structured grid remains the production mesh ([13](13_REDESIGN.md) §5).
 * `clip_grid` never leaves the domain;
 * VTK/CSV exports are written and readable.
 
-**`tests/test_gui.py`** — head-less smoke test (skipped without PyQt6)
+**`tests/test_gui.py`** — head-less smoke test (skipped without PySide6)
 
 * the window builds the mesh with the panel defaults and the sources are marked;
 * `RunConfig` reflects the widgets (including the degC→K conversion);
@@ -298,9 +304,9 @@ structured grid remains the production mesh ([13](13_REDESIGN.md) §5).
 
 **`tests/test_gui_sweep.py`** — systematic control sweep (head-less, ~90 s)
 
-* every widget of every panel is driven with its slots connected: a PyQt6 process
-  aborts on a slot exception, so this is the check that the UI cannot take the
-  application down;
+* every widget of every panel is driven with its slots connected, with
+  `sys.excepthook` watched: PySide6 prints a slot's exception and carries on, so an
+  unhandled one is a handler that never worked, and the sweep fails on it;
 * every panel getter answers after the sweep; incomplete profiles raise only the
   documented `ValueError`;
 * the 3D view is rendered with a head-less PyVista plotter for every field, axis
@@ -308,7 +314,8 @@ structured grid remains the production mesh ([13](13_REDESIGN.md) §5).
 * each analysis type runs through the controller's own job factory, and a
   cancellation request stops a transient run early;
 * save/load through the window round-trips;
-* **no Qt warning or critical message is emitted** during the sweep.
+* **no Qt warning or critical message is emitted** during the sweep, and no exception
+  reached `sys.excepthook`.
 
 ## 3. Fixtures
 

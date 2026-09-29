@@ -55,8 +55,9 @@ Two levels of API are worth knowing:
 | `controller.py` | `RunConfig`, `SimulationJob`, `SimulationController` (threads, cancel, state), `ANALYSIS_TYPES` |
 | `widgets.py` | widget factories (`double_spin`, `int_spin`, `combo`, `check`, `button`, `hint`), `FormPanel` with its register and value reader; combos carry their value in `itemData` |
 | `assets.py` | repository assets by path, not by cwd: `repo_root`, `asset`, `window_icon_path` |
+| `_binding.py` | pins `QT_API=pyside6` before PyVista/QtPy picks a binding, imported first by the package |
 | `units.py` | display conversions and formatting: `fmt_c`, `fmt_k`, `celsius_span` |
-| `safe.py` | `safe_slot`, the guard against PyQt aborting on slot exceptions |
+| `safe.py` | `safe_slot`, the guard that reports a failing slot in the log and the status bar |
 | `views/geometry_panel.py` | Cylinder, Insulation, Heaters, Tubes, Mesh, Pipes sub-tabs |
 | `views/materials_panel.py` | storage medium, insulation, ambient conditions (single authority) |
 | `views/analysis_panel.py` | analysis type, initial condition, power profile, extraction, save/load |
@@ -79,7 +80,7 @@ Collected cases as reported by `python -m pytest tests/ --collect-only -q`
 | `tests/test_solver.py` | 22 | assembly exactness, reference matrix, analytic regressions, backends |
 | `tests/test_octree.py` | 14 | 2:1 balance, conservative faces, an octree Laplacian |
 | `tests/test_analysis.py` | 12 | flux closure, losses iteration, HDF5 round trip |
-| `tests/test_gui_sweep.py` | 11 | systematic control sweep (head-less, slow) |
+| `tests/test_gui_sweep.py` | 12 | systematic control sweep (head-less, slow) |
 | `tests/test_refinement.py` | 10 | graded-grid generation |
 | `tests/test_cycle.py` | 11 | charge and discharge through the gas loop |
 | `tests/test_octree_solver.py` | 12 | the octree wired to the physics: equivalence, conservation, refinement |
@@ -87,15 +88,16 @@ Collected cases as reported by `python -m pytest tests/ --collect-only -q`
 | `tests/test_environment.py` | 9 | outside film, excluded air, contact resistance |
 | `tests/test_convergence.py` | 9 | automatic mesh search and its report |
 | `tests/test_graded_mesh.py` | 6 | graded grid inside the solver |
-| `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PyQt6) |
+| `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PySide6) |
 | `scripts/benchmark.py` | - | assembly/solve timings per mesh size (`build_model`, `main`) |
 | `scripts/figures.py` | - | regenerates `docs/figures/`: `battery_with_pipes`, `temperature_field`, `graded_mesh`, `adaptive_concept`, `gas_loop_schema`, `design_curves`, `main` |
 
 The counts move while work is in flight; the table is the reading of
-`python -m pytest tests/ --collect-only -q` on 2026-09-20 (311 total, 300 without the
-GUI sweep; earlier in the same session the same command said 295/284 and 270/259 as work
-landed).  Re-run the command instead of trusting it; [09](09_TESTING.md) §1 records
-the same reading with its caveat and what each case checks.
+`python -m pytest tests/ --collect-only -q` on **2026-09-29 (418 total, 406 without the
+GUI sweep)**; on 2026-09-20 the same command said 311/300, with 295/284 and 270/259
+earlier in that session as work landed.  Re-run the command instead of trusting it;
+[09](09_TESTING.md) §1 records the same reading with its caveat and what each case
+checks.
 
 ## Entry point
 

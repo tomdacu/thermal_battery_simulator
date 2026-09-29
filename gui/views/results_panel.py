@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (QFileDialog, QHBoxLayout, QTabWidget, QTextEdit, QVBoxLayout,
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QTabWidget, QTextEdit, QVBoxLayout,
                              QWidget)
 
 from src.analysis.balance import compute_balance
@@ -22,7 +22,7 @@ class ResultsPanel(QWidget):
     """Read-only report tabs; every number is computed by ``src.analysis``."""
 
     #: the window owns the mesh, so it writes the field export
-    export_requested = pyqtSignal()
+    export_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

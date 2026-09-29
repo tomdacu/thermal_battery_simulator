@@ -5,14 +5,12 @@ import sys
 from typing import TYPE_CHECKING
 
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
-    QSpinBox,
     QFileDialog,
     QGridLayout,
     QMainWindow,
@@ -44,7 +42,7 @@ from .views.materials_panel import MaterialsPanel
 from .views.results_panel import ResultsPanel
 from .views.solver_panel import SolverPanel
 from .views.viz_view import VizView
-from .widgets import scrollable
+from .widgets import scrollable, spin_boxes
 
 if TYPE_CHECKING:
     from src.analysis.convergence import AdaptivePlan
@@ -188,7 +186,7 @@ class ThermalBatteryGUI(QMainWindow):
         self._preview_timer.setInterval(250)
         self._preview_timer.timeout.connect(self._geometry_edited)
         for page in (self.geometry_panel.vessel_page, self.geometry_panel.plant_page):
-            for widget in page.findChildren((QDoubleSpinBox, QSpinBox)):
+            for widget in spin_boxes(page):
                 widget.valueChanged.connect(self._preview_timer.start)
             for widget in page.findChildren(QComboBox):
                 widget.currentIndexChanged.connect(self._preview_timer.start)
@@ -202,7 +200,7 @@ class ThermalBatteryGUI(QMainWindow):
         for page in (self.geometry_panel.vessel_page, self.geometry_panel.plant_page,
                      self.geometry_panel.mesh_page, self.materials_panel.materials_page,
                      self.materials_panel.site_page):
-            for widget in page.findChildren((QDoubleSpinBox, QSpinBox)):
+            for widget in spin_boxes(page):
                 widget.valueChanged.connect(self._stale_timer.start)
             for widget in page.findChildren(QComboBox):
                 widget.currentIndexChanged.connect(self._stale_timer.start)

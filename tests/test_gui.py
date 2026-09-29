@@ -1,6 +1,6 @@
 """GUI smoke test: the window must build a mesh and survive a full run cycle.
 
-Runs head-less; skipped when PyQt6 is not installed.  The 3D view is disabled
+Runs head-less; skipped when PySide6 is not installed.  The 3D view is disabled
 unless a display is available, so the test exercises the panels, the controller
 and the result wiring without needing OpenGL.
 """
@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-pytest.importorskip("PyQt6")
+pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("THERMAL_DISABLE_3D", "1")
 
@@ -18,7 +18,7 @@ os.environ.setdefault("THERMAL_DISABLE_3D", "1")
 @pytest.fixture(scope="module", autouse=True)
 def no_dialogs():
     """Modal dialogs would block a head-less run: replace them with recorders."""
-    from PyQt6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QMessageBox
 
     recorded = []
     original = {name: getattr(QMessageBox, name) for name in
@@ -33,7 +33,7 @@ def no_dialogs():
 
 @pytest.fixture(scope="module")
 def window():
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
     from gui.main_window import ThermalBatteryGUI
@@ -133,7 +133,7 @@ def test_the_window_solves_the_standby_case_on_a_tree(window):
     panel reports it.  The budget is the smallest the panel offers, so the tree is the
     coarsest one the GUI can build.
     """
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     from src.core.adaptive_mesh import AdaptiveMesh
 
@@ -177,7 +177,7 @@ def test_the_automatic_search_refines_a_tree(window):
     search refines it in the time a test can afford; it is handed over as the mesh request
     of the run, which is where the window puts the plan when the tab is adaptive.
     """
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     from src.analysis.convergence import AdaptivePlan
     from src.analysis.mesh_plan import region_bands
@@ -226,8 +226,8 @@ def test_the_window_fits_the_screen_and_explanations_take_no_room(window):
     scroll area, a labelled control with an explanation says so with the info mark, and
     no wrapped paragraph of help is left in a form.
     """
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QApplication, QFormLayout, QLabel, QScrollArea
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QFormLayout, QLabel, QScrollArea
 
     from gui.widgets import INFO
 
@@ -260,7 +260,7 @@ def test_the_window_fits_the_screen_and_explanations_take_no_room(window):
 def test_the_mesh_follows_the_model_it_was_built_from(window):
     """Geometry, materials and mesh are coupled: an edit makes the built mesh stale,
     and a run rebuilds it from the model the panels describe before it solves."""
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     window.build_mesh()
     assert window.mesh_is_current()

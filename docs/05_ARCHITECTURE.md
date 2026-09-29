@@ -98,9 +98,10 @@ One `SimulationJob(QThread)` per run, created by the controller:
   second run cannot start while one is in flight;
 * closing the window cancels the job first.
 
-Slots are wrapped with `gui/safe.py::safe_slot`: by default an unhandled
-exception inside a PyQt slot **aborts the process**, so the guard turns a mistake
-in one handler into a logged error.
+Slots are wrapped with `gui/safe.py::safe_slot`: PySide6 prints the traceback of an
+exception raised inside a slot and keeps running, but the message would stay on a
+console a windowed run does not have, so the guard turns a mistake in one handler into a
+logged error and a status-bar message.
 
 ## 5. Error handling
 

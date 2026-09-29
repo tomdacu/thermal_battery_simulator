@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.0 - 2026-09-29
+
+The licence change, and the one dependency that ruled it out.
+
+* **PyQt6 -> PySide6**: Riverbank licenses PyQt6 under the GPL-3.0 or a paid commercial
+  licence, and a source-available project can carry neither; the interface now runs on
+  PySide6 (Qt for Python, LGPL).  Same widgets, same wiring, one API difference handled:
+  PySide6's `findChildren` takes one type per call, so `gui/widgets.py` gained
+  `spin_boxes()` for the two loops that used to pass a tuple of types.
+* `gui/_binding.py` pins `QT_API=pyside6` before anything imports QtPy, so PyVista and
+  pyvistaqt cannot latch onto a PyQt6 installed next to it.
+* `safe_slot` keeps its place with a new reason: PySide6 *prints* the traceback of an
+  exception raised in a slot and carries on, where PyQt6 aborted the process, so the
+  guard is what puts the failure in the log tab and the status bar - and
+  `tests/test_gui_sweep.py` now watches `sys.excepthook` and fails on an unhandled one,
+  the check the abort used to perform by itself.
+* **LICENSE** is the PolyForm Noncommercial License 1.0.0 (verbatim, with the
+  `Required Notice: Copyright 2026 Tommaso D'Acunzio (https://github.com/tomdacu)` line
+  it asks for); `LICENSE-CONTENT` puts the documents, figures and images under
+  CC BY-NC 4.0; the README states the terms and a contact for commercial use.
+* `requirements.txt` asks for `PySide6>=6.6`; docs 05, 06, 07 and 09 follow the binding
+  and the new slot semantics.
+
+Suite: 418 passed in 5 min 26 s (406 without the GUI sweep); `ruff check src tests gui
+--select F,E9,B,SIM,UP` clean.  The window was also opened once on a real screen, mesh
+and geometry preview included.
+
 ## 2.0.0 - 2026-09-24
 
 The first tagged version.  Everything since the last push is in it: the anisotropic tree

@@ -1,8 +1,8 @@
 """Analysis panel: analysis type, initial condition, power and extraction profiles."""
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
     QHBoxLayout,
@@ -33,12 +33,12 @@ _DURATION_UNITS = (("seconds", 1.0), ("minutes", 60.0), ("hours", 3600.0), ("day
 class AnalysisPanel(QWidget):
     """Everything that drives the run: type, initial state, power and extraction."""
 
-    analysis_changed = pyqtSignal(str)
-    state_loaded = pyqtSignal()
+    analysis_changed = Signal(str)
+    state_loaded = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        from PyQt6.QtWidgets import QTabWidget
+        from PySide6.QtWidgets import QTabWidget
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -272,8 +272,8 @@ class AnalysisPanel(QWidget):
                        "next transient with Initial condition > Current field.")
         self.tabs.addTab(scrollable(panel), "Save / Load")
 
-    save_requested = pyqtSignal(str, str)
-    load_requested = pyqtSignal()
+    save_requested = Signal(str, str)
+    load_requested = Signal()
 
     def _save_clicked(self) -> None:
         self.save_requested.emit(self.state_name.text() or "Simulation",

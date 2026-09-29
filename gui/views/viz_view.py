@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 from src.viz.scene import (FIELD_ARRAYS, add_field, add_geometry_preview,
                            add_material_legend, domain_extent)
