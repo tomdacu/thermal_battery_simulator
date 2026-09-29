@@ -297,7 +297,7 @@ their funding — with the attribution the licence carries
 licence, not an open-source one.
 
 **Commercial use** — inside a company, in a paid product or service, or as a hosted
-service — needs a separate licence: write to <d.tommaso125@gmail.com>.  Small and
+service — needs a separate licence: write to <tommaso@dacunzio.it>.  Small and
 academic cases are usually granted free of charge.
 
 **Documents, figures and images** (`docs/`, `assets/`, `photo/`) are under
@@ -305,5 +305,5 @@ academic cases are usually granted free of charge.
 
 Author: Tommaso D'Acunzio — [GitHub](https://github.com/tomdacu) —
 [LinkedIn](https://www.linkedin.com/in/tommaso-d-acunzio-344876185/) —
-<d.tommaso125@gmail.com>.  If you use this project, or you are interested in a
+<tommaso@dacunzio.it>.  If you use this project, or you are interested in a
 collaboration, write to me.
