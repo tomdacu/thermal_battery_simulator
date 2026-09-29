@@ -27,6 +27,10 @@ from src.core.mesh import MaterialID, Mesh3D
 PAINTED = ("material_id", "k", "rho", "cp", "Q_source", "Q_sink", "source_mask", "bc_h",
            "bc_T_inf", "boundary_type", "excluded")
 
+#: the entries of :data:`PAINTED` that are identities or masks, not measurements: a
+#: single cell of disagreement is a painter that only knew one of the two meshes
+DISCRETE = ("material_id", "source_mask", "boundary_type", "excluded")
+
 
 # ------------------------------------------------------------------- helpers
 def cell_of(tree: AdaptiveMesh, structured: Mesh3D) -> np.ndarray:
@@ -50,10 +54,35 @@ def painted(mesh, index: np.ndarray | None = None) -> dict[str, np.ndarray]:
 
 
 def differences(tree: AdaptiveMesh, structured: Mesh3D) -> dict[str, int]:
-    """Leaves that disagree with their ``Mesh3D`` cell, per field (zero when equal)."""
+    """Leaves that disagree with their ``Mesh3D`` cell, per field (zero when equal).
+
+    The masks and the identities must agree exactly.  The measurements cannot be
+    compared bit for bit: the two painters evaluate the same rule over arrays of
+    different shapes, so their last bits may round apart - a 1e-12 relative bound says
+    the same number was meant, while a painter that read the wrong cell is off by a
+    factor, not by a rounding (found by the CI: 20 leaves differed by one ulp on
+    ``rho``, on a runner whose BLAS rounds differently from this workstation).
+    """
     index = cell_of(tree, structured)
     on_tree, on_grid = painted(tree), painted(structured, index)
-    return {name: int(np.count_nonzero(on_tree[name] != on_grid[name])) for name in PAINTED}
+    out = {}
+    for name in PAINTED:
+        left, right = on_tree[name], on_grid[name]
+        bad = left != right if name in DISCRETE else ~np.isclose(left, right, rtol=1e-12,
+                                                                atol=1e-300)
+        out[name] = int(np.count_nonzero(bad))
+    return out
+
+
+def same_mapping(left: dict, right: dict, rel: float = 1e-12) -> None:
+    """Two dictionaries of numbers agree key by key, to a rounding.
+
+    The same rule as :func:`differences`: the volumes and the masses of a zone are
+    sums over differently shaped arrays on the two meshes.
+    """
+    assert left.keys() == right.keys()
+    for key, value in left.items():
+        assert value == pytest.approx(right[key], rel=rel), key
 
 
 def battery_with_power(power_kw: float = 50.0) -> BatteryGeometry:
@@ -106,10 +135,10 @@ def test_the_build_report_is_the_same_on_either_mesh(paint_pair):
     report_tree = geometry.apply_to_mesh(tree)
     report_grid = geometry.apply_to_mesh(structured)
 
-    assert report_tree == report_grid
     assert report_tree.n_source_cells == report_grid.n_source_cells > 0
-    assert report_tree.zone_volumes == report_grid.zone_volumes
-    assert report_tree.notes == []                    # the cube needs no snapping note
+    assert report_tree.notes == report_grid.notes == []
+    same_mapping(report_tree.zone_volumes, report_grid.zone_volumes)
+    same_mapping(report_tree.zone_masses, report_grid.zone_masses)
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
 
 
@@ -133,15 +162,16 @@ def test_the_air_leaves_the_problem_on_a_tree_and_the_film_is_the_same(paint_pai
     on_grid = structured.excluded.reshape(-1, order="F")[index]
     assert np.array_equal(tree.excluded, on_grid) and tree.excluded.any()
     assert not (tree.excluded & (tree.material_id != int(MaterialID.AIR))).any()
-    assert tree.h_out == structured.h_out > 0.0
+    assert tree.h_out == pytest.approx(structured.h_out, rel=1e-12) and tree.h_out > 0.0
     assert tree.t_ambient == structured.t_ambient
 
     # the same call with a wind speed moves both films the same way
     geometry = create_small_test_geometry()
     film_tree = geometry.apply_environment(tree, wind_speed=5.0)
     film_grid = geometry.apply_environment(structured, wind_speed=5.0)
-    assert film_tree == film_grid
-    assert tree.h_out == structured.h_out == film_tree["total"]
+    same_mapping(film_tree, film_grid)
+    assert tree.h_out == pytest.approx(structured.h_out, rel=1e-12)
+    assert tree.h_out == pytest.approx(film_tree["total"], rel=1e-12)
     assert film_tree["total"] > film_tree["natural"]
 
 

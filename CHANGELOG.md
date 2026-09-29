@@ -34,6 +34,13 @@ formula.
   conversions and the material-table values (a mistyped constant is a real bug), and the
   `matrix() == tree.diffusion_matrix()` identity (a cross-check between two assemblies).
 * `docs/07` refreshed its table to the current reading; `docs/09` and `docs/11` follow.
+* **The CI found two more machine-dependent assertions** on its first run (Linux, a
+  different BLAS): the twin painter comparison of `test_geometry_on_a_tree.py` was a
+  bit-for-bit one - 20 leaves differed by one ulp on `rho` there - so the masks and
+  identities stay exact while the measurements are compared at 1e-12 relative (a painter
+  that read the wrong cell is off by a factor, not by a rounding), and the Dirichlet
+  bound of `test_octree.py` now has a 1e-9 slack, since the linear solve stops at 1e-12
+  and may leave the field a few 1e-15 outside the walls.
 
 ## 2.1.0 - 2026-09-29
 

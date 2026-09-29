@@ -221,7 +221,10 @@ def test_one_dimensional_conduction_against_the_analytic_solution():
     first, last = centres[:, 2].min(), centres[:, 2].max()
     expected = 400.0 - 100.0 * (centres[:, 2] - first) / (last - first)
     assert np.allclose(temperature, expected, atol=0.5)
-    assert temperature.min() >= 300.0 and temperature.max() <= 400.0
+    # the walls hold to a rounding of the Dirichlet values: the linear solve stops at
+    # 1e-12, so the field may sit a few 1e-15 outside them (it did, on a CI runner)
+    assert temperature.min() >= 300.0 - 1e-9
+    assert temperature.max() <= 400.0 + 1e-9
 
 
 def test_a_two_material_wall_matches_the_analytic_flux():
