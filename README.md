@@ -304,6 +304,6 @@ academic cases are usually granted free of charge.
 [CC BY-NC 4.0](LICENSE-CONTENT).
 
 Author: Tommaso D'Acunzio — [GitHub](https://github.com/tomdacu) —
-[LinkedIn](https://www.linkedin.com/in/tommaso-d-acunzio-344876185/) —
+[LinkedIn](https://www.linkedin.com/in/tommaso-dacunzio/) —
 <tommaso@dacunzio.it>.  If you use this project, or you are interested in a
 collaboration, write to me.
