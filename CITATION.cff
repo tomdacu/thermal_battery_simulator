@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Thermal Battery Simulator: 3D simulation of sand-battery thermal stores"
+abstract: >-
+  Coupled 3D simulator of a sand-battery thermal store: the packed bed, the vessel
+  envelope and the whole gas circuit solved together, with an anisotropic box-tree mesh,
+  a buried-tube well model, circuit hydraulics with a header-sizing engine, and an
+  interactive PySide6 GUI.
+authors:
+  - family-names: "D'Acunzio"
+    given-names: "Tommaso"
+    orcid: "https://orcid.org/0009-0006-9081-1852"
+license: PolyForm-Noncommercial-1.0.0
+repository-code: "https://github.com/tomdacu/thermal_battery_simulator"
+keywords:
+  - sand battery
+  - thermal energy storage
+  - packed bed
+  - finite volume
+  - heat transfer
+  - numerical simulation
+type: software
