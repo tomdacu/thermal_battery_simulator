@@ -32,6 +32,7 @@ results/
 *.vtk
 *.csv
 !tests/data/*.csv
+!docs/screenshots/*.csv
 
 # tooling
 .pytest_cache/
