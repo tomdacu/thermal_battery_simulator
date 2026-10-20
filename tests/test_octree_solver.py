@@ -1,22 +1,33 @@
-"""The octree wired to the physics: equivalence, conservation, and the refinement cycle.
+"""
+tests.test_octree_solver
+========================
+The octree wired to the physics: equivalence, conservation, and the refinement cycle.
 
-What this module pins, in the order the claims matter:
+WHAT IT DOES
+------------
+Pins the claims below, in the order they matter:
 
-* **equivalence** - on a uniform tree and the matching uniform :class:`Mesh3D` the two
-  solvers assemble the same operator, so a two-layer wall (1-D) and a slab with a
-  source in half the box (2-D) agree to the tolerance of the linear solve;
-* **conservation** - every face carries one conductance shared by the two cells, so the
-  flux field is conservative to machine precision on a *graded* tree, and the heat
-  leaving through the fixed leaves equals the power the sources deposit;
-* **the a posteriori estimator** - the flux-jump indicator marks the hot spot and the
-  shell where the flux turns, and leaves the far field at zero;
-* **the refinement cycle** - starting from 64 leaves and stopping when the objective
-  stops moving, it answers the storage mean temperature of a hot spot about 8x closer to
-  the fine reference than a uniform tree of 512 leaves (three times as many cells), and
-  it leaves a field with no curvature alone.
+* **equivalence** - on a uniform tree and the matching uniform
+  :class:`Mesh3D` the two solvers assemble the same operator, so a two-layer
+  wall (1-D) and a slab with a source in half the box (2-D) agree to the
+  tolerance of the linear solve;
+* **conservation** - every face carries one conductance shared by the two
+  cells, so the flux field is conservative to machine precision on a *graded*
+  tree, and the heat leaving through the fixed leaves equals the power the
+  sources deposit;
+* **the a posteriori estimator** - the flux-jump indicator marks the hot spot
+  and the shell where the flux turns, and leaves the far field at zero;
+* **the refinement cycle** - starting from 64 leaves and stopping when the
+  objective stops moving, it answers the storage mean temperature of a hot
+  spot about 8x closer to the fine reference than a uniform tree of 512 leaves
+  (three times as many cells), and it leaves a field with no curvature alone.
 
-The box is 1 m and the finest tree cell is 1/16 m, so every uniform tree is a
-power-of-two subdivision of the box and the structured partner has exactly its cells.
+HOW IT WORKS
+------------
+-> TEST BOX <-
+   The box is 1 m and the finest tree cell is 1/16 m, so every uniform tree is
+   a power-of-two subdivision of the box and the structured partner has exactly
+   its cells.
 """
 from __future__ import annotations
 
@@ -36,13 +47,18 @@ from src.solver.octree_solver import (
 )
 from src.solver.steady import SolverConfig, SteadyStateSolver
 
+#: Side of the test box [m].
 BOX = 1.0
-FINEST = 16                      # finest cells per side of the test box
-H = BOX / FINEST                 # edge of one finest cell [m]
+#: Finest cells per side of the test box.
+FINEST = 16
+#: Edge of one finest cell [m].
+H = BOX / FINEST
 ALL_WALLS = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def cell_edge(level: int) -> float:
     """Edge of a leaf at ``level`` [m]."""
     return H * (1 << level)
@@ -115,7 +131,9 @@ def _corner(tree: Octree, index: int, axis: int) -> int:
     return (leaf.x, leaf.y, leaf.z)[axis]
 
 
-# ------------------------------------------------------- the physics entry points
+# ==============================================================================
+# THE PHYSICS ENTRY POINTS
+# ==============================================================================
 def test_the_wall_helpers_pin_the_leaves_of_a_box_face():
     """A wall condition drives the leaves sitting on that wall, and only those."""
     tree = uniform_tree(FINEST, 2)                      # 4x4x4 leaves
@@ -193,7 +211,9 @@ def test_a_fixed_rule_follows_the_refinement_where_a_map_cannot():
     assert solver.solve().cells == tree.n_cells
 
 
-# ------------------------------------------------------------------ conservation
+# ==============================================================================
+# CONSERVATION
+# ==============================================================================
 def test_the_flux_report_is_conservative_to_machine_precision():
     """One conductance per face: the flux closes on a graded tree, cell by cell.
 
@@ -281,7 +301,9 @@ def test_a_source_slab_matches_the_structured_solver_in_two_dimensions():
     assert abs(field - field[:, ::-1, :]).max() < 1e-9, "the problem is symmetric in y"
 
 
-# ------------------------------------------------------------------- refinement
+# ==============================================================================
+# REFINEMENT
+# ==============================================================================
 def test_the_indicator_marks_the_hot_spot_and_leaves_the_far_field_alone():
     """The estimator is the flux that changes from one face to the next.
 

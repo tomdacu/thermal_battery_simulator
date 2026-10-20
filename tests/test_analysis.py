@@ -1,4 +1,22 @@
-"""Analysis and IO tests: flux closure, losses iteration, HDF5 round trip."""
+"""
+tests.test_analysis
+===================
+Analysis and IO tests: flux closure, losses iteration, HDF5 round trip.
+
+WHAT IT DOES
+------------
+Checks the analysis layer against the powers the model puts in and takes out:
+the flux integrals close on the injected power, the Dirichlet face carries a
+real flux, the stored energy and the exergy are referenced to ambient, the
+envelope loss is a property of the battery and not of the air box around it,
+and the storage capacity and the autonomy are positive.
+
+Then the losses iteration, held at its target temperature and validating its
+input, and the state file: the HDF5 round trip on the structured model and on
+a tree field, the geometry hash, the refusal of a different geometry or a
+missing file, and the upgrade of a Celsius file to kelvin.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -21,7 +39,9 @@ FINEST = 16
 SPACING = 0.5
 
 
-# ------------------------------------------------------------------- fluxes
+# ==============================================================================
+# FLUXES
+# ==============================================================================
 def test_balance_closes_for_an_all_convective_box(adiabatic_box):
     """With convective faces only, sum(fluxes) equals the injected power exactly."""
     box = adiabatic_box
@@ -77,7 +97,9 @@ def test_storage_capacity_and_autonomy(storage_model):
     assert autonomy["loss_W"] > 0
 
 
-# ------------------------------------------------------------------- losses
+# ==============================================================================
+# LOSSES
+# ==============================================================================
 def test_losses_analysis_holds_the_target_temperature(storage_model):
     mesh = storage_model
     target = 473.15
@@ -95,7 +117,9 @@ def test_losses_analysis_validates_input(storage_model):
         solve_losses(storage_model, LossesConfig(t_target=200.0, t_ambient=293.15))
 
 
-# ---------------------------------------------------------------------- IO
+# ==============================================================================
+# IO
+# ==============================================================================
 def test_state_round_trip(storage_model):
     manager = StateManager(directory="results/states")
     path = manager.save_state(storage_model, name="pytest_state")
@@ -150,7 +174,9 @@ def test_state_upgrades_a_celsius_file(tmp_path):
     assert any("converted" in note for note in state.notes)
 
 
-# ------------------------------------------------------------------ IO (a tree)
+# ==============================================================================
+# IO (A TREE)
+# ==============================================================================
 def test_state_round_trip_keeps_a_tree_field_exact(tree_model):
     """A tree's state is its leaf list: the field comes back leaf by leaf, exactly."""
     manager = StateManager(directory="results/states")

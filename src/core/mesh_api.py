@@ -1,36 +1,58 @@
-"""The cell-mesh protocol the essential consumers of :class:`Mesh3D` really use.
+"""
+src.core.mesh_api
+=================
+The cell-mesh protocol the essential consumers of :class:`Mesh3D` really use.
 
-The octree is to become the main mesh, and the port has to be driven by the call sites
-rather than by the class: a mesh only has to provide what the solver and the energy
-balance *read*.  This module states that contract once, so that
+WHAT IT DOES
+------------
+States once the contract a mesh provides to the consumers that *read* it, so that
 :class:`~src.core.adaptive_mesh.AdaptiveMesh` and (during the transition)
-:class:`~src.core.mesh.Mesh3D` can be held against the same list, and so that a consumer
-can be ported without wondering which of the two it was written for.
+:class:`~src.core.mesh.Mesh3D` can be held against the same list, and so that a
+consumer can be ported without wondering which of the two it was written for.  The
+octree is to become the main mesh, and the port has to be driven by the call sites
+rather than by the class: a mesh only has to provide what the solver and the energy
+balance *read*.
 
-The protocol is *structural* and deliberately small.  It is the intersection of what the
-assembly (:mod:`src.solver.matrix`), the transient operators, the linear layer, the flux
-report (:mod:`src.analysis.fluxes`) and the balance (:mod:`src.analysis.balance`) read
-from a mesh, and nothing more: a consumer that reads three members does not oblige the
-interface to name ten.  What it does *not* contain is as deliberate:
+WHY
+---
+The protocol is *structural* and deliberately small.  It is the intersection of
+what the assembly (:mod:`src.solver.matrix`), the transient operators, the linear
+layer, the flux report (:mod:`src.analysis.fluxes`) and the balance
+(:mod:`src.analysis.balance`) read from a mesh, and nothing more: a consumer that
+reads three members does not oblige the interface to name ten.
 
-* no index arithmetic (``ijk_to_linear``, ``linear_to_ijk``, ``find_cell``) - that is
-  the structured layout, and an adaptive mesh answers it with a point location, not with
-  a formula (see the census in ``docs/16_ADAPTIVE_MESH_MIGRATION.md``);
-* no per-axis sizes (``dx``/``dy``/``dz``, ``edges_x``, ``axis_size``) - a consumer that
-  needs a local size needs it *at a cell*, which is what the face list already carries
-  through ``d_centers`` and what the film terms take from the cell's own volume;
-* no convenience scalars (``d``, ``V_cell``, ``A_cell``, ``uniform``, ``h_char``) - the
-  protocol keeps ``V`` and lets the consumer take the cube root or the uniform test;
-* no GUI/report vocabulary (``grid_summary``, ``size_label``, ``get_info``) - that is a
-  presentation concern and belongs to whatever renders the mesh.
+HOW IT WORKS
+------------
+-> WHAT IT LEAVES OUT <-
+   What it does *not* contain is as deliberate:
 
-Every member below names the call sites that justify it and the reason it is needed.
-The line numbers are those of the census in ``docs/16_ADAPTIVE_MESH_MIGRATION.md``.
+   * no index arithmetic (``ijk_to_linear``, ``linear_to_ijk``, ``find_cell``) -
+     that is the structured layout, and an adaptive mesh answers it with a point
+     location, not with a formula (see the census in
+     ``docs/16_ADAPTIVE_MESH_MIGRATION.md``);
+   * no per-axis sizes (``dx``/``dy``/``dz``, ``edges_x``, ``axis_size``) - a
+     consumer that needs a local size needs it *at a cell*, which is what the face
+     list already carries through ``d_centers`` and what the film terms take from
+     the cell's own volume;
+   * no convenience scalars (``d``, ``V_cell``, ``A_cell``, ``uniform``,
+     ``h_char``) - the protocol keeps ``V`` and lets the consumer take the cube
+     root or the uniform test;
+   * no GUI/report vocabulary (``grid_summary``, ``size_label``, ``get_info``) -
+     that is a presentation concern and belongs to whatever renders the mesh.
 
-The *order* of the cells is part of the contract only through :meth:`MeshAPI.faces`:
-every index in the face list indexes the flat per-cell arrays, whatever order the mesh
-uses internally (Fortran order for ``Mesh3D``, ``Octree.leaves`` order for the adaptive
-mesh).  A consumer that assumes more than that is assuming the structured layout.
+-> MEMBERS <-
+   Every member of :class:`MeshAPI` names the call sites that justify it and the
+   reason it is needed.  :data:`MEMBERS` keeps the names as data, in the order they
+   are documented, so that :func:`missing_members` can report exactly what a
+   candidate lacks.  The line numbers are those of the census in
+   ``docs/16_ADAPTIVE_MESH_MIGRATION.md``.
+
+-> CELL ORDER <-
+   The *order* of the cells is part of the contract only through
+   :meth:`MeshAPI.faces`: every index in the face list indexes the flat per-cell
+   arrays, whatever order the mesh uses internally (Fortran order for ``Mesh3D``,
+   ``Octree.leaves`` order for the adaptive mesh).  A consumer that assumes more
+   than that is assuming the structured layout.
 """
 from __future__ import annotations
 

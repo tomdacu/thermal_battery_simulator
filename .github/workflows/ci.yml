@@ -16,7 +16,7 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff
       - name: ruff (the repository's selection)
-        run: python -m ruff check src tests gui --select F,E9,B,SIM,UP
+        run: python -m ruff check src tests gui scripts run_gui.py --select F,E9,B,SIM,UP
 
   tests:
     runs-on: ubuntu-latest

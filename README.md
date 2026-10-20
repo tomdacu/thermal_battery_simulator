@@ -213,6 +213,7 @@ Measured on the development machine (2026-09-23):
 | [17 References](docs/17_REFERENCES.md) | every source, with the module that uses it |
 | [18 The solver, end to end](docs/18_SOLVER.md) | the whole solution path with its equations |
 | [19 Hydraulics and the header engine](docs/19_HYDRAULICS.md) | the network's flows, the orifices, the engine, the default design |
+| [20 Code style](docs/20_CODE_STYLE.md) | the module-docstring standard, section banners and comment conventions |
 
 ---
 
@@ -248,9 +249,9 @@ battery_simulation/
 │   ├── io/state.py            # HDF5 state with a geometry hash
 │   └── viz/scene.py           # PyVista grids and exports
 ├── gui/                       # Qt layer - no physics
-├── scripts/                   # benchmark.py, figures.py
+├── scripts/                   # banner.py, benchmark.py, figures.py
 ├── tests/                     # pytest suite, analytic and reference checks
-└── docs/                      # 00-18 and figures/
+└── docs/                      # 00-20 and figures/
 ```
 
 ---
@@ -268,7 +269,7 @@ balance, the closed gas loop, the effectiveness and blower design curves.
 ```bash
 python -m pytest tests/ -q                                   # 412 cases, ~6 minutes, head-less
 python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py  # 401 without the GUI sweep
-python -m ruff check src tests gui --select F,E9,B,SIM,UP     # lint
+python -m ruff check src tests gui scripts run_gui.py --select F,E9,B,SIM,UP  # lint
 ```
 
 Counts measured on 2026-09-23 with `--collect-only`; re-run the command instead of

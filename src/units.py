@@ -1,13 +1,32 @@
-"""Temperature unit helpers.
+"""
+src.units
+=========
+Temperature conversions and the guard that keeps the Kelvin contract honest.
 
+WHAT IT DOES
+------------
+Provides the two conversion helpers of the package and the cheap guard that
+turns a temperature expressed in the wrong unit into an immediate error.
+
+HOW IT WORKS
+------------
+-> CONVERSIONS <-
+   ``c_to_k`` shifts a Celsius value up by 273.15 and ``k_to_c`` shifts a
+   Kelvin value down by the same amount.  They are the only sanctioned crossing
+   between the two scales.
+
+-> GUARD <-
+   ``check_kelvin`` rejects non-finite values always, and with ``strict=True``
+   also values below ``T_MIN_VALID``: a Celsius field has values well below it
+   (e.g. 20), which no physical absolute temperature reaches.
+
+OPTIONS
+-------
 The package contract (see :mod:`src.constants`) is Kelvin everywhere inside
-``src/``. These helpers exist for the two legitimate exceptions:
+``src/``.  These helpers exist for the two legitimate exceptions:
 
 * reading user input expressed in degC,
 * formatting values for display or export through ``gui/units.py``.
-
-``check_kelvin`` is the cheap guard that turns "someone passed degC" from a
-silently wrong simulation into an immediate ``ValueError``.
 """
 from __future__ import annotations
 

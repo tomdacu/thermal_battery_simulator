@@ -1,10 +1,25 @@
-"""Graded grid: coefficient exactness, resolution independence, balance closure.
-
-The acceptance criteria of ``docs/10_MESH_AND_HEATERS.md``: a graded grid must
-reproduce the uniform results when asked for a uniform grid, must solve the
-analytic slab exactly, must not change the answer when every target is halved,
-and must keep the energy balance closing.
 """
+tests.test_graded_mesh
+======================
+Graded grid: coefficient exactness, resolution independence, balance closure.
+
+WHAT IT DOES
+------------
+Checks the acceptance criteria of ``docs/10_MESH_AND_HEATERS.md``: a graded
+grid must reproduce the uniform results when asked for a uniform grid, must
+solve the analytic slab exactly, must not change the answer when every target
+is halved, and must keep the energy balance closing.
+
+The tests pin the coefficient exactness on the cases that expose it - a
+uniform spec against the legacy mesh, a linear profile between Dirichlet ends,
+and the series resistance across an interface between two cells of very
+different size - and check the global loss against a *uniform* mesh with the
+same fine size, because the heat leaving the domain is a property of the model
+and not of the grid.  The stored energy is a much sharper quantity on this 1:4
+scale test model, where the near-wall gradient dominates, and is not used
+there.
+"""
+
 from __future__ import annotations
 
 import numpy as np

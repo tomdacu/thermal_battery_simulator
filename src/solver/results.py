@@ -1,10 +1,36 @@
-"""Result containers shared by the transient solver and the IO layer."""
+"""
+src.solver.results
+==================
+Result container of a transient run: one list per sampled series.
+
+WHAT IT DOES
+------------
+Holds the time series of
+:class:`~src.solver.transient.TransientSolver` - the scalar diagnostics, the
+optional full fields and the wall time - and converts them to arrays, to a
+summary or to a CSV file.
+
+HOW IT WORKS
+------------
+-> APPEND-ONLY SERIES <-
+   Every scalar is a list appended by :meth:`TransientResults.add_timestep`, so
+   a sample can never fail on a missing or unexpected key: a missing value is
+   recorded as zero.  ``SCALAR_FIELDS`` fixes both the append order and the
+   column order of the export.
+
+-> ARRAYS AND EXPORT <-
+   :meth:`TransientResults.to_arrays` stacks the series, and
+   :meth:`TransientResults.export_csv` writes them as CSV with the names of the
+   series as the header.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 import numpy as np
 
+#: scalar series recorded at every step, in append and CSV-column order.
 SCALAR_FIELDS = (
     "T_mean_storage", "T_max", "T_min", "T_mean_insulation", "T_mean_shell",
     "P_heaters", "P_extracted", "Q_losses_top", "Q_losses_bottom", "Q_losses_side",
@@ -33,8 +59,11 @@ class TransientResults:
     E_in_cumulative: list[float] = field(default_factory=list)
     E_out_cumulative: list[float] = field(default_factory=list)
     E_losses_cumulative: list[float] = field(default_factory=list)
+    #: exergy stored above the ambient [J].
     Ex_stored: list[float] = field(default_factory=list)
+    #: exergy destroyed between the source and the stored exergy [J].
     Ex_destroyed: list[float] = field(default_factory=list)
+    #: the whole temperature field of each saved sample [K], flat in mesh order.
     T_fields: list[np.ndarray] = field(default_factory=list)
     wall_time: float = 0.0
 

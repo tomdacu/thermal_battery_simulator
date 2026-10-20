@@ -1,50 +1,99 @@
-"""A cell-level octree with the 2:1 balance, for adaptive finite volumes.
+"""
+src.core.octree
+===============
+A cell-level octree with the 2:1 balance, for adaptive finite volumes.
 
-Why an octree: the battery spans four metres of sand, a 20 mm shell and a few
-millimetres of pipe wall.  A uniform Cartesian grid able to resolve the wall would need
-10^8 cells; grading helps but is still a global choice.  An octree spends cells where
-the solution asks for them, and this module provides the two things that make it safe:
+WHAT IT DOES
+------------
+Owns the leaf set of a box of ``n^3`` finest cells, the 2:1 balance, the
+conservative face list, and the assembly, solve and flux balance built on it.
+It also refines and coarsens the leaves and exposes the cell views (centres,
+sizes, level histogram) the consumers read.
 
-* the **2:1 balance** - neighbouring leaves never differ by more than one level, which
-  keeps the stencil local and the number of hanging nodes bounded (a coarse face is
-  shared with at most four finer faces);
+WHY
+---
+The battery spans four metres of sand, a 20 mm shell and a few millimetres of pipe
+wall.  A uniform Cartesian grid able to resolve the wall would need 10^8 cells;
+grading helps but is still a global choice.  An octree spends cells where the
+solution asks for them, and this module provides the two things that make it safe:
+
+* the **2:1 balance** - neighbouring leaves never differ by more than one level,
+  which keeps the stencil local and the number of hanging nodes bounded (a coarse
+  face is shared with at most four finer faces);
 * a **conservative face list** - a coarse face is split into the finer faces that
-  actually exist, each carrying its own conductance ``k A/d``, so every flux appears
-  with opposite signs in the two cells that share it and the discrete balance closes to
-  machine precision on *any* combination of levels.
+  actually exist, each carrying its own conductance ``k A/d``, so every flux
+  appears with opposite signs in the two cells that share it and the discrete
+  balance closes to machine precision on *any* combination of levels.
 
-**Status: complete.**  A face is probed at its centre and, when the leaf found there is
-finer, at the centre of every sub-face of *half* the leaf size: a coarse face against
-``n`` finer leaves comes back as those ``n`` leaves with the fine area, a pair of equal
-leaves as one entry, and each pair is listed once - by the coarse side of a coarse/fine
-pair, which is the side that sees the sub-faces, and by the lower index of an equal pair.
-What the earlier passes got wrong: the probes walked the tangential offsets at the *leaf*
-size, so a probe landed beyond the neighbouring sub-face and returned edge and corner
-neighbours as well as face neighbours (738 entries on a uniform 4x4x4 tree where 144
-exist), while the deduplication key (pair, axis) turned those extra neighbours into extra
-entries; and the level was read as a refinement depth by `split` (which handed out
-*larger* children and refused to split the root) while `uniform_tree`, `size` and
-`coarsen` read it as the logarithm of the edge length.  The convention is the latter: the
-level of a leaf is ``log2`` of its edge in finest cells, so level 0 is a single finest
-cell and ``Octree.max_level`` is the leaf that is the whole box.  The Morton code packs 21
-bits per coordinate now, so the round trip is exact for leaves of mixed level; it
-interleaved only ``level + 1`` bits before and dropped the high bits of any leaf whose
-coordinates did not fit in its own level.
+HOW IT WORKS
+------------
+-> LINEAR OCTREE <-
+   The representation is a *linear* octree in the sense of p4est: every leaf is an
+   integer triple ``(level, x, y, z)`` with the coordinates counted in the finest
+   cells, so neighbour finding is integer arithmetic and a Morton code gives a
+   canonical order.
 
-The leaf list is indexed per level by the level-normalised corner, so a neighbour query
-is a couple of dictionary lookups rather than a walk over every leaf: a uniform tree of
-32768 leaves and its 95232 faces are done in about half a second, which is the budget the
-tests pin.  The blocks of Afivo (one dense leaf per octant) are the next step if a
-*refined* tree of that size has to go faster - the balance rounds, not the face list, are
-what costs seconds there - and they change no formula in this file.
+-> LEVEL CONVENTION <-
+   ``level`` is ``log2`` of the leaf edge in finest cells, so level 0 is a single
+   finest cell and ``Octree.max_level`` is the leaf that is the whole box.
+   ``split``, ``coarsen``, ``uniform_tree`` and ``Leaf.size`` all read it this way.
+   An earlier pass read it as a refinement depth in ``split`` (which handed out
+   *larger* children and refused to split the root) while ``uniform_tree``,
+   ``size`` and ``coarsen`` read it as the logarithm of the edge length; the
+   convention is the latter.
 
-The representation is a *linear* octree in the sense of p4est: every leaf is an integer
-triple ``(level, x, y, z)`` with the coordinates counted in the finest cells, so
-neighbour finding is integer arithmetic and a Morton code gives a canonical order.
+-> MORTON CODE <-
+   The code packs 21 bits per coordinate, so the round trip is exact for leaves of
+   mixed level.  It interleaved only ``level + 1`` bits before and dropped the high
+   bits of any leaf whose coordinates did not fit in its own level.
 
-The assembly reuses the harmonic mean of the conductivities and the
-``k A / (d_centers V)`` coefficient of the structured solver, so an octree mesh and a
-graded Cartesian mesh agree on the same solution where their cells agree.
+-> 2:1 BALANCE <-
+   A refinement can only break the rule next to the leaves it created, so
+   ``balance_from`` looks only there: every face of a seed is probed just outside
+   its centre, the leaf found there is the neighbour covering the whole face
+   whenever it is coarser, and it is split when it is more than one level coarser.
+   Its children are the next seeds, so a cascade runs as far as it has to and no
+   further.  The result is the same tree ``balance`` gives (the minimal balanced
+   refinement is unique); the cost is the size of the change, not of the tree - a
+   full sweep of every face of every leaf per round is what made a large build take
+   tens of seconds.
+
+-> CONSERVATIVE FACE LIST <-
+   A face is probed at its centre and, when the leaf found there is finer, at the
+   centre of every sub-face of *half* the leaf size: a coarse face against ``n``
+   finer leaves comes back as those ``n`` leaves with the fine area, a pair of
+   equal leaves as one entry, and each pair is listed once - by the coarse side of
+   a coarse/fine pair, which is the side that sees the sub-faces, and by the lower
+   index of an equal pair.  What an earlier pass got wrong: the probes walked the
+   tangential offsets at the *leaf* size, so a probe landed beyond the neighbouring
+   sub-face and returned edge and corner neighbours as well as face neighbours
+   (738 entries on a uniform 4x4x4 tree where 144 exist), while the deduplication
+   key (pair, axis) turned those extra neighbours into extra entries.
+
+-> NEIGHBOUR SEARCH <-
+   The leaf list is indexed per level by the level-normalised corner, so a
+   neighbour query is a couple of dictionary lookups rather than a walk over every
+   leaf: a uniform tree of 32768 leaves and its 95232 faces are done in about half
+   a second, which is the budget the tests pin.
+
+-> ASSEMBLY <-
+   The assembly reuses the harmonic mean of the conductivities and the
+   ``k A / (d_centers V)`` coefficient of the structured solver, so an octree mesh
+   and a graded Cartesian mesh agree on the same solution where their cells agree.
+
+LIMITS
+------
+The tree must be 2:1 balanced when ``faces`` is called; every mutation in
+:class:`Octree` ends in a balance.  The blocks of Afivo (one dense leaf per octant)
+are the next step if a *refined* tree of that size has to go faster - the balance
+rounds, not the face list, are what costs seconds there - and they change no
+formula in this file.
+
+SOURCES
+-------
+- Burstedde, Wilcox and Ghattas, "p4est: Scalable algorithms for parallel adaptive
+  mesh refinement on forests of octrees", SIAM J. Sci. Comput. 33 (2011)
+  1103-1133 [BWG11]: the linear octree and the 2:1 balance.
 """
 from __future__ import annotations
 
@@ -55,6 +104,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 
+#: Floor added to the conductivity sum ``k_i + k_j`` of a face, so the harmonic
+#: mean never divides by zero; it is negligible against any physical ``k`` [W/(m K)].
 EPS = 1e-30
 
 #: bits per coordinate in the Morton code: 3 * 21 = 63, the 64-bit linear index of p4est
@@ -142,7 +193,9 @@ def _morton_roundtrip(leaf: Leaf) -> Leaf:
     return Leaf(leaf.level, x, y, z)
 
 
-# ---------------------------------------------------------------------------
+# ==============================================================================
+# FACE TABLES
+# ==============================================================================
 #: face order: west, east, south, north, bottom, top (same as the structured solver)
 FACES = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
 FACE_AXIS = {"x_min": 0, "x_max": 0, "y_min": 1, "y_max": 1, "z_min": 2, "z_max": 2}
@@ -163,7 +216,7 @@ class Octree:
         # the default tree is the single leaf that is the whole box
         self._reindex(leaves if leaves else [Leaf(self.max_level, 0, 0, 0)])
 
-    # ------------------------------------------------------------- structure
+    # ---- structure ----
     @property
     def n_cells(self) -> int:
         return len(self.leaves)
@@ -316,7 +369,7 @@ class Octree:
         """Leaves sharing this face: one, or up to four when the neighbour is finer."""
         return [self.leaves[index] for index in self._face_neighbours(leaf, face)]
 
-    # -------------------------------------------------------------- balancing
+    # ---- balancing ----
     def balance_from(self, seeds: Iterable[Leaf]) -> int:
         """Enforce the 2:1 rule around ``seeds`` (the leaves a split just made).
 
@@ -397,7 +450,7 @@ class Octree:
             self._reindex(new)
         return splits
 
-    # ------------------------------------------------------------ refinement
+    # ---- refinement ----
     def refine(self, indicator: Callable[[Leaf], float], threshold: float,
                levels: int = 1) -> None:
         """Split every leaf whose indicator exceeds ``threshold``, then balance."""
@@ -441,7 +494,7 @@ class Octree:
         self._reindex(kept)
         self.balance()
 
-    # ------------------------------------------------------------------ view
+    # ---- view ----
     def cell_centres(self) -> np.ndarray:
         """(n_cells, 3) centres in finest-cell units."""
         if self._centres is None:
@@ -467,7 +520,7 @@ class Octree:
         return (f"octree {self.n}^3 finest cells: {self.n_cells} leaves ({levels}), "
                 f"finest size {1.0 / self.n:.4f} of the box")
 
-    # ---------------------------------------------------------- conservative faces
+    # ---- conservative faces ----
     def faces(self) -> list[tuple[int, int, int, float, float]]:
         """Conservative face list: (cell_i, cell_j, axis, area, centre distance).
 
@@ -487,7 +540,7 @@ class Octree:
                                distance.tolist(), strict=True))
         return self._faces
 
-    # ------------------------------------------------ vectorised neighbour search
+    # ---- vectorised neighbour search ----
     def _leaf_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         """``(corners (n, 3), levels (n,))`` as integer arrays, cached per tree state."""
         if getattr(self, "_arrays_version", None) != self.version:
@@ -606,7 +659,7 @@ class Octree:
             self._face_array.setflags(write=False)
         return self._face_array
 
-    # ------------------------------------------------------------------ assembly  # noqa: E501
+    # ---- assembly ----
     def diffusion_matrix(self, conductivity: np.ndarray | None = None,
                          physical_size: float = 1.0) -> sparse.csr_matrix:
         """The Laplacian on the octree, in the same per-volume form as the solver.

@@ -1,4 +1,34 @@
-"""Results panel: statistics, energy balance, materials, transient and log tabs."""
+"""
+gui.views.results_panel
+=======================
+Results panel: statistics, energy balance, materials, transient and log tabs.
+
+WHAT IT DOES
+------------
+``ResultsPanel`` holds the read-only report tabs and the two export buttons.
+The window feeds it from the mesh and the run results: the statistics, the
+power and energy balance, the material map, the transient time series and the
+log.
+
+HOW IT WORKS
+------------
+-> REPORTS <-
+   Statistics report the field in degC; the air around the vessel is excluded
+   because it is not part of the battery and would only dilute the statistics.
+   The energy balance shows the power paths, the stored and exergy energy, the
+   gas loop and the standby or transient totals; materials show the cell map
+   and the packed-bed properties; transient shows a sampled time series.
+-> RUN CONSISTENCY <-
+   The caller passes the ambient of the run and the same radiation switch the
+   solver used, or the fluxes shown would not be the fluxes that were solved.
+   With neither, the balance uses ``T_AMBIENT_DEFAULT``.
+-> EXPORTS <-
+   The window owns the mesh, so the field export is the ``export_requested``
+   signal; the series CSV is written from the last transient the panel holds.
+-> LOG <-
+   ``log`` appends a line; above 400 000 characters the log is cleared and
+   marked as truncated.
+"""
 from __future__ import annotations
 
 import numpy as np

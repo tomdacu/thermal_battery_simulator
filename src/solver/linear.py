@@ -1,10 +1,59 @@
-"""Linear solve layer: method selection, preconditioners, convergence reporting.
-
-Everything runs on the CPU through SciPy.  ``cg`` on a non-symmetric matrix is
-refused explicitly: an unguarded CG silently diverges on an asymmetric operator.
-Every substitution is reported in :attr:`LinearResult.notes` instead of being
-swallowed.
 """
+src.solver.linear
+=================
+Linear solve layer: method selection, preconditioners, convergence reporting.
+
+WHAT IT DOES
+------------
+Solves ``A x = b`` on the CPU through SciPy for both meshes and both drivers,
+with a direct factorisation or an iterative method, the requested
+preconditioner, and a result that reports the residual, the iteration count and
+every substitution the layer had to make.
+
+WHY
+---
+``cg`` on a non-symmetric matrix is refused explicitly: an unguarded CG
+silently diverges on an asymmetric operator.  Every substitution is reported in
+:attr:`LinearResult.notes` instead of being swallowed.
+
+HOW IT WORKS
+------------
+-> METHOD SELECTION <-
+   ``direct`` is a sparse LU.  ``cg`` requires symmetry, up to a rounding-level
+   tolerance, and falls back to ``bicgstab`` otherwise; ``gmres`` is the third
+   iterative method.
+
+-> PRECONDITIONERS <-
+   ``none``, Jacobi, ILU and the pyamg hierarchies.  The AMG hierarchy is cached
+   by the matrix fingerprint and reused as it is, or across a nearby operator
+   whose entries moved by less than ``NEAR_REUSE``, because rebuilding it is the
+   dominant cost of a transient.
+
+-> GRADED MESHES <-
+   Per-volume coefficients are ``A = diag(V)^-1 K`` with ``K`` symmetric.  A
+   caller that passes the cell volumes as ``scale`` makes the symmetric methods
+   solve the symmetrised system and map the solution back, which is what keeps
+   CG valid; a uniform mesh needs no scaling.
+
+-> DECOUPLED ROWS <-
+   The rows a symmetric elimination pinned (the excluded air, a Dirichlet wall)
+   are an identity and nothing else, so the iterative method only sees the rows
+   that are really coupled.
+
+OPTIONS
+-------
+:class:`LinearConfig` carries the method, the relative tolerance, the iteration
+cap, the preconditioner and the thread budget.  ``set_num_threads`` also limits
+the running BLAS/OMP pools through ``threadpoolctl``, because the environment
+variables only reach a library that has not been loaded yet.
+
+LIMITS
+------
+pyamg and threadpoolctl are optional: without pyamg the AMG choices fall back
+to Jacobi, and an ILU that fails on a singular or badly scaled operator does the
+same.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -30,7 +79,12 @@ try:
 except Exception:  # pragma: no cover
     threadpool_limits = None
 
+# ==============================================================================
+# SETTINGS AND RESULT
+# ==============================================================================
+#: method names accepted by :meth:`LinearConfig.validate`.
 METHODS = ("direct", "cg", "bicgstab", "gmres")
+#: preconditioner names accepted by :meth:`LinearConfig.validate`.
 PRECONDITIONERS = ("none", "jacobi", "ilu", "amg", "amg_rs", "amg_sa")
 
 
@@ -74,6 +128,9 @@ class LinearResult:
     notes: list[str] = field(default_factory=list)
 
 
+# ==============================================================================
+# THREADS, SYMMETRY AND FINGERPRINTS
+# ==============================================================================
 def set_num_threads(n_threads: int) -> int:
     """Set the BLAS/OMP thread budget; 0 = all cores, -1 = all but one.
 
@@ -115,6 +172,9 @@ def fingerprint(a: sparse.spmatrix) -> str:
     return h.hexdigest()
 
 
+# ==============================================================================
+# PRECONDITIONERS
+# ==============================================================================
 #: relative change of every entry under which an AMG hierarchy is reused as it is
 NEAR_REUSE = 0.2
 
@@ -247,6 +307,9 @@ def _ilu_operator(a: sparse.csr_matrix, notes: list[str]):
         return sparse.diags(1.0 / diag).tocsr()
 
 
+# ==============================================================================
+# SOLVE
+# ==============================================================================
 def solve_linear(a: sparse.csr_matrix, b: np.ndarray, cfg: LinearConfig = None,
                  x0: np.ndarray = None, cache: PreconditionerCache = None,
                  scale: np.ndarray = None) -> LinearResult:

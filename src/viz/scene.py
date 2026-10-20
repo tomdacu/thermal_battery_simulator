@@ -1,12 +1,38 @@
-"""Shared rendering helpers (PyVista grid construction, colour tables).
+"""
+src.viz.scene
+=============
+Shared rendering helpers: PyVista grids, colour tables and scene primitives.
 
+WHAT IT DOES
+------------
 The GUI and any script build their scene from the same :func:`to_image_data`,
-so a script and the interactive view can never disagree on orientation, units or
-colour mapping.  Either mesh renders: a structured grid becomes the ``ImageData`` or
-``RectilinearGrid`` it always was, a tree becomes an ``UnstructuredGrid`` of its leaves,
-and the report vocabulary a tree cannot answer (``grid_summary``, ``size_label``,
-``Nx x Ny x Nz``) is replaced here, once, by :func:`grid_lines` - the presentation side
-of the contract that ``src/core/mesh_api.py`` deliberately leaves out.
+so a script and the interactive view can never disagree on orientation, units
+or colour mapping.  Either mesh renders: a structured grid becomes the
+``ImageData`` or ``RectilinearGrid`` it always was, a tree becomes an
+``UnstructuredGrid`` of its leaves.
+
+HOW IT WORKS
+------------
+-> ONE GRID PER MESH <-
+   ``Mesh3D`` keeps a 3-D array and a tree a flat one; :func:`to_image_data`
+   puts the per-cell field in the mesh's own cell order and picks the grid
+   type from the mesh: ``ImageData`` for a uniform grid, ``RectilinearGrid``
+   for a graded one, an ``UnstructuredGrid`` of leaves for a tree.
+
+-> REPORT VOCABULARY <-
+   The report vocabulary a tree cannot answer (``grid_summary``,
+   ``size_label``, ``Nx x Ny x Nz``) is replaced here, once, by
+   :func:`grid_lines` - the presentation side of the contract that
+   ``src/core/mesh_api.py`` deliberately leaves out.
+
+-> FIELD UNITS <-
+   ``Temperature`` is displayed in degC; ``Material`` is dimensionless and
+   ``Sources`` and ``Conductivity`` are shown in the units of the solver.
+
+LIMITS
+------
+The geometry preview is schematic: it follows the elevations ``apply_to_mesh``
+uses, but it draws primitives, not the cells of the mesh.
 """
 from __future__ import annotations
 
@@ -20,6 +46,11 @@ from ..core.mesh import MaterialID, Mesh3D
 if TYPE_CHECKING:                      # the tree is the target, not a runtime dependency
     from ..core.adaptive_mesh import AdaptiveMesh
 
+# ==============================================================================
+# TABLES AND FIELD NAMES
+# ==============================================================================
+
+#: Display name of each material [-], keyed by ``int(MaterialID)``.
 MATERIAL_NAMES: dict[int, str] = {
     int(MaterialID.AIR): "Air",
     int(MaterialID.SAND): "Sand (storage)",
@@ -31,6 +62,7 @@ MATERIAL_NAMES: dict[int, str] = {
     int(MaterialID.CONCRETE): "Concrete",
 }
 
+#: RGB colour of each material in 0..1 [-], keyed by ``int(MaterialID)``.
 MATERIAL_COLORS: dict[int, tuple[float, float, float]] = {
     int(MaterialID.AIR): (0.85, 0.90, 1.00),
     int(MaterialID.SAND): (0.93, 0.79, 0.36),
@@ -42,15 +74,22 @@ MATERIAL_COLORS: dict[int, tuple[float, float, float]] = {
     int(MaterialID.CONCRETE): (0.70, 0.70, 0.68),
 }
 
+#: Field names [-] accepted by :func:`field_values` and stored as cell arrays.
 FIELD_ARRAYS = ("Temperature", "Material", "Sources", "Conductivity")
 
+#: Display unit of each field in ``FIELD_ARRAYS``; a field not listed is unitless.
 FIELD_UNITS = {"Temperature": "°C", "Sources": "W/m³", "Conductivity": "W/(m·K)"}
 
+#: Axis name -> (index in the domain extent, unit normal of the cutting plane).
 AXIS_INDEX = {"x": (0, (1.0, 0.0, 0.0)), "y": (1, (0.0, 1.0, 0.0)), "z": (2, (0.0, 0.0, 1.0))}
 
-#: the extension PyVista picks the writer from, per grid type it builds here
+#: File extension PyVista picks the writer from, per grid type it builds here.
 GRID_SUFFIX = {"ImageData": ".vti", "RectilinearGrid": ".vtr", "UnstructuredGrid": ".vtu"}
 
+
+# ==============================================================================
+# DOMAIN AND REPORTS
+# ==============================================================================
 
 def domain_extent(mesh: Mesh3D | AdaptiveMesh) -> tuple[float, float, float]:
     """Edge lengths of the domain [m], on either mesh.
@@ -82,6 +121,10 @@ def grid_lines(mesh: Mesh3D | AdaptiveMesh) -> list[str]:
             f"cell size   {mesh.size_label()}",
             f"domain      {lx:.3f} x {ly:.3f} x {lz:.3f} m"]
 
+
+# ==============================================================================
+# VIEW PRIMITIVES
+# ==============================================================================
 
 def material_cmap() -> list:
     """Material colours as hex strings.
@@ -145,6 +188,10 @@ def add_material_legend(plotter, loc: str = "upper left", size=(0.17, 0.34)):
               for index in sorted(MATERIAL_COLORS)]
     return plotter.add_legend(labels=labels, bcolor="white", size=size, loc=loc)
 
+
+# ==============================================================================
+# GEOMETRY PREVIEW
+# ==============================================================================
 
 def _clip_dataset(dataset, clip):
     """Apply the cutting plane of the view controls to a preview primitive."""
@@ -270,6 +317,10 @@ def _add_pipe_network(plotter, network, clip, scale) -> None:
                          opacity=min(0.95 * scale, 1.0), label="pipe network")
 
 
+# ==============================================================================
+# FIELDS AND GRIDS
+# ==============================================================================
+
 def field_values(mesh: Mesh3D | AdaptiveMesh, field: str) -> np.ndarray:
     """Cell array, in the mesh's own cell order, for one of the displayable fields.
 
@@ -347,6 +398,10 @@ def cell_centers(mesh: Mesh3D | AdaptiveMesh) -> np.ndarray:
     return np.column_stack([ii.ravel(order="F"), jj.ravel(order="F"),
                             kk.ravel(order="F")])
 
+
+# ==============================================================================
+# EXPORT
+# ==============================================================================
 
 def export_vtk(mesh: Mesh3D | AdaptiveMesh, path: str, field: str = "Temperature") -> str:
     """Write the grid of ``mesh``; returns the file that was written.

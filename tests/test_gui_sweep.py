@@ -1,12 +1,28 @@
-"""Systematic GUI sweep: every control and every action, head-less.
-
-Purpose: turn "clicking around and hoping" into a repeatable check.  Modal
-dialogs are neutralised, the 3D view is exercised with a head-less PyVista
-plotter, and every widget is driven through its whole range while its slots are
-connected.  PySide6 prints the traceback of an exception raised inside a slot
-and carries on - the handler is dead but the process is not - so the sweep
-captures ``sys.excepthook`` and fails on anything a slot raised.
 """
+tests.test_gui_sweep
+====================
+Systematic GUI sweep: every control and every action, head-less.
+
+WHAT IT DOES
+------------
+Turns "clicking around and hoping" into a repeatable check.  Modal dialogs are
+neutralised, the 3D view is exercised with a head-less PyVista plotter, and
+every widget is driven through its whole range while its slots are connected.
+PySide6 prints the traceback of an exception raised inside a slot and carries
+on - the handler is dead but the process is not - so the sweep captures
+``sys.excepthook`` and fails on anything a slot raised.
+
+Checks that every widget can be driven without aborting, that every panel
+getter survives the extreme values the sweep leaves behind, that every
+analysis type, profile mode and run kind builds or explains itself and
+executes through the controller, that the 3D view renders every field with the
+injected plotter, that the action buttons do not raise, that the Mesh tab
+builds a refined tree, and that state saves and loads through the window.
+Finally it fails on any Qt warning from the application and on any slot
+exception, the only tolerated message being Qt's font-directory notice of a
+head-less session.
+"""
+
 from __future__ import annotations
 
 import os

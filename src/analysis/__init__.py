@@ -1,4 +1,14 @@
-"""Analysis: flux evaluation, energy balance, losses optimisation."""
+"""
+src.analysis
+============
+Flux evaluation, energy balance, losses optimisation, mesh planning and cycle ledger.
+
+WHAT IT DOES
+------------
+Re-exports the analysis surface: the flux report and the balance identity, the
+standby losses solve, the automatic mesh search and the a-priori mesh plan,
+and the charge/standby/discharge ledger.
+"""
 from .balance import (
     Balance,
     compute_balance,

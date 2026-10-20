@@ -1,21 +1,36 @@
-"""Heat-flux evaluation: one implementation shared by solver, balance and checks.
+"""
+src.analysis.fluxes
+===================
+Heat-flux evaluation, shared by solver, balance and checks.
 
+WHAT IT DOES
+------------
 Every flux is expressed with the rules the assembly itself applies - the face
-conductance :func:`src.solver.matrix.face_conductance` on the mesh's own face list,
-``h_eff = 2kh/(2k+hd)`` for convective faces, ``2k/d`` for a Dirichlet surface ``d/2``
-away from the node centre - so the integrals below close the discrete energy balance
-instead of approximating it with a different formula.
+conductance :func:`src.solver.matrix.face_conductance` on the mesh's own face
+list, ``h_eff = 2kh/(2k+hd)`` for convective faces, ``2k/d`` for a Dirichlet
+surface ``d/2`` away from the node centre - so the integrals below close the
+discrete energy balance instead of approximating it with a different formula.
 
-Two meshes, one rule.  A mesh that carries its own conservative face list
-(:meth:`src.core.mesh_api.MeshAPI.faces`, i.e. the adaptive mesh) is read through it: the
-report and the assembly then share the same faces *and* the same conductances, which is
-what keeps the balance honest on a tree with hanging nodes.  ``Mesh3D`` has no face list;
-its report reads the ``GridIndex`` neighbour tables, which is the face list its assembly
-was built from (``docs/16_ADAPTIVE_MESH_MIGRATION.md`` section 1.2) and whose layout
-:meth:`src.core.grid.GridIndex.face_rows` restates.  Wherever a flux is a face law it is
-written once, in terms of the shared rule, and called by both roads.
+HOW IT WORKS
+------------
+-> TWO MESHES, ONE RULE <-
+   A mesh that carries its own conservative face list
+   (:meth:`src.core.mesh_api.MeshAPI.faces`, i.e. the adaptive mesh) is read
+   through it: the report and the assembly then share the same faces *and* the
+   same conductances, which is what keeps the balance honest on a tree with
+   hanging nodes.  ``Mesh3D`` has no face list; its report reads the
+   ``GridIndex`` neighbour tables, which is the face list its assembly was
+   built from (``docs/16_ADAPTIVE_MESH_MIGRATION.md`` section 1.2) and whose
+   layout :meth:`src.core.grid.GridIndex.face_rows` restates.
 
-Sign convention: positive flux LEAVES the domain / the battery.
+-> ONE FACE LAW <-
+   Wherever a flux is a face law it is written once, in terms of the shared
+   rule, and called by both roads.
+
+OUTPUTS
+-------
+Every reported flux is in W.  Sign convention: positive flux LEAVES the domain
+/ the battery.
 """
 from __future__ import annotations
 

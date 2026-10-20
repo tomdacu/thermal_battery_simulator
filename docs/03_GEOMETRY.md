@@ -1,8 +1,8 @@
 # 3. Geometry model
 
-`src/core/geometry.py`.  Three configuration dataclasses (`CylinderGeometry`,
-`HeaterConfig`, `TubeConfig`) are combined by `BatteryGeometry`, which converts
-them into the voxel arrays of a `Mesh3D` (`apply_to_mesh`).
+`src/core/geometry.py`.  Two configuration dataclasses (`CylinderGeometry`,
+`HeaterConfig`) are combined by `BatteryGeometry`, which converts them into the
+voxel arrays of a `Mesh3D` (`apply_to_mesh`).
 
 ## 1. Reference design
 
@@ -54,9 +54,7 @@ Later steps win, but the overlaps are explicit now:
 | 7 | top slab | `z_slab_top_start ≤ z < z_slab_top_end`, `r < r_storage` |
 | 8 | steel plate under the roof | only if `steel_slab_top > 0` |
 | 9 | cone: sand fill (optional) then steel shell | `z_cone_base ≤ z ≤ z_cone_apex` |
-| 10 | discrete heaters | element mask ∩ storage band → `material_id = HEATERS` + `source_mask` |
-| 11 | tubes | element mask ∩ storage band → `material_id = TUBES` (steel), sources cleared |
-| 12 | domain boundary conditions | see §6 |
+| 10 | domain boundary conditions | see §6 |
 
 Bands are half-open `[start, end)`, so no cell is painted twice by two adjacent
 bands.  **A zone thinner than a cell is widened to one cell** (growing away from
@@ -74,7 +72,13 @@ interface ([13](13_REDESIGN.md) §4, [02](02_FDM_DISCRETIZATION.md) §5.5) - but
 for every geometry the GUI can build.  The capability is tested in isolation
 (`tests/test_environment.py`); the geometry wiring is an open item.
 
-## 3. Heaters: hairpin (U-shaped) sheathed elements
+## 3. Heaters: hairpin (U-shaped) sheathed elements (historical)
+
+> **Removed 2026-09-22** ([13](13_REDESIGN.md)): the discrete hairpin bank and
+> `src/core/heaters.py` are gone.  `HeaterConfig` now carries the plant power
+> and its band, and the bed is heated through the buried pipe network.  This
+> section records the model that was replaced; it is not the current paint
+> order.
 
 A discrete heater pattern is a **bank of flanged hairpin elements** built by
 `HeaterConfig.bank(...)` and rasterised by `src/core/heaters.py`.  One element is two
@@ -112,7 +116,12 @@ thinner than a cell, surface power outside 3-8 W/cm².
 `power_total`: the source density is $Q = P/\sum V$ over the cells that were painted,
 so $\sum Q V = P$ (`tests/test_heaters.py`).
 
-## 4. Tube patterns
+## 4. Tube patterns (historical)
+
+> **Removed with the same redesign**: `TubeConfig` and the tube patterns are
+> no longer in `src/core/geometry.py`.  The heat-transfer surface is the pipe
+> network of §5, and the legacy tube film is not painted into the material
+> field.  The text below records the old model.
 
 `TubeConfig.generate_positions(...)`, also pure: `central_cluster`, `radial_array`
 (default), `grid`, `hexagonal`, `single_central`, `custom`.

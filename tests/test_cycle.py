@@ -1,12 +1,26 @@
-"""Charging and discharging through the gas loop, end to end.
-
-The point of these tests is that the *loop* is the heat transfer path: the resistors
-put power into the gas, the gas heats the sand through the pipes, and the fan work is
-reported with the cycle.  Nothing is deposited in the sand directly.
-
-The second half drives whole cycles on a small silo: charge, standby, discharge, the
-stopping criterion of each phase, and the energy decomposition that has to close.
 """
+tests.test_cycle
+================
+Charging and discharging through the gas loop, end to end.
+
+WHAT IT DOES
+------------
+Drives :func:`~src.analysis.cycle.run_cycle` on a small silo, where the *loop*
+is the heat transfer path: the resistors put power into the gas, the gas heats
+the sand through the pipes, and the fan work is reported with the cycle.
+Nothing is deposited in the sand directly.
+
+Checks that charging heats the bed and discharging cools it, that the energy
+balance closes with the loop driving, that a return-temperature discharge
+delivers what the bed loses, and that the exchanger delivers its power while
+the resistors run.
+
+The second half drives whole cycles: charge, standby, discharge, the stopping
+criterion of each phase, the fan counted once per phase, and the energy
+decomposition that has to close.  The field must stay inside the kelvin
+contract on a hard discharge.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -174,7 +188,9 @@ def test_the_exchanger_delivers_its_power_while_the_resistors_run():
     assert solver.fluid_delivered == pytest.approx(5_000.0 * 1800.0, rel=1e-9)
 
 
-# --------------------------------------------------------------------- the cycle
+# ==============================================================================
+# THE CYCLE
+# ==============================================================================
 
 
 def silo_bed(t_start: float = T_AMBIENT_DEFAULT, leak: float = 1.0,

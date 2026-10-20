@@ -1,4 +1,28 @@
-"""Core model tests: units contract, mesh, materials, geometry, profiles."""
+"""
+tests.test_core
+===============
+Core model tests: units contract, mesh, materials, geometry, profiles.
+
+WHAT IT DOES
+------------
+Pins the layer every solver stands on:
+
+* **units** - the Celsius/kelvin round trip, the check that rejects a Celsius
+  field, the kelvin defaults of the mesh, and the boundary conditions that
+  record the face rather than the node;
+* **mesh** - the domain snaps to whole cells, the index round trip and the
+  out-of-domain cell lookup, and ``validate`` rejecting a non-physical field;
+* **materials** - the single material database, the packed bed lowering
+  conductivity and density, the packing-fraction validation, and the energy
+  density scaling with the temperature span;
+* **geometry** - the painted sources integrate to the rated heater power, the
+  clipped roof and the oversized battery are refused, and the zone volumes and
+  masses are consistent;
+* **profiles** - the power modes and their extrapolation, the rejected broken
+  input, the extraction profile without a free-energy placeholder, and the
+  initial conditions returning kelvin.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -13,7 +37,9 @@ from src.core.profiles import ExtractionProfile, InitialCondition, PowerProfile
 from src.units import c_to_k, check_kelvin, k_to_c
 
 
-# --------------------------------------------------------------------- units
+# ==============================================================================
+# UNITS
+# ==============================================================================
 def test_celsius_kelvin_round_trip():
     assert c_to_k(0.0) == pytest.approx(273.15)
     assert k_to_c(373.15) == pytest.approx(100.0)
@@ -69,7 +95,9 @@ def test_validate_rejects_non_physical_fields():
         mesh.validate()
 
 
-# ----------------------------------------------------------------- materials
+# ==============================================================================
+# MATERIALS
+# ==============================================================================
 def test_material_database_is_single_and_consistent():
     manager = MaterialManager()
     steatite = manager.get("steatite")
@@ -102,7 +130,9 @@ def test_energy_density_scales_with_temperature_span():
     assert double == pytest.approx(2 * single)
 
 
-# ------------------------------------------------------------------ geometry
+# ==============================================================================
+# GEOMETRY
+# ==============================================================================
 def test_apply_to_mesh_marks_sources_and_keeps_the_power_budget(storage_model):
     """The volumetric sources must integrate to the rated heater power."""
     mesh = storage_model
@@ -139,7 +169,9 @@ def test_zone_volumes_and_masses_are_consistent(storage_model):
     assert capacity["mass_storage_kg"] == pytest.approx(masses["storage"])
 
 
-# ------------------------------------------------------------------ profiles
+# ==============================================================================
+# PROFILES
+# ==============================================================================
 def test_power_profile_modes_and_extrapolation():
     assert PowerProfile(mode="off").power_at(10.0) == 0.0
     assert PowerProfile(mode="constant", constant_power=1234.0).power_at(0.0) == 1234.0

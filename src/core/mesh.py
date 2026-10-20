@@ -1,9 +1,35 @@
-"""Structured Cartesian 3D mesh for the FDM heat solver.
+"""
+src.core.mesh
+=============
+Structured Cartesian 3D mesh for the FDM heat solver.
 
-Indexing contract: node ``(i, j, k)`` has linear index ``i + j*Nx + k*Nx*Ny``
-(Fortran order), matching ``field.ravel(order="F")`` used everywhere else.
+WHAT IT DOES
+------------
+Owns the cell grid of the simulation box - uniform from a single ``spacing``
+or graded from a :class:`~src.core.refinement.GridSpec` - and the per-cell
+arrays the solver reads: material ids, boundary types, conductivity, density,
+heat capacity, sources, sinks and the temperature field.  It also owns the
+domain boundary conditions and the index arithmetic between a node and its
+flat position.
 
-Unit contract: ``T``, ``bc_T_inf`` and every ``FaceBC`` temperature are KELVIN.
+HOW IT WORKS
+------------
+-> INDEXING <-
+   The indexing contract: node ``(i, j, k)`` has linear index
+   ``i + j*Nx + k*Nx*Ny`` (Fortran order), matching ``field.ravel(order="F")``
+   used everywhere else.
+
+-> TEMPERATURES <-
+   The unit contract: ``T``, ``bc_T_inf`` and every ``FaceBC`` temperature are
+   KELVIN.
+
+LIMITS
+------
+``d``, ``V_cell`` and ``A_cell`` exist on a uniform mesh only: on a graded
+one a single cell size does not exist and asking for one raises instead of
+silently using the first cell.  ``snapped`` is meaningful on the uniform path
+only (the graded walk lands exactly on the box), and ``get_info`` reports an
+estimate of the memory, not a measurement.
 """
 from __future__ import annotations
 
@@ -26,6 +52,7 @@ from ..units import check_kelvin
 from .refinement import (GridSpec, edges_to_centers,
                         edges_to_sizes, size_at, worst_ratio)
 
+#: Domain faces, in the order the neighbour tables use: -x, +x, -y, +y, -z, +z.
 FACES = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
 
 
@@ -35,6 +62,9 @@ def _find(edges: np.ndarray, position: float) -> int:
                        0, edges.size - 2))
 
 
+# ==============================================================================
+# MATERIALS AND BOUNDARY CONDITIONS
+# ==============================================================================
 class MaterialID(IntEnum):
     AIR = 0
     SAND = 1
@@ -74,8 +104,12 @@ class FaceBC:
     """
 
     kind: BoundaryType = BoundaryType.INTERNAL
+    #: film coefficient [W/(m^2 K)], used by CONVECTION.
     h: float = 0.0
+    #: DIRICHLET temperature [K], CONVECTION fluid temperature [K], or NEUMANN
+    #: flux [W/m^2] entering the domain.
     value: float = T_AMBIENT_DEFAULT
+    #: total hemispherical emissivity [-]; zero drops the radiative part.
     emissivity: float = 0.0
 
     def is_active(self) -> bool:
@@ -92,8 +126,11 @@ class FaceBC:
 class NodeProperties:
     """Thermal properties of a single material."""
 
+    #: thermal conductivity [W/(m K)].
     k: float
+    #: density [kg/m^3].
     rho: float
+    #: specific heat [J/(kg K)].
     cp: float
 
     @property
@@ -102,6 +139,9 @@ class NodeProperties:
         return self.k / (self.rho * self.cp)
 
 
+# ==============================================================================
+# THE STRUCTURED MESH
+# ==============================================================================
 @dataclass
 class Mesh3D:
     """Structured Cartesian grid, uniform or graded.
@@ -121,52 +161,75 @@ class Mesh3D:
     one raises instead of silently using the first cell.
     """
 
+    #: box side along x [m].
     Lx: float = 10.0
+    #: box side along y [m].
     Ly: float = 10.0
+    #: box side along z [m].
     Lz: float = 8.0
+    #: uniform cell size [m]; mutually exclusive with ``grid``.
     spacing: float | None = None
+    #: per-axis refinement targets; mutually exclusive with ``spacing``.
     grid: GridSpec | None = None
 
     # derived geometry (filled in __post_init__)
+    #: cells along x, y, z.
     Nx: int = field(init=False)
     Ny: int = field(init=False)
     Nz: int = field(init=False)
+    #: total cell count ``Nx * Ny * Nz``.
     N_total: int = field(init=False)
+    #: leftover of the box after snapping [m], uniform path only.
     snapped: dict[str, float] = field(init=False, repr=False)
+    #: True when the grid is uniform (the ``spacing`` path).
     uniform: bool = field(init=False)
 
-    #: cell sizes per axis, ``(Nx,)``-shaped
+    #: cell sizes per axis [m], ``(Nx,)``-shaped.
     dx: np.ndarray = field(init=False, repr=False)
     dy: np.ndarray = field(init=False, repr=False)
     dz: np.ndarray = field(init=False, repr=False)
-    #: cell edges per axis, ``(Nx+1,)``-shaped
+    #: cell edges per axis [m], ``(Nx+1,)``-shaped.
     edges_x: np.ndarray = field(init=False, repr=False)
     edges_y: np.ndarray = field(init=False, repr=False)
     edges_z: np.ndarray = field(init=False, repr=False)
 
     # coordinates and grids
+    #: cell-centre coordinates [m], ``(Nx,)``-shaped.
     x: np.ndarray = field(init=False, repr=False)
     y: np.ndarray = field(init=False, repr=False)
     z: np.ndarray = field(init=False, repr=False)
+    #: cell-centre coordinates as ``(Nx, Ny, Nz)`` arrays [m].
     X: np.ndarray = field(init=False, repr=False)
     Y: np.ndarray = field(init=False, repr=False)
     Z: np.ndarray = field(init=False, repr=False)
 
     # material / boundary description
+    #: ``MaterialID`` value of every cell.
     material_id: np.ndarray = field(init=False, repr=False)
+    #: ``BoundaryType`` value of every cell.
     boundary_type: np.ndarray = field(init=False, repr=False)
+    #: boundary condition of each domain face, keyed by ``FACES``.
     face_bc: dict[str, FaceBC] = field(init=False, repr=False)
 
     # fields
+    #: thermal conductivity [W/(m K)].
     k: np.ndarray = field(init=False, repr=False)
+    #: density [kg/m^3].
     rho: np.ndarray = field(init=False, repr=False)
+    #: specific heat [J/(kg K)].
     cp: np.ndarray = field(init=False, repr=False)
-    Q_source: np.ndarray = field(init=False, repr=False)   # volumetric sources [W/m^3] (>= 0)
-    Q_sink: np.ndarray = field(init=False, repr=False)     # volumetric sinks [W/m^3] (<= 0)
-    source_mask: np.ndarray = field(init=False, repr=False)  # cells whose Q_source is driven by the power profile
-    T: np.ndarray = field(init=False, repr=False)          # [K]
-    bc_h: np.ndarray = field(init=False, repr=False)       # internal (tube) convection [W/m^2/K]
-    bc_T_inf: np.ndarray = field(init=False, repr=False)   # internal fluid temperature [K]
+    #: volumetric sources [W/m^3], >= 0.
+    Q_source: np.ndarray = field(init=False, repr=False)
+    #: volumetric sinks [W/m^3], <= 0.
+    Q_sink: np.ndarray = field(init=False, repr=False)
+    #: cells whose Q_source is driven by the power profile.
+    source_mask: np.ndarray = field(init=False, repr=False)
+    #: temperature field [K].
+    T: np.ndarray = field(init=False, repr=False)
+    #: internal (tube) film coefficient [W/(m^2 K)].
+    bc_h: np.ndarray = field(init=False, repr=False)
+    #: internal fluid temperature [K].
+    bc_T_inf: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.grid is not None and self.spacing is not None:

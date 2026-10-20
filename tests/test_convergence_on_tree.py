@@ -1,18 +1,27 @@
-"""The automatic mesh search on an adaptive mesh: the same search, an octree of cells.
-
-The search asks a level for a *scale*, and the two roads realise it differently: a graded
-grid scales every band target, a tree scales the bands of the a priori plan and adds one
-round of refinement on the flux-jump indicator of the field it has already solved.  The
-tests here run the same :func:`~src.analysis.convergence.find_mesh`, with the same
-:class:`ConvergenceTarget`, on the same physical model over the two meshes, and compare
-the meshes the two searches settle on.
-
-The model is a 1 m cube made one-dimensional on purpose: the sides are adiabatic, the
-bottom is held at 300 K and the top loses heat through a film of 8 W/(m2 K), under a
-uniform source of 2000 W/m3.  The answer then depends on the *vertical* resolution alone,
-which is what makes the two roads comparable number by number: on the same leaf height
-they must agree, and they do (see ``test_the_two_roads_choose_the_same_answer``).
 """
+tests.test_convergence_on_tree
+==============================
+The automatic mesh search on an adaptive mesh: the same search, an octree of cells.
+
+WHAT IT DOES
+------------
+Runs the same :func:`~src.analysis.convergence.find_mesh`, with the same
+:class:`ConvergenceTarget`, on the same physical model over a graded grid and
+over a tree, and compares the meshes the two searches settle on.
+
+The search asks a level for a *scale*, and the two roads realise it
+differently: a graded grid scales every band target, a tree scales the bands
+of the a priori plan and adds one round of refinement on the flux-jump
+indicator of the field it has already solved.
+
+The model is a 1 m cube made one-dimensional on purpose: the sides are
+adiabatic, the bottom is held at 300 K and the top loses heat through a film
+of 8 W/(m2 K), under a uniform source of 2000 W/m3.  The answer then depends
+on the *vertical* resolution alone, which is what makes the two roads
+comparable number by number: on the same leaf height they must agree, and
+they do (see ``test_the_two_roads_choose_the_same_answer``).
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -90,7 +99,9 @@ def searched() -> tuple:
     return graded, tree
 
 
-# ------------------------------------------------------------------ the plan
+# ==============================================================================
+# THE PLAN
+# ==============================================================================
 def test_the_bands_map_one_to_one_to_refinement_boxes():
     """A band is a slice of one axis, its box spans the others - and keeps its target.
 
@@ -128,7 +139,9 @@ def test_the_tree_box_comes_from_the_cell_budget():
     assert coarse > fine, "a bigger budget buys a finer floor"
 
 
-# -------------------------------------------------------------- the search
+# ==============================================================================
+# THE SEARCH
+# ==============================================================================
 def test_the_tree_search_converges_and_matches_the_graded_one(searched):
     """The acceptance: both roads stop, and they stop on the same answer."""
     graded, tree = searched

@@ -1,41 +1,56 @@
-"""The transient march and the cycle on a tree: one driver, two assemblies.
+"""
+tests.test_transient_on_tree
+============================
+The transient march and the cycle on a tree: one driver, two assemblies.
 
-Step 5 of the migration (``docs/16_ADAPTIVE_MESH_MIGRATION.md``): the transient runs on
-``Mesh3D`` and on an :class:`~src.core.adaptive_mesh.AdaptiveMesh` through the same
-driver, and the cycle's ledger closes on either.  What this module pins, in the order the
+WHAT IT DOES
+------------
+Step 5 of the migration (``docs/16_ADAPTIVE_MESH_MIGRATION.md``): the
+transient runs on ``Mesh3D`` and on an
+:class:`~src.core.adaptive_mesh.AdaptiveMesh` through the same driver, and the
+cycle's ledger closes on either.  What this module pins, in the order the
 claims matter:
 
 * **the slab** - the 1-D Dirichlet slab of
-  ``tests/test_solver.py::test_transient_matches_the_analytic_slab_series`` run on a tree:
-  the interior column follows the Fourier series in the same 5 % band, and every leaf
-  carries the temperature the matching ``Mesh3D`` carries, to the tolerance of the linear
-  solve.  The two operators are *equal* (the same face conductance, the same film, the
-  same elimination), so what the assertion measures is the march;
-* **the lumped case** - an adiabatic box with a uniform source, where ``rho*cp`` alone
-  sets the rate (the exactness ``dT/dt = Q/(rho*cp)`` of
-  ``tests/test_solver.py::test_transient_rate_is_mesh_independent``): it holds on a tree,
-  on a *refined* tree with hanging nodes, and on ``Mesh3D`` - the mass matrix is the same
-  number on both assemblies, and it does not carry the cell volume;
-* **the environment film and the excluded air** - the painted battery model on both
-  meshes: the same field on every active leaf and the same environment flux.  The
-  excluded leaves are the one place where the two roads differ, and they differ by rule:
-  the tree's elimination pins them at the ambient (its steady rule, and the reason its
-  balance stays readable), while the structured transient leaves them decoupled - no
-  conductance, no film - so they evolve on their own and feed nothing back;
-* **the refined tree** - hanging nodes: the march settles on the tree's *own* steady
-  field (``solve_steady``), which is what says the operator, the films and the elimination
-  the transient builds are the ones the verified steady assembly builds;
-* **the cycle** - charge, standby and discharge on a tree bed with a gas loop: the ledger
-  closes exactly as on ``Mesh3D``, blower and energy delivered by the loop included, and
-  the phase criteria (the per-step ``should_stop`` hook) end the phases on the tree the
-  way they end them on the grid;
-* **the profile branches** - a ``flow_rate`` extraction through tube leaves (the film and
-  the sink it drives), and the guard that refuses a power profile with no source leaf:
-  both read the tree's per-cell arrays, which are one flat vector instead of a 3-D field.
+  ``tests/test_solver.py::test_transient_matches_the_analytic_slab_series`` run
+  on a tree: the interior column follows the Fourier series in the same 5 %
+  band, and every leaf carries the temperature the matching ``Mesh3D`` carries,
+  to the tolerance of the linear solve.  The two operators are *equal* (the
+  same face conductance, the same film, the same elimination), so what the
+  assertion measures is the march;
+* **the lumped case** - an adiabatic box with a uniform source, where ``rho*cp``
+  alone sets the rate (the exactness ``dT/dt = Q/(rho*cp)`` of
+  ``tests/test_solver.py::test_transient_rate_is_mesh_independent``): it holds
+  on a tree, on a *refined* tree with hanging nodes, and on ``Mesh3D`` - the
+  mass matrix is the same number on both assemblies, and it does not carry the
+  cell volume;
+* **the environment film and the excluded air** - the painted battery model on
+  both meshes: the same field on every active leaf and the same environment
+  flux.  The excluded leaves are the one place where the two roads differ, and
+  they differ by rule: the tree's elimination pins them at the ambient (its
+  steady rule, and the reason its balance stays readable), while the structured
+  transient leaves them decoupled - no conductance, no film - so they evolve on
+  their own and feed nothing back;
+* **the refined tree** - hanging nodes: the march settles on the tree's *own*
+  steady field (``solve_steady``), which is what says the operator, the films
+  and the elimination the transient builds are the ones the verified steady
+  assembly builds;
+* **the cycle** - charge, standby and discharge on a tree bed with a gas loop:
+  the ledger closes exactly as on ``Mesh3D``, blower and energy delivered by the
+  loop included, and the phase criteria (the per-step ``should_stop`` hook) end
+  the phases on the tree the way they end them on the grid;
+* **the profile branches** - a ``flow_rate`` extraction through tube leaves (the
+  film and the sink it drives), and the guard that refuses a power profile with
+  no source leaf: both read the tree's per-cell arrays, which are one flat
+  vector instead of a 3-D field.
 
-The tree of the slab cases is the 1 m cube of ``tests/test_adaptive_mesh.py`` (16 finest
-cells a side, so every level is a power-of-two subdivision of the box); the battery case
-is the 8 m cube of ``tests/conftest.py``; the cycle bed is a 2 m silo built here.
+HOW IT WORKS
+------------
+-> TEST BOXES <-
+   The tree of the slab cases is the 1 m cube of
+   ``tests/test_adaptive_mesh.py`` (16 finest cells a side, so every level is a
+   power-of-two subdivision of the box); the battery case is the 8 m cube of
+   ``tests/conftest.py``; the cycle bed is a 2 m silo built here.
 """
 from __future__ import annotations
 
@@ -60,14 +75,21 @@ MARCH = SolverConfig(method="bicgstab", tolerance=1e-10)
 #: the cycle is driven with the settings ``tests/test_cycle.py`` uses
 CYCLE_MARCH = SolverConfig(method="cg", tolerance=1e-7)
 
+#: Side of the slab box [m].
 BOX = 1.0
-FINEST = 16                       # finest cells a side of the slab box
-H = BOX / FINEST                  # edge of one finest cell [m]
+#: Finest cells a side of the slab box.
+FINEST = 16
+#: Edge of one finest cell [m].
+H = BOX / FINEST
+#: Hot and cold Dirichlet temperatures [K].
 T_HOT, T_COLD = 373.15, 273.15
+#: End time [s] and time step [s] of the slab march.
 SLAB_T_END, SLAB_DT = 200_000.0, 20_000.0
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def slab_tree() -> AdaptiveMesh:
     """The 1-D slab of ``tests/test_solver.py`` as a cube with adiabatic sides.
 
@@ -154,7 +176,9 @@ def lumped_grid() -> Mesh3D:
     return mesh
 
 
-# ------------------------------------------------------------------- the slab
+# ==============================================================================
+# THE SLAB
+# ==============================================================================
 def test_the_slab_matches_the_fourier_series_and_the_structured_mesh(structured_twin):
     """1-D conduction on a tree: the series in the interior, ``Mesh3D`` leaf by leaf."""
     tree = slab_tree()
@@ -179,7 +203,9 @@ def test_the_slab_matches_the_fourier_series_and_the_structured_mesh(structured_
     assert difference < 1e-4, f"the two assemblies differ by {difference:.2e} K"
 
 
-# ------------------------------------------------------------- the lumped case
+# ==============================================================================
+# THE LUMPED CASE
+# ==============================================================================
 def test_the_lumped_rate_is_exact_on_a_tree_on_a_refined_tree_and_on_the_grid():
     """An adiabatic box with a uniform source: ``rho*cp`` alone sets the rate.
 
@@ -204,7 +230,9 @@ def test_the_lumped_rate_is_exact_on_a_tree_on_a_refined_tree_and_on_the_grid():
         assert float(np.mean(mesh.T)) == pytest.approx(expected, rel=1e-6), name
 
 
-# ------------------------------------------------------------ the environment
+# ==============================================================================
+# THE ENVIRONMENT
+# ==============================================================================
 def test_the_environment_film_and_the_excluded_air_on_a_tree(paint_pair):
     """The painted battery on both meshes: same active field, same flux, pinned air.
 
@@ -242,7 +270,9 @@ def test_the_environment_film_and_the_excluded_air_on_a_tree(paint_pair):
     assert balance.t_mean_storage == pytest.approx(reference.t_mean_storage, rel=1e-6)
 
 
-# -------------------------------------------------------------- the refined tree
+# ==============================================================================
+# THE REFINED TREE
+# ==============================================================================
 def refined_tree() -> AdaptiveMesh:
     """A slab box refined once around the middle: two levels, hanging nodes."""
     tree = AdaptiveMesh.from_bands(
@@ -287,7 +317,9 @@ def test_a_refined_tree_with_hanging_nodes_settles_on_its_own_steady_field():
     assert residual < 1e-3, f"the march settled {residual:.2e} K away from its own steady field"
 
 
-# -------------------------------------------------------------------- the cycle
+# ==============================================================================
+# THE CYCLE
+# ==============================================================================
 def silo_tree(box: float = 2.0, n_finest: int = 4) -> tuple[AdaptiveMesh, np.ndarray]:
     """A small sand silo on a tree: adiabatic except the top face, four tube columns.
 

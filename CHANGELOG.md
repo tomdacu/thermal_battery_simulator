@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-21 - descriptions in the house style
+
+A description pass over every Python module: each one now opens with its dotted path,
+a one-line summary and the ALL-CAPS sections of the author's Master thesis packages
+(`WHAT IT DOES`, `WHY`, `HOW IT WORKS`, `INPUTS`, `OUTPUTS`, `LIMITS`, `SOURCES`), with
+`-> LABEL <-` items and 80-column `# ====` banners in the long files.  Module constants
+carry `#:` comments with their units, and every test module says what it checks and
+against what.
+
+Only docstrings and comments changed; the AST without docstrings is identical before and
+after.  The standard and its mechanical check are in `docs/20_CODE_STYLE.md`, linked from
+the index, the README and `docs/07`.
+
+Outside the description pass, `scripts/figures.py` lost five unused imports, a no-op
+double loop and an unused loop value, and the CI lint now covers `scripts/` and
+`run_gui.py` as well (`F,E9,B,SIM,UP` clean).  `docs/07` no longer lists the deleted
+`core/heaters.py` or its API, and the README's project tree mentions `scripts/banner.py`.
+
 ## 2026-09-29 (later) - the suite audited: what could not fail
 
 An audit of every test function (a mechanical pass for duplicates, then six read-only

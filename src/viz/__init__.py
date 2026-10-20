@@ -1,4 +1,14 @@
-"""Visualization helpers shared by the GUI and scripts."""
+"""
+src.viz
+========
+Visualization helpers shared by the GUI and scripts.
+
+WHAT IT DOES
+------------
+Re-exports the scene helpers: grid construction, field lookup and colour
+limits, material names and colours, the geometry preview and the VTK/CSV
+exports.
+"""
 from .scene import (
     MATERIAL_COLORS,
     MATERIAL_NAMES,

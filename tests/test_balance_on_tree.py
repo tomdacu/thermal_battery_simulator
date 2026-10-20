@@ -1,34 +1,43 @@
-"""The balance and the flux report on both meshes: one identity, two face lists.
-
-What this module pins, in the order the claims matter:
-
-* **the same numbers on both roads** - ``create_small_test_geometry()`` painted on a
-  uniform tree and on the matching ``Mesh3D`` (the ``paint_pair`` fixture), solved by the
-  same :class:`~src.solver.steady.SteadyStateSolver`: every field of
-  :class:`~src.analysis.balance.Balance` agrees, field by field, on a model that already
-  exercises an excluded air box, its film and the ground face;
-* **the balance closes** - ``p_input - p_extracted - q_domain`` at the round-off of the
-  powers, on a uniform pair, on a refined tree and with the source deposited in cells the
-  problem dropped;
-* **the loss is the film the assembly applied** - the report's ``q_domain`` is the sum of
-  the per-face film rates, the conduction into the pinned leaves and the environment
-  entry of :meth:`AdaptiveMesh.balance`, so the two implementations cannot drift;
-* **the report reads the assembly's faces** - ``fluxes.face_fluxes`` is the mesh's own
-  face list, and accumulating it around a cell reproduces the operator the assembly built
-  (``AdaptiveMesh.matrix`` on a tree, the structured face coefficients on ``Mesh3D``) for
-  an arbitrary *perturbed* field, not just for the solution;
-* **nothing is counted twice** - with the air dropped, the conduction into it is gone
-  from the envelope integral and the film is the whole loss, and a source sitting in an
-  excluded cell is not reported as input (the row is the identity: the solver never sees
-  it).
-
-Tolerances are declared where a comparison needs one.  The two assemblies run the same
-algebra over the same cells and sum it in a different order: the flux integrals agree to
-the round-off of the terms (``TOLERANCE``, 1e-9 relative - generous, the measurement is
-three orders below it), and ``imbalance`` is a *residual* of the identity, so it is
-bounded against the power that drives the model (``RESIDUAL``, 1e-12 relative) rather
-than compared field by field.
 """
+tests.test_balance_on_tree
+==========================
+The balance and the flux report on both meshes: one identity, two face lists.
+
+WHAT IT DOES
+------------
+Pins, in the order the claims matter:
+
+* **the same numbers on both roads** - ``create_small_test_geometry()``
+  painted on a uniform tree and on the matching ``Mesh3D`` (the ``paint_pair``
+  fixture), solved by the same :class:`~src.solver.steady.SteadyStateSolver`:
+  every field of :class:`~src.analysis.balance.Balance` agrees, field by
+  field, on a model that already exercises an excluded air box, its film and
+  the ground face;
+* **the balance closes** - ``p_input - p_extracted - q_domain`` at the
+  round-off of the powers, on a uniform pair, on a refined tree and with the
+  source deposited in cells the problem dropped;
+* **the loss is the film the assembly applied** - the report's ``q_domain``
+  is the sum of the per-face film rates, the conduction into the pinned
+  leaves and the environment entry of :meth:`AdaptiveMesh.balance`, so the
+  two implementations cannot drift;
+* **the report reads the assembly's faces** - ``fluxes.face_fluxes`` is the
+  mesh's own face list, and accumulating it around a cell reproduces the
+  operator the assembly built (``AdaptiveMesh.matrix`` on a tree, the
+  structured face coefficients on ``Mesh3D``) for an arbitrary *perturbed*
+  field, not just for the solution;
+* **nothing is counted twice** - with the air dropped, the conduction into it
+  is gone from the envelope integral and the film is the whole loss, and a
+  source sitting in an excluded cell is not reported as input (the row is the
+  identity: the solver never sees it).
+
+Tolerances are declared where a comparison needs one.  The two assemblies run
+the same algebra over the same cells and sum it in a different order: the flux
+integrals agree to the round-off of the terms (``TOLERANCE``, 1e-9 relative -
+generous, the measurement is three orders below it), and ``imbalance`` is a
+*residual* of the identity, so it is bounded against the power that drives the
+model (``RESIDUAL``, 1e-12 relative) rather than compared field by field.
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -56,7 +65,9 @@ TOLERANCE = 1e-9
 RESIDUAL = 1e-12
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def uniform_pair(box: float = BOX, spacing: float = H) -> tuple[AdaptiveMesh, Mesh3D]:
     """A uniform tree and the ``Mesh3D`` of the *same* cells, both empty."""
     side = int(round(box / spacing))
@@ -170,7 +181,9 @@ def assert_closes(balance: Balance, mesh) -> None:
         f"of {scale:.3e} W, {residual / scale:.2e} relative")
 
 
-# --------------------------------------------------- the same numbers, two roads
+# ==============================================================================
+# THE SAME NUMBERS, TWO ROADS
+# ==============================================================================
 def test_the_balance_is_the_same_field_by_field_on_both_meshes(paint_pair):
     """One battery model painted twice, solved twice: the same ``Balance``.
 
@@ -346,7 +359,9 @@ def inner_cells(mesh) -> np.ndarray:
     return np.logical_and.reduce([np.abs(axis - 0.5) < 0.2 for axis in axes])
 
 
-# ------------------------------------------------------------------ a refined tree
+# ==============================================================================
+# A REFINED TREE
+# ==============================================================================
 def test_a_refined_tree_closes_its_balance_like_the_uniform_one():
     """Hanging nodes do not touch the identity: the same model, a coarser far field.
 
@@ -385,7 +400,9 @@ def test_a_refined_tree_closes_its_balance_like_the_uniform_one():
     assert balance.e_stored == pytest.approx(reference.e_stored, rel=1e-3)
 
 
-# ---------------------------------------------- the report reads the assembly
+# ==============================================================================
+# THE REPORT READS THE ASSEMBLY
+# ==============================================================================
 def test_the_face_report_is_the_assembly_faces_on_a_tree():
     """The tree's report: ``faces()``, the shared rule, and the operator they assemble.
 

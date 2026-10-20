@@ -1,42 +1,67 @@
-"""An anisotropic tree of boxes: leaves split in plan and in height independently.
+"""
+src.core.box_tree
+=================
+An anisotropic tree of boxes: leaves split in plan and in height independently.
 
-Why not the cubic octree: the vessel is a vertical cylinder with vertical tubes.  Across
-a riser, a wall or the insulation the temperature changes over centimetres; along them
-it changes over metres.  A cube has to be as short as it is narrow, so a leaf that is
-fine where the plan needs it is fine in height too, and most of those leaves carry no
-information.  Here every leaf has two levels:
+WHAT IT DOES
+------------
+Owns the leaf set of a box ``n_xy dx`` square in plan and ``n_z dz`` tall, with
+every leaf carrying two levels:
 
-* ``lxy`` - ``log2`` of its edge in plan (x and y together, a square), in finest plan
-  cells of ``dx`` [m];
+* ``lxy`` - ``log2`` of its edge in plan (x and y together, a square), in finest
+  plan cells of ``dx`` [m];
 * ``lz``  - ``log2`` of its height, in finest vertical cells of ``dz`` [m].
 
-A leaf splits into four (plan), two (height) or eight (both) children, so a column can
-be refined in height where the headers, the slabs and the roof are and stay tall along
-the bed, and the ratio height/width of a leaf is free (``2**lz dz / 2**lxy dx``).  This
-is a restricted anisotropic octree, the arrangement of the "2.5-D" meshes of the
-reservoir and ground-heat literature (a quadtree in plan, layered in the vertical;
-Aziz and Settari, *Petroleum Reservoir Simulation*, 1979, ch. 4; Heidemann et al. for
-borehole fields) with the layers allowed to change from column to column.
+A leaf splits into four (plan), two (height) or eight (both) children, so a column
+can be refined in height where the headers, the slabs and the roof are and stay
+tall along the bed, and the ratio height/width of a leaf is free
+(``2**lz dz / 2**lxy dx``).  This is a restricted anisotropic octree, the
+arrangement of the "2.5-D" meshes of the reservoir and ground-heat literature (a
+quadtree in plan, layered in the vertical; Aziz and Settari, *Petroleum Reservoir
+Simulation*, 1979, ch. 4; Heidemann et al. for borehole fields) with the layers
+allowed to change from column to column.
 
-**Balance.**  Two face neighbours differ by at most one level in plan *and* one level in
-height (the 2:1 rule of p4est, Burstedde et al., SIAM J. Sci. Comput. 33, 2011, applied
-per direction).  It keeps the graded stencil local and guarantees that the face of a
-leaf is tiled by neighbours whose tangential extents are at least half its own, which is
-what makes the four-probe face search below complete.
+WHY
+---
+Why not the cubic octree: the vessel is a vertical cylinder with vertical tubes.
+Across a riser, a wall or the insulation the temperature changes over centimetres;
+along them it changes over metres.  A cube has to be as short as it is narrow, so a
+leaf that is fine where the plan needs it is fine in height too, and most of those
+leaves carry no information.
 
-**Faces.**  A leaf's positive face is probed just outside it at the four points
-``corner + {0, half} x {0, half}`` of its tangential extents; every neighbour tiling the
-face contains at least one probe, so the unique hits are the face neighbours.  The
-entry of a pair carries the *overlap* area (the intersection of the two faces) and the
-centre distance along the normal, ``(e_i + e_j) / 2``: each interface appears once, with
-one conductance, and the discrete balance closes to round-off on any combination of
-levels - the same conservative two-point flux as :mod:`src.core.octree`.
+HOW IT WORKS
+------------
+-> BALANCE <-
+   Two face neighbours differ by at most one level in plan *and* one level in
+   height (the 2:1 rule of p4est, Burstedde et al., SIAM J. Sci. Comput. 33, 2011,
+   applied per direction).  It keeps the graded stencil local and guarantees that
+   the face of a leaf is tiled by neighbours whose tangential extents are at least
+   half its own, which is what makes the four-probe face search below complete.
 
-**Arrays only.**  The leaves are five integer arrays - corner ``x, y, z`` in finest
-cells, ``lxy`` and ``lz`` - and every query (locate, balance, faces) is a handful of
-``searchsorted`` calls over per-level sorted codes, the linear-octree idea of p4est
-(Morton-style integer codes, no pointers, no per-leaf Python objects).  A tree of a few
-hundred thousand leaves is built and balanced in seconds.
+-> FACES <-
+   A leaf's positive face is probed just outside it at the four points
+   ``corner + {0, half} x {0, half}`` of its tangential extents; every neighbour
+   tiling the face contains at least one probe, so the unique hits are the face
+   neighbours.  The entry of a pair carries the *overlap* area (the intersection of
+   the two faces) and the centre distance along the normal, ``(e_i + e_j) / 2``:
+   each interface appears once, with one conductance, and the discrete balance
+   closes to round-off on any combination of levels - the same conservative
+   two-point flux as :mod:`src.core.octree`.
+
+-> ARRAYS ONLY <-
+   The leaves are five integer arrays - corner ``x, y, z`` in finest cells, ``lxy``
+   and ``lz`` - and every query (locate, balance, faces) is a handful of
+   ``searchsorted`` calls over per-level sorted codes, the linear-octree idea of
+   p4est (Morton-style integer codes, no pointers, no per-leaf Python objects).  A
+   tree of a few hundred thousand leaves is built and balanced in seconds.
+
+SOURCES
+-------
+- Aziz and Settari, *Petroleum Reservoir Simulation*, 1979, ch. 4 [AS79]: the
+  layered ("2.5-D") arrangement.
+- Burstedde, Wilcox and Ghattas, SIAM J. Sci. Comput. 33 (2011) [BWG11]: the 2:1
+  rule, applied per direction.
+- Heidemann et al.: the borehole fields of the layered ground-heat literature.
 """
 from __future__ import annotations
 
@@ -84,7 +109,7 @@ class BoxTree:
         self._set(np.asarray(corners, dtype=np.int64).reshape(-1, 3),
                   np.asarray(lxy, dtype=np.int64), np.asarray(lz, dtype=np.int64))
 
-    # ---------------------------------------------------------------- building
+    # ---- building ----
     @classmethod
     def uniform(cls, n_xy: int, n_z: int, dx: float, dz: float, lxy: int,
                 lz: int) -> BoxTree:
@@ -117,7 +142,7 @@ class BoxTree:
         self._faces: tuple[np.ndarray, ...] | None = None
         return perm
 
-    # ---------------------------------------------------------------- geometry
+    # ---- geometry ----
     @property
     def n_cells(self) -> int:
         return int(self.corners.shape[0])
@@ -160,7 +185,7 @@ class BoxTree:
                                   return_counts=True)
         return {(int(a), int(b)): int(c) for (a, b), c in zip(pairs, counts, strict=True)}
 
-    # ---------------------------------------------------------------- location
+    # ---- location ----
     def _lookup(self) -> _Tables:
         if self._tables is None:
             pairs, codes, positions = [], [], []
@@ -215,7 +240,7 @@ class BoxTree:
             cells = np.clip(cells, 0, np.array([self.n_xy, self.n_xy, self.n_z]) - 1)
         return self.locate_many(cells)
 
-    # -------------------------------------------------------------- refinement
+    # ---- refinement ----
     def split(self, split_xy: np.ndarray, split_z: np.ndarray) -> np.ndarray:
         """Split the marked leaves; returns, per new leaf, the index of its old leaf.
 
@@ -340,7 +365,7 @@ class BoxTree:
                     pair = np.unique(np.column_stack((i, j)), axis=0)
                     yield pair[:, 0], pair[:, 1]
 
-    # ------------------------------------------------------------------- faces
+    # ---- faces ----
     def face_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
                                    np.ndarray]:
         """``(i, j, axis, area [m^2], distance [m])``: every interface once.

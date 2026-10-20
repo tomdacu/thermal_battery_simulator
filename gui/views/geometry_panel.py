@@ -1,15 +1,41 @@
-"""Geometry panel: the vessel, the plant (gas circuit and pipes) and the mesh.
+"""
+gui.views.geometry_panel
+========================
+Geometry panel: the vessel, the plant (gas circuit and pipes) and the mesh.
 
-The panel owns the controls and turns them into ``src`` objects; the window lays its
-pages out - **Vessel** (the shape; the window adds the layer materials to it), **Plant**
-(the gas circuit the resistors heat and the buried network the gas runs through) and
-**Mesh**.  The circuit and the network are the same loop seen from its two ends: the
-resistors put power into the gas, the gas carries it to the pipe walls and the sand takes
-it up; on discharge the exchanger on the same circuit takes it back out.
+WHAT IT DOES
+------------
+``GeometryPanel`` owns the controls of the three input pages - **Vessel** (the
+shape), **Plant** (the gas circuit the resistors heat and the buried network
+the gas runs through) and **Mesh** - and turns them into ``src`` objects:
+``CylinderGeometry``, ``HeaterConfig``, ``PipeNetworkConfig``, ``Fluid`` and
+``AdaptivePlan``.  The window lays its pages out, and the Vessel page takes the
+layer materials from the materials panel.
 
-There is no domain to set: the air around the vessel is excluded from the problem, so the
-box is the smallest one that holds the vessel with a margin of air
-(:meth:`GeometryPanel.domain`), centred on it.
+HOW IT WORKS
+------------
+-> PAGES AND OWNERSHIP <-
+   The panel owns the controls but not the mesh: the Pipes section asks the
+   window - which owns the mesh - to build and paint the network
+   (``pipe_network_requested``), and the window answers through
+   ``set_pipe_network``.  A design of the header engine is used only while the
+   plant inputs it was made for are unchanged.
+-> ONE LOOP <-
+   The circuit and the network are the same loop seen from its two ends: the
+   resistors put power into the gas, the gas carries it to the pipe walls and
+   the sand takes it up; on discharge the exchanger on the same circuit takes
+   it back out.
+-> MESH RECIPE <-
+   The tree is the *regions* as boxes of an octree, from the active model (sand,
+   insulation ring and slabs, shell, casing, ground, pipe box).  Leaves are
+   powers of two of the finest cell; every target is snapped to the largest
+   leaf within ``LEAF_TOLERANCE`` of it, not to the next one below, and the cell
+   budget caps the leaves the build makes, coarse to fine.
+-> DOMAIN <-
+   There is no domain to set: the air around the vessel is excluded from the
+   problem, so the box is the smallest one that holds the vessel with a margin
+   of air (``AIR_MARGIN``, :meth:`GeometryPanel.domain`), centred on it.  The
+   outer film sits on the first excluded leaves.
 """
 from __future__ import annotations
 

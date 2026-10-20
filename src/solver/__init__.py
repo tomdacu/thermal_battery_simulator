@@ -1,4 +1,15 @@
-"""Solvers: FDM assembly, linear backends, steady and transient drivers."""
+"""
+src.solver
+==========
+Solvers for the packed-bed heat equation: assembly, linear backends, drivers.
+
+WHAT IT DOES
+------------
+Re-exports the public surface of the package: the finite-difference assembly of
+:mod:`src.solver.matrix`, the SciPy linear layer of :mod:`src.solver.linear`,
+the steady and transient drivers, and the transient result container.
+"""
+
 from ..core.grid import GridIndex
 from ..core.physics import half_cell_h, harmonic_mean, radiation_h
 from .matrix import (

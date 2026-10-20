@@ -1,16 +1,29 @@
-"""The outside film, the excluded air, and the contact resistance.
-
-Three physics statements that the old model could not make:
-
-1. **no air domain**: the cells outside the vessel are excluded from the problem, so
-   no heat conducts through the air and no cells are spent on it.  The outer surface
-   carries a film instead, and the loss is ``h_out A (T_surface - T_ambient)``;
-2. **the film is natural + wind**: the correlations are checked against their known
-   limits (a still day is natural convection only; wind adds linearly);
-3. **real interfaces have a contact resistance**: two materials pressed together are
-   not welded, so a finite conductance sits in series with the two half cells and the
-   interface temperature jumps.
 """
+tests.test_environment
+======================
+The outside film, the excluded air, and the contact resistance.
+
+WHAT IT DOES
+------------
+Pins three physics statements that the old model could not make:
+
+1. **no air domain**: the cells outside the vessel are excluded from the
+   problem, so no heat conducts through the air and no cells are spent on it.
+   The outer surface carries a film instead, and the loss is
+   ``h_out A (T_surface - T_ambient)``;
+2. **the film is natural + wind**: the correlations are checked against their
+   known limits (a still day is natural convection only; wind adds linearly);
+3. **real interfaces have a contact resistance**: two materials pressed
+   together are not welded, so a finite conductance sits in series with the
+   two half cells and the interface temperature jumps.
+
+The correlations are checked against their definitions and against the
+expected range (a 1 m wall 20 K above ambient gives h ~ 4 W/(m^2 K)), the
+excluded cells against the ambient they hold and the film law at the
+interface, and the whole environment against a mesh where the excluded air
+changes the loss and the balance still closes.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -41,7 +54,9 @@ def slab_with_air(excluded_side: str = "z_max") -> Mesh3D:
     return mesh
 
 
-# ------------------------------------------------------------------ correlations
+# ==============================================================================
+# CORRELATIONS
+# ==============================================================================
 def test_the_rayleigh_number_follows_its_definition():
     air = AirProperties()
     # the L^3 of the definition, tested as a ratio so the prefactor is not repeated
@@ -72,7 +87,9 @@ def test_the_wind_expression_matches_the_standard_and_adds_to_natural():
     assert windy["total"] > still["total"]
 
 
-# --------------------------------------------------------------- excluded domain
+# ==============================================================================
+# EXCLUDED DOMAIN
+# ==============================================================================
 def test_the_excluded_cells_hold_the_ambient_and_carry_no_conduction():
     mesh = slab_with_air()
     SteadyStateSolver(mesh, SolverConfig(method="cg", tolerance=1e-9)).solve()
@@ -107,7 +124,9 @@ def test_without_a_film_the_excluded_side_is_adiabatic():
     assert float(mesh.T[~mesh.excluded].max()) == pytest.approx(400.0, rel=1e-9)
 
 
-# ----------------------------------------------------------- contact resistance
+# ==============================================================================
+# CONTACT RESISTANCE
+# ==============================================================================
 def test_a_contact_resistance_makes_the_interface_jump():
     """The interface step grows when a contact resistance is added in series."""
     def interface_step(h_contact: float) -> float:
@@ -157,7 +176,9 @@ def test_the_contact_resistance_does_not_touch_a_single_material():
     assert np.allclose(mesh.T, expected, atol=1e-6)
 
 
-# ------------------------------------------------- the environment, wired in
+# ==============================================================================
+# THE ENVIRONMENT, WIRED IN
+# ==============================================================================
 def test_the_geometry_fills_the_excluded_mask_and_the_film():
     """A normal build must drop the air box and put the film on the vessel."""
     from src.core.geometry import BatteryGeometry

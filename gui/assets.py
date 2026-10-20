@@ -1,4 +1,24 @@
-"""Repository assets (icons, banner) resolved by path, never by cwd."""
+"""
+gui.assets
+==========
+Repository assets (icons, banner) resolved by path, never by cwd.
+
+WHAT IT DOES
+------------
+Finds the window's icon files from the checkout, starting at this file's own
+location, so a shortcut or a packaged run with another working directory still
+finds them.
+
+HOW IT WORKS
+------------
+-> REPOSITORY ROOT <-
+   ``repo_root`` is the parent of the ``gui`` package: one level above this
+   file.
+-> MISSING ASSETS <-
+   ``asset`` returns a path only when it exists, otherwise ``None``; a missing
+   asset is not fatal.  The window icon is ``assets/icon.png`` first, else the
+   historical names under ``photo/``.
+"""
 from __future__ import annotations
 
 from pathlib import Path

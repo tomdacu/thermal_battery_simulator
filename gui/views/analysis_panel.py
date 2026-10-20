@@ -1,4 +1,45 @@
-"""Analysis panel: analysis type, initial condition, power and extraction profiles."""
+"""
+gui.views.analysis_panel
+========================
+Analysis panel: analysis type, initial condition, power and extraction profiles.
+
+WHAT IT DOES
+------------
+``AnalysisPanel`` holds the five tabs that decide what a run does - Type,
+Initial, Charge, Discharge and Save / Load - and turns their state into the
+``src`` configuration objects (``InitialCondition``, ``PowerProfile``,
+``ExtractionProfile``), the transient settings and the standby target.  It
+emits ``analysis_changed`` when the type changes and the save/load requests the
+window handles.
+
+HOW IT WORKS
+------------
+-> STANDBY IS ASKED AS A TEMPERATURE <-
+   The only steady state a storage has is the one where the power in equals the
+   losses, so it is asked as a temperature - the bed held at T - and the answer
+   is the power that holds it, i.e. the standby losses, with the field that
+   goes with them.  A steady state at a charging power would sit at whatever
+   temperature makes the losses that large: thousands of degrees for a real
+   plant.
+-> INITIAL CONDITION <-
+   Uniform temperature, one temperature per material, the current field, or the
+   standby state: the last two keep what the mesh carries (a loaded state, the
+   last run, or the controller's steady pre-run) instead of writing a field.
+-> PROFILES <-
+   Charge is the resistors' power: off, the circuit's rated power, a scheduled
+   table or a CSV.  Discharge is the exchanger on the same gas circuit: off, a
+   heat power, or a return temperature.  In power mode the return temperature
+   is the coldest the gas may come back, so a power the bed can only give with
+   colder gas ends the run.
+-> UNITS <-
+   The widgets show degC, kW and a duration with its unit; the accessors convert
+   to kelvin and watts with ``src.units.c_to_k`` and the unit factors, so
+   everything leaves the panel in the model's units.
+-> SAVE / LOAD <-
+   A saved state records the geometry hash: loading it into a different model
+   is refused.  A loaded field is the start of the next transient with Initial
+   condition > Current field.
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Signal

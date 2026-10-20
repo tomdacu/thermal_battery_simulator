@@ -1,38 +1,63 @@
-"""Geometry model: configuration dataclasses + voxel painting of a mesh.
+"""
+src.core.geometry
+=================
+Geometry model: configuration dataclasses plus voxel painting of a mesh.
 
-The painter is written against the cell protocol of :mod:`src.core.mesh_api`: it reads
-where the cells are, how many there are and how big the one at a point is, and it writes
-the per-cell fields the protocol names (``material_id``, ``k``, ``rho``, ``cp``,
-``Q_source``, ``source_mask``, ``bc_h``, ``bc_T_inf``, ``boundary_type``, ``excluded``,
-``h_out``, ``t_ambient``).  It therefore paints either mesh: a :class:`Mesh3D` grid or the
-adaptive mesh of :mod:`src.core.adaptive_mesh`.  The few queries that are *not* in the
-protocol (the index-free half of a painter: the cell centres, the local cell size) are the
-adapters of the section below - they are the whole of the transition and they disappear
-with ``Mesh3D`` (step 8 of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``).
+WHAT IT DOES
+------------
+Owns the description of the storage unit - the cylinder, the heater settings and
+the complete geometry - and paints that description onto a mesh.  The painter
+writes the per-cell fields the cell protocol of :mod:`src.core.mesh_api` names
+(``material_id``, ``k``, ``rho``, ``cp``, ``Q_source``, ``source_mask``,
+``bc_h``, ``bc_T_inf``, ``boundary_type``, ``excluded``, ``h_out``,
+``t_ambient``).
 
-Layout painted by :meth:`BatteryGeometry.apply_to_mesh` (later steps win, but the
-overlaps that used to corrupt the model are now resolved explicitly):
+The painter reads where the cells are, how many there are and how big the one at
+a point is, not the index arithmetic of a grid, so it paints either mesh: a
+:class:`Mesh3D` grid or the adaptive mesh of :mod:`src.core.adaptive_mesh`.
 
-    1  air everywhere
-    2  concrete foundation under the battery footprint
-    3  steel lateral shell            (base_z .. cone base, outside the insulation)
-    4  radial insulation              (r_storage .. r_insulation, same band)
-    5  bottom insulation slab
-    6  storage sand (packed bed)      + the lumped bed source of the gas circuit
-    7  top insulation slab
-    8  optional steel plate under the cone
-    9  optional conical roof (steel shell, optionally sand-filled)
-   10  domain boundary conditions
+HOW IT WORKS
+------------
+-> PAINT ORDER <-
+   :meth:`BatteryGeometry.apply_to_mesh` paints the following, later steps
+   winning (the overlaps that used to corrupt the model are now resolved
+   explicitly):
 
-The heat-transfer surface itself - the buried pipe network the gas runs through - is
+       1  air everywhere
+       2  concrete foundation under the battery footprint
+       3  steel lateral shell            (base_z .. cone base, outside the insulation)
+       4  radial insulation              (r_storage .. r_insulation, same band)
+       5  bottom insulation slab
+       6  storage sand (packed bed)      + the lumped bed source of the gas circuit
+       7  top insulation slab
+       8  optional steel plate under the cone
+       9  optional conical roof (steel shell, optionally sand-filled)
+      10  domain boundary conditions
+
+-> CELL PROTOCOL <-
+   The few queries that are *not* in the protocol (the index-free half of a
+   painter: the cell centres, the local cell size, the domain box) are the
+   adapters at the top of the module.  On ``Mesh3D`` each of them is the
+   structured query the painter used before, so nothing that reads a structured
+   mesh moves by an ulp; on a tree it is a leaf lookup.
+
+-> VALIDATION <-
+   ``apply_to_mesh`` validates the geometry against the mesh and raises
+   ``ValueError`` instead of silently clipping the roof or the shell.
+
+-> UNITS <-
+   Metres, seconds, watts, KELVIN.
+
+LIMITS
+------
+Nothing in this module knows of a heater element inside the bed.  The
+heat-transfer surface itself - the buried pipe network the gas runs through - is
 painted by :meth:`src.core.pipe_network.PipeNetwork.paint` on the same mesh: the
-resistors live in the gas circuit and heat the gas, and the gas delivers that power to
-the sand through the pipes' walls.  Nothing in this module knows of a heater element
-inside the bed.
+resistors live in the gas circuit and heat the gas, and the gas delivers that
+power to the sand through the pipes' walls.
 
-Units: metres, seconds, watts, KELVIN.  ``apply_to_mesh`` validates the geometry
-against the mesh and raises ``ValueError`` instead of silently clipping the roof
-or the shell.
+The three adapters above are the whole of the transition to the tree and they go
+with ``Mesh3D`` (step 8 of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``).
 """
 from __future__ import annotations
 
@@ -52,7 +77,9 @@ if TYPE_CHECKING:                      # the tree is the target, not a runtime d
     from .adaptive_mesh import AdaptiveMesh
 
 
-# --------------------------------------------------------- the painter's mesh view
+# ==============================================================================
+# THE PAINTER'S MESH VIEW
+# ==============================================================================
 # The protocol carries the physics per cell and deliberately no index arithmetic and no
 # per-axis sizes (see the module docstring of ``src/core/mesh_api.py``).  A painter that
 # compares a zone against the cells that are actually there needs exactly the three things
@@ -137,21 +164,35 @@ def _snap_note(mesh) -> str | None:
 
 @dataclass
 class CylinderGeometry:
-    """Dimensions of the battery, all elevations measured from the domain floor."""
+    """Dimensions of the battery, all lengths in metres and elevations measured
+    from the domain floor."""
 
+    #: Plan position of the vessel axis [m].
     center_x: float = 5.0
     center_y: float = 5.0
+    #: Elevation of the foundation top, where the lateral band starts [m].
     base_z: float = 0.5
+    #: Height of the storage band [m].
     height: float = 7.0
+    #: Storage radius, the inner face of the radial insulation [m].
     r_storage: float = 2.0
+    #: Radial insulation thickness outside ``r_storage`` [m].
     insulation_thickness: float = 0.3
+    #: Steel shell thickness outside the insulation [m].
     shell_thickness: float = 0.02
+    #: Bottom insulation slab thickness under the storage [m].
     insulation_slab_bottom: float = 0.2
+    #: Top insulation slab thickness over the storage [m].
     insulation_slab_top: float = 0.2
+    #: Slope of the conical roof [deg].
     roof_angle_deg: float = 15.0
+    #: Optional steel plate thickness under the cone [m]; 0 = no plate.
     steel_slab_top: float = 0.0
+    #: Fill the interior of the conical roof with sand instead of air.
     fill_cone_with_sand: bool = False
+    #: Paint a conical steel roof at all.
     enable_cone_roof: bool = True
+    #: Concrete margin outside the shell footprint [m].
     foundation_margin: float = 0.5
     #: soil under the foundation [m]: the domain floor is this far below grade and holds
     #: the deep-ground temperature; 0 = the foundation sits on the fixed ground face.
@@ -287,9 +328,12 @@ class HeaterConfig:
     area of the network, not from a sheath diameter that no longer exists.
     """
 
-    power_total: float = 100.0                 # [kW] electric power into the gas
-    offset_bottom: float = 0.0                 # [m] of storage left unheated at the floor
-    offset_top: float = 0.0                    # [m] of storage left unheated under the roof
+    #: Electric power into the gas [kW].
+    power_total: float = 100.0
+    #: Storage left unheated at the floor [m].
+    offset_bottom: float = 0.0
+    #: Storage left unheated under the roof [m].
+    offset_top: float = 0.0
 
     @property
     def power_w(self) -> float:
@@ -300,9 +344,13 @@ class HeaterConfig:
 class BuildReport:
     """What ``apply_to_mesh`` actually painted."""
 
+    #: Zone volumes [m^3], keyed as in :meth:`BatteryGeometry.zone_volumes`.
     zone_volumes: dict = field(default_factory=dict)
+    #: Zone masses [kg], keyed as in :meth:`BatteryGeometry.zone_masses`.
     zone_masses: dict = field(default_factory=dict)
+    #: Number of cells that carry the lumped bed source.
     n_source_cells: int = 0
+    #: Informational notes of the build, e.g. a domain snapped to the grid.
     notes: list[str] = field(default_factory=list)
 
 
@@ -312,13 +360,19 @@ class BatteryGeometry:
 
     cylinder: CylinderGeometry = field(default_factory=CylinderGeometry)
     heaters: HeaterConfig = field(default_factory=HeaterConfig)
+    #: Material keys looked up in :class:`~src.core.materials.MaterialManager`.
     storage_material: str = "steatite"
     insulation_material: str = "rock_wool"
     shell_material: str = "carbon_steel"
+    #: Volume fraction of the bed occupied by grains [-].
     packing_fraction: float = PACKING_FRACTION_DEFAULT
-    h_top: float = 10.0                     # [W/(m^2*K)]  used at the domain box faces,
-    h_lateral: float = 5.0                  # [W/(m^2*K)]  unless the environment below
-    t_ambient: float = T_AMBIENT_DEFAULT    # [K]          replaces them with a film
+    #: Film coefficient at the top and bottom box faces [W/(m^2 K)], used at the
+    #: domain box faces unless the environment below replaces them with a film.
+    h_top: float = 10.0
+    #: Film coefficient at the lateral box faces [W/(m^2 K)].
+    h_lateral: float = 5.0
+    #: Ambient temperature outside the vessel [K].
+    t_ambient: float = T_AMBIENT_DEFAULT
     #: wind speed at the vessel [m/s]: with the film below, the outside becomes a
     #: boundary condition instead of a domain (see ``apply_environment``)
     wind_speed: float = 0.0
@@ -326,11 +380,13 @@ class BatteryGeometry:
     #: point [K]: the correlations need a temperature jump, and right after painting
     #: the shell is still cold, which would null the natural convection
     film_delta_t: float = 30.0
-    t_ground: float = T_GROUND_DEFAULT      # [K]
-    #: grain size of the bed [m] and its conductivity model: ``"zbs"`` (Zehner-Bauer-
-    #: Schlunder with radiation, a law of the temperature the solvers re-evaluate) or
-    #: ``"geometric"`` (the constant geometric mean)
+    #: Deep-ground temperature held at the domain floor [K].
+    t_ground: float = T_GROUND_DEFAULT
+    #: grain size of the bed [m], the particle diameter of the conductivity law
     particle_diameter: float = PARTICLE_DIAMETER_DEFAULT
+    #: conductivity model of the bed: ``"zbs"`` (Zehner-Bauer-Schlunder with
+    #: radiation, a law of the temperature the solvers re-evaluate) or
+    #: ``"geometric"`` (the constant geometric mean)
     bed_model: str = "zbs"
 
     def bed_law(self, materials: MaterialManager | None = None) -> PackedBed:

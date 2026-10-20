@@ -1,4 +1,14 @@
-"""GUI panels: geometry, materials, analysis, solver, results, 3D view."""
+"""
+gui.views
+=========
+GUI panels: geometry, materials, analysis, solver, results and the 3D view.
+
+WHAT IT DOES
+------------
+Exposes the six panel classes the window assembles: ``GeometryPanel``,
+``MaterialsPanel``, ``AnalysisPanel``, ``SolverPanel``, ``ResultsPanel`` and
+``VizView``.
+"""
 from .analysis_panel import AnalysisPanel
 from .geometry_panel import GeometryPanel
 from .materials_panel import MaterialsPanel

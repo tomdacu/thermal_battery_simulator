@@ -1,8 +1,20 @@
-"""Temperature helpers for the UI layer.
+"""
+gui.units
+=========
+Temperature helpers for the UI layer.
 
-``src/`` works in Kelvin; the GUI shows degC.  Every conversion in the
-application goes through these two functions, so a unit mistake has exactly one
-place to live.
+WHAT IT DOES
+------------
+Re-exports the ``src.units`` conversions and adds the formatting and array
+helpers the panels use: ``fmt_c``, ``fmt_k`` and ``celsius_span``.
+
+HOW IT WORKS
+------------
+-> ONE BOUNDARY <-
+   ``src/`` works in Kelvin; the GUI shows degC.  Every conversion in the
+   application goes through these functions, so a unit mistake has exactly one
+   place to live.  ``celsius_span`` converts a whole array for statistics and
+   exports.
 """
 from __future__ import annotations
 

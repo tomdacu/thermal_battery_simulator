@@ -1,13 +1,43 @@
-"""Benchmark of the current pipeline: the tree's assembly, steady solve, transient step.
+"""
+scripts.benchmark
+=================
+Benchmark of the current pipeline: the tree's assembly, steady solve, transient step.
+
+WHAT IT DOES
+------------
+Builds the small test battery at successive refinement levels and times, for
+each level, the assembly of the operator, a direct solve, a BiCGSTAB solve
+with Jacobi preconditioning and a conjugate-gradient solve with AMG, then the
+transient operators of the last mesh that fitted the budget.
+
+HOW IT WORKS
+------------
+-> REFINEMENT SWEEP <-
+   The sweep is over the *refinement* of the a priori request - one row per
+   scale of the bands the physics plan asks for, which is the level a search
+   asks a tree for - because a tree is chosen by how far it is refined and
+   not by a cell spacing: each row is the small test geometry on the tree
+   that request produces, and the budget both sets the resolution floor and
+   stops the refinement.
+
+-> TIMINGS <-
+   Wall-clock time from ``time.perf_counter`` around each step.  A mesh above
+   the leaf budget is reported and skipped instead of timed.
+
+OPTIONS
+-------
+::
 
     python scripts/benchmark.py [--max-cells 200000] [--scales 2.0 1.4 1.0 0.7 0.5]
 
-Timings are wall-clock on this machine; the point is to compare refinement levels and
-solver settings, not to produce absolute numbers.  The sweep is over the *refinement* of
-the a priori request - one row per scale of the bands the physics plan asks for, which is
-the level a search asks a tree for - because a tree is chosen by how far it is refined and
-not by a cell spacing: each row is the small test geometry on the tree that request
-produces, and the budget both sets the resolution floor and stops the refinement.
+``--max-cells`` is the number of leaves the sweep may build: the resolution
+floor and the stop of the refinement.  ``--scales`` lists the band scales,
+coarse to fine.
+
+LIMITS
+------
+Timings are wall-clock on this machine; the point is to compare refinement
+levels and solver settings, not to produce absolute numbers.
 """
 from __future__ import annotations
 

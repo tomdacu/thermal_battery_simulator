@@ -1,32 +1,41 @@
-"""The adaptive mesh against the structured one: the same physics on a tree.
+"""
+tests.test_adaptive_mesh
+========================
+The adaptive mesh against the structured one: the same physics on a tree.
 
-What this module pins, in the order the claims matter:
+WHAT IT DOES
+------------
+Pins, in the order the claims matter:
 
 * **the protocol** - :class:`~src.core.mesh_api.MeshAPI` is satisfied by
-  :class:`~src.core.adaptive_mesh.AdaptiveMesh`, and the operator the mesh assembles is
-  the octree's own (:meth:`Octree.diffusion_matrix`), so the reuse claimed in the module
-  docstring is a fact and not an intention;
-* **equivalence** - on a uniform tree and the matching uniform ``Mesh3D`` the two agree
-  to the tolerance of the linear solve on the three analytic cases: a two-layer wall
-  whose interface sits on a leaf face (the harmonic mean is then exact), a slab with a
-  volumetric source and an outer film on one side, and a solid slab whose upper half is
-  an excluded *air* region that exchanges with the outside through ``h_out``;
-* **the graded treatment** - the same cases on a refined tree, where the film has to use
-  each leaf's *own* edge and the faces have hanging nodes: the wall stays exact, the film
-  keeps the half-cell truncation of the structured solver and nothing else, and the
-  balance closes;
-* **the balance** - ``p_source + p_sink == q_fixed + p_film`` at the round-off of the
-  per-leaf closure on every case, graded or not;
-* **what the adaptivity buys** - a refined tree answers a hot spot at least three times
-  cheaper in cells than the graded Cartesian mesh that resolves each axis as well as the
-  tree does, with the error measured against the analytic solution.
+  :class:`~src.core.adaptive_mesh.AdaptiveMesh`, and the operator the mesh
+  assembles is the octree's own (:meth:`Octree.diffusion_matrix`), so the
+  reuse claimed in the module docstring is a fact and not an intention;
+* **equivalence** - on a uniform tree and the matching uniform ``Mesh3D``
+  the two agree to the tolerance of the linear solve on the three analytic
+  cases: a two-layer wall whose interface sits on a leaf face (the harmonic
+  mean is then exact), a slab with a volumetric source and an outer film on
+  one side, and a solid slab whose upper half is an excluded *air* region
+  that exchanges with the outside through ``h_out``;
+* **the graded treatment** - the same cases on a refined tree, where the
+  film has to use each leaf's *own* edge and the faces have hanging nodes:
+  the wall stays exact, the film keeps the half-cell truncation of the
+  structured solver and nothing else, and the balance closes;
+* **the balance** - ``p_source + p_sink == q_fixed + p_film`` at the
+  round-off of the per-leaf closure on every case, graded or not;
+* **what the adaptivity buys** - a refined tree answers a hot spot at least
+  three times cheaper in cells than the graded Cartesian mesh that resolves
+  each axis as well as the tree does, with the error measured against the
+  analytic solution.
 
-The box is 1 m and the finest tree cell is 1/16 m, so every level is a power-of-two
-subdivision of the box and a uniform tree has exactly the cells of a uniform ``Mesh3D``.
-Where a tree is refined, the comparison is against the *analytic* solution (the graded
-Cartesian mesh cannot share the tree's staircase cells) and the balance, and the
-structured solver is compared on the uniform case with the same physics.
+The box is 1 m and the finest tree cell is 1/16 m, so every level is a
+power-of-two subdivision of the box and a uniform tree has exactly the cells
+of a uniform ``Mesh3D``.  Where a tree is refined, the comparison is against
+the *analytic* solution (the graded Cartesian mesh cannot share the tree's
+staircase cells) and the balance, and the structured solver is compared on
+the uniform case with the same physics.
 """
+
 from __future__ import annotations
 
 import time
@@ -52,7 +61,9 @@ SHARED_FIELDS = ("k", "rho", "cp", "Q_source", "Q_sink", "material_id", "boundar
                  "bc_h", "bc_T_inf", "excluded")
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def uniform_edge(mesh: AdaptiveMesh) -> float:
     """Edge of the leaves of a uniform tree, in metres."""
     levels = {leaf.level for leaf in mesh.tree.leaves}
@@ -150,7 +161,9 @@ def two_layer_reference(mesh: AdaptiveMesh, interface: float, k_low: float, k_hi
     return np.where(z <= interface, below, above), flux
 
 
-# ------------------------------------------------------------------ the protocol
+# ==============================================================================
+# THE PROTOCOL
+# ==============================================================================
 def test_the_adaptive_mesh_satisfies_the_protocol_it_defines():
     """The interface of :mod:`src.core.mesh_api` is what the ported consumers may use."""
     mesh = AdaptiveMesh.uniform(FINEST, H, 2)
@@ -209,7 +222,9 @@ def test_the_conduction_operator_is_the_octree_operator():
         assert mesh.material_id[left] != mesh.material_id[right]
 
 
-# ------------------------------------------------------------- the analytic cases
+# ==============================================================================
+# THE ANALYTIC CASES
+# ==============================================================================
 def test_a_two_layer_wall_matches_the_structured_solver():
     """Interface on a leaf face: the harmonic mean is the exact series resistance.
 
@@ -415,7 +430,9 @@ def test_the_internal_film_matches_the_structured_solver():
     assert adaptive.balance.closure < 1e-12
 
 
-# ---------------------------------------------------------------- the refinement
+# ==============================================================================
+# THE REFINEMENT
+# ==============================================================================
 def test_refinement_carries_every_per_leaf_field():
     """A round of refinement keeps the physics: a split leaf hands its state to its children.
 
@@ -520,7 +537,9 @@ def test_the_adapted_tree_beats_a_graded_mesh_on_cells():
     assert adapted_seconds < 60.0 and graded_seconds < 60.0
 
 
-# -------------------------------------------------------------------- refusals
+# ==============================================================================
+# REFUSALS
+# ==============================================================================
 def test_the_mesh_rejects_what_the_structured_one_rejects():
     """The mistakes this API makes easy: a bad box, a bad face, a bad state, a bad rule."""
     with pytest.raises(ValueError, match="physical_size"):
@@ -543,7 +562,9 @@ def test_the_mesh_rejects_what_the_structured_one_rejects():
         AdaptiveMesh.from_bands(FINEST, H, [])
 
 
-# ------------------------------------------------------------------- utilities
+# ==============================================================================
+# UTILITIES
+# ==============================================================================
 def axis_bands(mesh: AdaptiveMesh, axis: int):
     """The tree's resolution profile along one axis, as ``GridSpec`` bands.
 

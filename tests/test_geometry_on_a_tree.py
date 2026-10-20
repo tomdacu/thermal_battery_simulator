@@ -1,18 +1,28 @@
-"""The geometry painter on a tree: the same model, leaf by leaf on both meshes.
-
-Step 1 of the migration (``docs/16_ADAPTIVE_MESH_MIGRATION.md``): ``apply_to_mesh`` takes
-a ``Mesh3D`` or an ``AdaptiveMesh``, and the model it paints is the same on both.  The
-comparison is the one ``tests/test_adaptive_mesh.py::structured_partner`` makes for the
-solver - read the structured field back through the cell of every leaf - applied to the
-painter: the two meshes are painted *independently* (the same geometry object twice) and
-every per-cell field is compared, so a mask that only knew the structured layout shows up
-as a difference and not as a wrong number nobody looks at.
-
-The pair is the one of ``tests/conftest.py``: a uniform tree of 16^3 leaves of 0.5 m in an
-8 m cube and the ``Mesh3D`` of the same cells.  The structured fixture of the suite
-(``storage_model``, 6 x 6 x 5.6 m snapped to 5.5 m) has no tree twin - a tree spans a cube
-with a power-of-two number of cells per side - which is why the comparison uses the cube.
 """
+tests.test_geometry_on_a_tree
+=============================
+The geometry painter on a tree: the same model, leaf by leaf on both meshes.
+
+WHAT IT DOES
+------------
+Step 1 of the migration (``docs/16_ADAPTIVE_MESH_MIGRATION.md``):
+``apply_to_mesh`` takes a ``Mesh3D`` or an ``AdaptiveMesh``, and the model it
+paints is the same on both.
+
+The comparison is the one ``tests/test_adaptive_mesh.py::structured_partner``
+makes for the solver - read the structured field back through the cell of
+every leaf - applied to the painter: the two meshes are painted
+*independently* (the same geometry object twice) and every per-cell field is
+compared, so a mask that only knew the structured layout shows up as a
+difference and not as a wrong number nobody looks at.
+
+The pair is the one of ``tests/conftest.py``: a uniform tree of 16^3 leaves
+of 0.5 m in an 8 m cube and the ``Mesh3D`` of the same cells.  The structured
+fixture of the suite (``storage_model``, 6 x 6 x 5.6 m snapped to 5.5 m) has
+no tree twin - a tree spans a cube with a power-of-two number of cells per
+side - which is why the comparison uses the cube.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -32,7 +42,9 @@ PAINTED = ("material_id", "k", "rho", "cp", "Q_source", "Q_sink", "source_mask",
 DISCRETE = ("material_id", "source_mask", "boundary_type", "excluded")
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def cell_of(tree: AdaptiveMesh, structured: Mesh3D) -> np.ndarray:
     """Flat position of the ``Mesh3D`` cell every leaf centre falls in.
 
@@ -92,7 +104,9 @@ def battery_with_power(power_kw: float = 50.0) -> BatteryGeometry:
     return geometry
 
 
-# ------------------------------------------------------------------ the painter
+# ==============================================================================
+# THE PAINTER
+# ==============================================================================
 def test_the_painter_writes_the_same_leaves_on_a_tree(paint_pair):
     """Every field the painter writes is the same, leaf by leaf, on either mesh."""
     tree, structured = paint_pair()
@@ -153,7 +167,9 @@ def test_the_box_snapping_note_stays_where_the_box_snaps(paint_pair):
     assert create_small_test_geometry().apply_to_mesh(tree).notes == []
 
 
-# ------------------------------------------------------- the excluded air + film
+# ==============================================================================
+# THE EXCLUDED AIR AND FILM
+# ==============================================================================
 def test_the_air_leaves_the_problem_on_a_tree_and_the_film_is_the_same(paint_pair):
     """``apply_environment`` drops the same air leaves and fits the same film."""
     tree, structured = paint_pair()
@@ -175,7 +191,9 @@ def test_the_air_leaves_the_problem_on_a_tree_and_the_film_is_the_same(paint_pai
     assert film_tree["total"] > film_tree["natural"]
 
 
-# --------------------------------------------------------------- the validation
+# ==============================================================================
+# THE VALIDATION
+# ==============================================================================
 @pytest.mark.parametrize("bad, match", [
     (lambda: BatteryGeometry(cylinder=CylinderGeometry(center_x=3.0, center_y=3.0,
                                                        r_storage=4.5)),

@@ -1,49 +1,76 @@
-"""Automatic mesh selection: choose the grid from the *accuracy* you ask for.
+"""
+src.analysis.convergence
+========================
+Automatic mesh selection: choose the grid from the *accuracy* you ask for.
 
-There is no way to know the right cell size a priori: what a mesher can do is make
-the discrete answer stop moving.  This module drives a sequence of grids and declares
-the mesh good enough when the answer stops moving by more than the tolerances asked
-for:
+WHAT IT DOES
+------------
+Drive a sequence of grids and declare the mesh good enough when the answer
+stops moving by more than the tolerances asked for:
 
 * ``delta_temperature`` - change of the storage mean temperature [K];
 * ``delta_power`` - *relative* change of the heat leaving the domain.
 
-The method is the classical one for discretisation-error estimation (Richardson
-extrapolation, reported as Roache's Grid Convergence Index; ASME V&V 20 and Celik et
-al. 2008 recommend exactly this three-grid procedure, with a refinement factor above
-1.3 and a factor of safety of 1.25):
+WHY
+---
+There is no way to know the right cell size a priori: what a mesher can do is
+make the discrete answer stop moving.
 
-1. **probe** - three cheap coarse grids (``start_scale`` times the requested targets,
-   each one ``refine`` times finer) give the *observed order of accuracy* ``p``;
-2. **predict** - the error model ``E = C h^p`` calibrated on those three grids gives
-   the cell size that meets the tolerance, so the search *jumps* to the grid it needs
-   instead of refining one level at a time;
-3. **verify** - the predicted grid is solved and the change against the previous grid
-   is checked; if it still moves, the prediction is repeated with the new pair.
+HOW IT WORKS
+------------
+-> THREE-GRID PROCEDURE <-
+   The method is the classical one for discretisation-error estimation
+   (Richardson extrapolation, reported as Roache's Grid Convergence Index; ASME
+   V&V 20 and Celik et al. 2008 recommend exactly this three-grid procedure,
+   with a refinement factor above 1.3 and a factor of safety of 1.25):
 
-``p`` is floored at ``min_order`` (default 1): a mixed-order scheme - second order
-inside the domain, first order at the convective faces - has an observed order below
-its formal one, and a conservative order asks for a *finer* grid when in doubt.  The
-report carries the observed order and the GCI of the chosen grid, so the discretisation
-uncertainty is stated rather than implied.
+   1. **probe** - three cheap coarse grids (``start_scale`` times the requested
+      targets, each one ``refine`` times finer) give the *observed order of
+      accuracy* ``p``;
+   2. **predict** - the error model ``E = C h^p`` calibrated on those three
+      grids gives the cell size that meets the tolerance, so the search *jumps*
+      to the grid it needs instead of refining one level at a time;
+   3. **verify** - the predicted grid is solved and the change against the
+      previous grid is checked; if it still moves, the prediction is repeated
+      with the new pair.
 
-Energy conservation is *not* a criterion here: the finite-volume scheme conserves
-energy to machine precision on **any** grid (see ``tests/test_graded_mesh.py``); what
-changes with the grid is the accuracy of the field itself.
+-> OBSERVED ORDER <-
+   ``p`` is floored at ``min_order`` (default 1): a mixed-order scheme - second
+   order inside the domain, first order at the convective faces - has an
+   observed order below its formal one, and a conservative order asks for a
+   *finer* grid when in doubt.  The report carries the observed order and the
+   GCI of the chosen grid, so the discretisation uncertainty is stated rather
+   than implied.
 
-The same search drives an adaptive mesh, and the request says which road it is walking
-(see :class:`AdaptivePlan`).  A level still asks for a *scale*: a graded
-:class:`~src.core.refinement.GridSpec` realises it by scaling its targets
-(:meth:`GridSpec.scaled`), while a tree realises it by scaling the bands of the a priori
-plan (:func:`src.analysis.mesh_plan.refinement_bands`) and adding one round of refinement
-on the flux-jump indicator of the field already solved.  That is what keeps the reported
-order, the prediction and the GCI the same code on both meshes - and it is why the plan
-keeps its say: the flux-jump estimate is blind at the box faces, which is exactly where a
-film puts the largest error of the scheme, so the indicator alone would leave the wall
-layer coarse.  :func:`find_mesh` states it in full.
+-> ENERGY CONSERVATION <-
+   It is *not* a criterion here: the finite-volume scheme conserves energy to
+   machine precision on **any** grid (see ``tests/test_graded_mesh.py``); what
+   changes with the grid is the accuracy of the field itself.
 
-The driver is pure: the caller supplies ``build_mesh(spec)`` and ``observables(mesh)``,
-which keeps it testable without a GUI or a solver.
+-> TWO ROADS <-
+   The same search drives an adaptive mesh, and the request says which road it
+   is walking (see :class:`AdaptivePlan`).  A level still asks for a *scale*: a
+   graded :class:`~src.core.refinement.GridSpec` realises it by scaling its
+   targets (:meth:`GridSpec.scaled`), while a tree realises it by scaling the
+   bands of the a priori plan
+   (:func:`src.analysis.mesh_plan.refinement_bands`) and adding one round of
+   refinement on the flux-jump indicator of the field already solved.  That is
+   what keeps the reported order, the prediction and the GCI the same code on
+   both meshes - and it is why the plan keeps its say: the flux-jump estimate
+   is blind at the box faces, which is exactly where a film puts the largest
+   error of the scheme, so the indicator alone would leave the wall layer
+   coarse.  :func:`find_mesh` states it in full.
+
+INPUTS
+------
+The driver is pure: the caller supplies ``build_mesh(spec)`` and
+``observables(mesh)``, which keeps it testable without a GUI or a solver.
+
+SOURCES
+-------
+- Richardson extrapolation and Roache's Grid Convergence Index, as recommended
+  by ASME V&V 20 and Celik et al. 2008 (three grids, refinement factor above
+  1.3, factor of safety 1.25).
 """
 from __future__ import annotations
 
@@ -155,14 +182,23 @@ class ConvergenceLevel:
     cells: int
     min_size: float
     max_size: float
+    #: largest neighbour size ratio on the mesh [-].
     worst_ratio: float
+    #: the scale the level reached: the factor on a graded grid, the
+    #: volume-weighted mean leaf edge [m] measured on a tree.
     scale: float = 1.0
+    #: storage mean temperature [K] of the level.
     t_mean_storage: float = float("nan")
     t_max: float = float("nan")
+    #: heat leaving the domain [W].
     power: float = float("nan")
+    #: change of the storage mean against the previous level [K].
     d_temperature: float = float("nan")
+    #: relative change of the domain loss against the previous level [-].
     d_power: float = float("nan")
+    #: observed order of accuracy of the three finest levels [-].
     order: float = float("nan")
+    #: Grid Convergence Index of this level [-].
     gci: float = float("nan")
 
 
@@ -212,6 +248,9 @@ class ConvergenceReport:
         return "\n".join(lines)
 
 
+# ==============================================================================
+# PROBE, PREDICT AND VERIFY
+# ==============================================================================
 def find_mesh(build_mesh: Callable[[GridSpec | AdaptivePlan], MeshAPI],
               observables: Callable[[MeshAPI], dict],
               spec: GridSpec | AdaptivePlan,
@@ -414,7 +453,9 @@ def find_mesh(build_mesh: Callable[[GridSpec | AdaptivePlan], MeshAPI],
                   order=order, gci_temperature=gci_t, gci_power=gci_p)
 
 
-# --------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def _reached(levels: list[ConvergenceLevel], target: ConvergenceTarget) -> bool:
     """True when the *estimated error* of the finest grid is inside the tolerances.
 

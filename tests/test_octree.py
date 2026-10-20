@@ -1,21 +1,31 @@
-"""The adaptive octree: balance, conservative faces, and a real solution.
+"""
+tests.test_octree
+=================
+The adaptive octree: balance, conservative faces, and a real solution.
 
+WHAT IT DOES
+------------
 The claims this module makes have to be checkable, so the tests here pin them:
 
-* the 2:1 balance really holds after refining (no neighbour more than one level away);
-* the face list is conservative: every interface between two finest cells of the box is
-  claimed by exactly one entry and the area of that entry is the number of finest
-  interfaces it covers, a coarse face against ``n`` finer faces is ``n`` entries with the
-  area of the fine sub-face, a pair of equal leaves exactly one;
-* a one-dimensional conduction problem is solved to the analytic answer, including a
-  two-material wall whose interface falls on a leaf face;
+* the 2:1 balance really holds after refining (no neighbour more than one
+  level away);
+* the face list is conservative: every interface between two finest cells of
+  the box is claimed by exactly one entry and the area of that entry is the
+  number of finest interfaces it covers, a coarse face against ``n`` finer
+  faces is ``n`` entries with the area of the fine sub-face, a pair of equal
+  leaves exactly one;
+* a one-dimensional conduction problem is solved to the analytic answer,
+  including a two-material wall whose interface falls on a leaf face;
 * the refinement criterion puts cells where the gradient is and nowhere else;
-* a tree of tens of thousands of leaves is built, and its face list with it, in well
-  under a second.
+* a tree of tens of thousands of leaves is built, and its face list with it,
+  in well under a second.
 
-Every leaf is ``(level, x, y, z)`` with the level the ``log2`` of the edge length in
-finest cells, so level 0 is a single finest cell and ``Octree.max_level`` is the whole
-box.
+HOW IT WORKS
+------------
+-> LEAF ADDRESSING <-
+   Every leaf is ``(level, x, y, z)`` with the level the ``log2`` of the edge
+   length in finest cells, so level 0 is a single finest cell and
+   ``Octree.max_level`` is the whole box.
 """
 from __future__ import annotations
 
@@ -89,7 +99,9 @@ def _face_claims(tree: Octree) -> dict[tuple, list[tuple[int, tuple[int, int]]]]
     return claims
 
 
-# ------------------------------------------------------------------ structure
+# ==============================================================================
+# STRUCTURE
+# ==============================================================================
 
 
 def test_a_uniform_tree_covers_the_box_exactly():
@@ -113,7 +125,9 @@ def test_splitting_a_leaf_replaces_it_with_eight_children():
         tree.split(Leaf(0, 0, 0, 0))               # already a single finest cell
 
 
-# ------------------------------------------------------------------- balance
+# ==============================================================================
+# BALANCE
+# ==============================================================================
 def test_the_2_to_1_balance_holds_after_refining_one_corner():
     tree = Octree(16)
     tree.refine(lambda leaf: 1.0 if (leaf.x, leaf.y, leaf.z) == (0, 0, 0) else 0.0,
@@ -141,7 +155,9 @@ def test_a_coarse_face_touches_at_most_four_finer_faces():
     assert fine > 0, "a graded tree must have coarse faces against finer ones"
 
 
-# ------------------------------------------------------------------- faces
+# ==============================================================================
+# FACES
+# ==============================================================================
 def test_the_face_list_is_conservative_and_covers_the_interface_area():
     tree = uniform_tree(8, 1)
     faces = tree.faces()
@@ -207,7 +223,9 @@ def test_a_graded_tree_loses_no_interface_and_reproduces_a_linear_field():
     assert np.abs(residual[interior]).max() < 1e-8, "the node stencil must be exact"
 
 
-# --------------------------------------------------------------- conduction
+# ==============================================================================
+# CONDUCTION
+# ==============================================================================
 def test_one_dimensional_conduction_against_the_analytic_solution():
     """Two fixed temperatures at the ends: the profile is linear in the node centres."""
     size = 0.02
@@ -257,7 +275,9 @@ def test_a_two_material_wall_matches_the_analytic_flux():
         assert flux == pytest.approx(analytic, rel=1e-6)
 
 
-# ------------------------------------------------------------- refinement
+# ==============================================================================
+# REFINEMENT
+# ==============================================================================
 def test_the_gradient_indicator_refines_the_steep_region_only():
     tree = uniform_tree(16, 2)                     # 8x8x8 leaves of four finest cells
     temperature = np.array([500.0 if leaf.z < 8 else 320.0 for leaf in tree.leaves])
@@ -280,7 +300,9 @@ def test_coarsening_puts_the_eight_children_back_into_one_parent():
     assert tree.leaves == start, "the eight children must go back into their parent"
 
 
-# ------------------------------------------------------------- performance
+# ==============================================================================
+# PERFORMANCE
+# ==============================================================================
 def test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_in_a_bounded_time():
     start = time.perf_counter()
     tree = uniform_tree(64, 1)                     # 32x32x32 leaves of two finest cells

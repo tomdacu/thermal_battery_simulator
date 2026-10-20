@@ -1,26 +1,39 @@
-"""A priori mesh plan: how fine each region has to be, from the physics alone.
+"""
+src.analysis.mesh_plan
+======================
+A priori cell-size plan for every region of the battery, from the physics alone.
 
+WHAT IT DOES
+------------
 Two classical criteria decide the cell size *before* any solve:
 
 * a **solid layer** must carry at least ``cells_per_layer`` cells across its own
-  thickness, otherwise the temperature drop inside the layer is not represented;
-* a **surface with a film coefficient** ``h`` has a conductive sub-layer of thickness
-  ``delta = k / h``.  The finite-volume half-cell resistance is ``h_cell / (2 k)`` and
-  it must not dominate the film resistance ``1 / h``, so ``h_cell <= 2 k / h``.  This
-  is the conduction analogue of the "first cell height" rule of CFD practice: for rock
-  wool (k = 0.04 W/(m K)) with h = 5 W/(m^2 K) it asks for 16 mm, which is exactly why
-  a 100 mm grid cannot converge on the losses - the surface drop is hidden inside the
-  first cell.
+  thickness, otherwise the temperature drop inside the layer is not
+  represented;
+* a **surface with a film coefficient** ``h`` has a conductive sub-layer of
+  thickness ``delta = k / h``.  The finite-volume half-cell resistance is
+  ``h_cell / (2 k)`` and it must not dominate the film resistance ``1 / h``,
+  so ``h_cell <= 2 k / h``.  This is the conduction analogue of the "first cell
+  height" rule of CFD practice: for rock wool (k = 0.04 W/(m K)) with
+  h = 5 W/(m^2 K) it asks for 16 mm, which is exactly why a 100 mm grid cannot
+  converge on the losses - the surface drop is hidden inside the first cell.
 
-The plan is a *starting point*, not the answer: :mod:`src.analysis.convergence` then
-measures the real discretisation error with Richardson extrapolation and moves the
-targets until the answer stops moving.  Starting from the plan is what makes the
-search cheap: the first grid it builds is already in the right neighbourhood.
+WHY
+---
+The plan is a *starting point*, not the answer: :mod:`src.analysis.convergence`
+then measures the real discretisation error with Richardson extrapolation and
+moves the targets until the answer stops moving.  Starting from the plan is
+what makes the search cheap: the first grid it builds is already in the right
+neighbourhood.
 
-The plan is also the sharing point between the two meshes: :func:`refinement_bands`
-turns the bands a :class:`~src.core.refinement.GridSpec` carries into the boxes an
-octree refines, one box per band and with the same target, and :func:`tree_resolution`
-says what box a tree needs to hold them.
+HOW IT WORKS
+------------
+-> TWO MESHES <-
+   The plan is also the sharing point between the two meshes:
+   :func:`refinement_bands` turns the bands a
+   :class:`~src.core.refinement.GridSpec` carries into the boxes an octree
+   refines, one box per band and with the same target, and
+   :func:`tree_resolution` says what box a tree needs to hold them.
 """
 from __future__ import annotations
 
@@ -156,7 +169,9 @@ def describe(plans: list[RegionPlan]) -> str:
     return "\n".join(str(p) for p in plans)
 
 
-# ------------------------------------------------------- the regions of the model
+# ==============================================================================
+# THE REGIONS OF THE MODEL
+# ==============================================================================
 @dataclass(frozen=True)
 class MeshRegion:
     """One box of the *active* model and the cell size it asks for [m].
@@ -323,7 +338,9 @@ def region_bands(regions: Sequence[MeshRegion]) -> tuple[RefinementBand, ...]:
     return tuple(bands)
 
 
-# --------------------------------------------------------------- the tree road
+# ==============================================================================
+# THE TREE ROAD
+# ==============================================================================
 #: the octree packs 21 bits per coordinate: this is the finest box it can index
 MAX_TREE_LEVEL = 21
 #: below four cells a side the flux-jump estimate has no stencil to look at, so a tree

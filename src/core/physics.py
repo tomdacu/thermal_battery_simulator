@@ -1,8 +1,39 @@
-"""Interface coefficients shared by the assembler and the analysis.
+"""
+src.core.physics
+================
+Interface coefficients shared by the assembler and the analysis.
 
+WHAT IT DOES
+------------
+Provides the coefficients that turn a temperature difference into a heat rate
+across an interface: the face conductivity between two cells, the effective
+film coefficient of a convective surface on a cell, and the linearised
+radiative coefficient.
+
+WHY
+---
 Kept in :mod:`src.core` so that ``src.analysis`` never has to import
 ``src.solver`` (the solver package imports the analysis for its energy
 bookkeeping, and a cycle would break package initialisation).
+
+HOW IT WORKS
+------------
+-> HARMONIC MEAN <-
+   The face conductivity between two cell centres is the harmonic mean of two
+   half cells in series, ``k_face = 2 k_a k_b / (k_a + k_b)``.
+
+-> HALF-CELL FILM <-
+   A convective surface sits ``d/2`` away from the cell centre, so the film and
+   the half-cell conduction are in series: ``h_eff = 2kh / (2k + hd)``.
+
+-> RADIATION <-
+   The linearised radiative coefficient is
+   ``eps*sigma*(Ts+Tinf)*(Ts^2+Tinf^2)``.
+
+LIMITS
+------
+``EPS`` is added to each denominator, so a coefficient stays finite when a
+conductivity or a film coefficient is zero.
 """
 from __future__ import annotations
 

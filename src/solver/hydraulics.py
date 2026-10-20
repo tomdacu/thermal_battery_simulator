@@ -1,43 +1,78 @@
-"""The hydraulics of the gas circuit: flows from pressures, and headers sized for them.
-
-A buried network is a looped pipe network: a ring main is two paths in parallel between
-its entry and its exit tap, the rings of a chain are in series, every riser is a branch
-between the distributor and the collector.  How the flow divides between the risers is
-not a choice: it is what the pressures of that network give, and it decides where the
-heat goes.  This module solves it and sizes the headers so that it comes out as wanted.
-
-**The network** (:class:`HydraulicNetwork`) is a set of straight pipes between nodes.  In
-each pipe of bore ``D``, area ``A``, length ``L`` and local losses ``K``, carrying the
-mass flow ``m`` from node ``a`` to node ``b`` at a gas density ``rho``:
-
-    p_a - p_b - rho g (z_b - z_a) = (f L / D + K) m |m| / (2 rho A^2)
-
-Darcy-Weisbach with the friction factor of Haaland (turbulent, explicit Colebrook;
-Haaland, J. Fluids Eng. 105 (1983) 89) or ``64 / Re`` (laminar), the local losses of the
-tees and bends from Idelchik's handbook, and the hydrostatic head of the gas - a hot
-riser draws like a chimney.  The node balances ``sum m = injection`` (the whole flow in at
-the inlet, out at the outlet, whose pressure is the reference) are solved by Newton's
-method on the node pressures: every pipe is linearised as ``m = w (dp - dp_0)`` with
-``w = dm/d(dp) = 1 / (2 R |m|)``, the resulting weighted Laplacian is solved, and the step
-is damped until the balance closes to 1e-9 of the flow (the classical nodal method of
-network analysis; Todini and Pilati, 1988, for the water-network form of it).
-
-**The sizing engine** (:func:`size_headers`) picks the diameter of every header group
-(each ring main, each jumper, the ducts; the sections of a ladder header) from a
-catalogue of nominal pipe sizes so that
-
-* every riser carries its **target** share of the flow within ``tolerance``: the target
-  is the share of the bed the riser serves (its Voronoi area in plan), so that the heat
-  goes to the sand in proportion to the sand;
-* no header exceeds the **velocity** limit (pressure drop, noise and erosion; hot-air
-  ducts are designed at 15-25 m/s);
-* a ring main or a jumper fits between the rings;
-
-and among the designs that do, it prefers the lighter one: a greedy step-up on the group
-whose next size reduces the maldistribution the most per unit of added pipe volume, then
-a step-down pass on every group that can lose a size without breaking a constraint.  The
-riser tubes are the heat-transfer surface and stay the user's.
 """
+src.solver.hydraulics
+=====================
+The hydraulics of the gas circuit: flows from pressures, and headers sized for them.
+
+WHAT IT DOES
+------------
+Solves the flow split of a looped gas network from its pressures, and chooses the
+diameter of every header from a catalogue of nominal pipe sizes so that the split
+matches the share of the bed each riser serves.
+
+HOW IT WORKS
+------------
+-> THE NETWORK <-
+   A buried network is a looped pipe network: a ring main is two paths in
+   parallel between its entry and its exit tap, the rings of a chain are in
+   series, every riser is a branch between the distributor and the collector.
+   How the flow divides between the risers is not a choice: it is what the
+   pressures of that network give, and it decides where the heat goes.  This
+   module solves it and sizes the headers so that it comes out as wanted.
+
+   :class:`HydraulicNetwork` is a set of straight pipes between nodes.  In each
+   pipe of bore ``D``, area ``A``, length ``L`` and local losses ``K``, carrying
+   the mass flow ``m`` from node ``a`` to node ``b`` at a gas density ``rho``::
+
+       p_a - p_b - rho g (z_b - z_a) = (f L / D + K) m |m| / (2 rho A^2)
+
+   Darcy-Weisbach with the friction factor of Haaland (turbulent, explicit
+   Colebrook; Haaland, J. Fluids Eng. 105 (1983) 89) or ``64 / Re`` (laminar),
+   the local losses of the tees and bends from Idelchik's handbook, and the
+   hydrostatic head of the gas - a hot riser draws like a chimney.  The node
+   balances ``sum m = injection`` (the whole flow in at the inlet, out at the
+   outlet, whose pressure is the reference) are solved by Newton's method on the
+   node pressures: every pipe is linearised as ``m = w (dp - dp_0)`` with
+   ``w = dm/d(dp) = 1 / (2 R |m|)``, the resulting weighted Laplacian is solved,
+   and the step is damped until the balance closes to 1e-9 of the flow (the
+   classical nodal method of network analysis; Todini and Pilati, 1988, for the
+   water-network form of it).
+
+-> THE SIZING ENGINE <-
+   :func:`size_headers` picks the diameter of every header group (each ring
+   main, each jumper, the ducts; the sections of a ladder header) from a
+   catalogue of nominal pipe sizes so that
+
+   * every riser carries its **target** share of the flow within ``tolerance``:
+     the target is the share of the bed the riser serves (its Voronoi area in
+     plan), so that the heat goes to the sand in proportion to the sand;
+   * no header exceeds the **velocity** limit (pressure drop, noise and erosion;
+     hot-air ducts are designed at 15-25 m/s);
+   * a ring main or a jumper fits between the rings;
+
+   and among the designs that do, it prefers the lighter one: a greedy step-up
+   on the group whose next size reduces the maldistribution the most per unit of
+   added pipe volume, then a step-down pass on every group that can lose a size
+   without breaking a constraint.  The riser tubes are the heat-transfer surface
+   and stay the user's.
+
+-> ORIFICES <-
+   A riser that still overflows after the headers are sized gets a thin
+   sharp-edged orifice plate: :func:`orifice_loss` gives its loss coefficient
+   from the area ratio (Idelchik, diagram 4-15) and :func:`orifice_bore` inverts
+   it, so the orifice puts the riser on its target share.  :func:`voronoi_shares`
+   builds the targets from the plan position of the risers.
+
+SOURCES
+-------
+- [Haaland] S. E. Haaland, "Simple and explicit formulas for the friction factor
+  in turbulent pipe flow", *J. Fluids Eng.* 105 (1983) 89-90.
+- [Idelchik] I. E. Idelchik, *Handbook of Hydraulic Resistance*, 4th ed., Begell
+  House, 2007.
+- [TP88] E. Todini, S. Pilati, "A gradient algorithm for the analysis of pipe
+  networks", in *Computer Applications in Water Supply*, Vol. 1, Research
+  Studies Press, 1988, 1-20.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -48,6 +83,10 @@ from scipy.sparse.linalg import spsolve
 
 from .fluid import Fluid
 
+# ==============================================================================
+# GRAVITY AND FRICTION
+# ==============================================================================
+#: standard gravity [m/s^2], used by the hydrostatic head of the gas.
 G = 9.80665
 
 
@@ -63,15 +102,19 @@ def darcy_friction(reynolds: np.ndarray, relative_roughness: np.ndarray) -> np.n
                                        + 6.9 / re)) ** 2
     return np.maximum(64.0 / re, turbulent)
 
+# ==============================================================================
+# CATALOGUE AND SIZING LIMITS
+# ==============================================================================
 #: outer diameters of the nominal pipe sizes a header is chosen from [m]: DN 50 to DN 600
 #: (ISO 1127 / EN 10220 outer diameters)
 CATALOGUE = (0.0603, 0.0761, 0.0889, 0.1143, 0.1397, 0.1683, 0.2191, 0.2730, 0.3239,
              0.3556, 0.4064, 0.4570, 0.5080, 0.6100)
 
-#: local losses [-] (Idelchik): a tee's branch in and out of a riser, a jumper's two
-#: tees, a duct's nozzle and bends
+#: local loss [-] of a tee's branch in and out of a riser (Idelchik).
 K_RISER = 2.0
+#: local loss [-] of a jumper's two tees (Idelchik).
 K_JUMPER = 1.0
+#: local loss [-] of a duct's nozzle and bends (Idelchik).
 K_DUCT = 1.5
 
 #: groups tried per step of the sizing: the ones with the steepest pressure gradient
@@ -81,6 +124,9 @@ CANDIDATES = 6
 MAX_HEADER = 0.4064
 
 
+# ==============================================================================
+# THE NETWORK
+# ==============================================================================
 @dataclass
 class Pipe:
     """One straight pipe between two nodes (nominal direction ``a -> b``)."""
@@ -364,7 +410,9 @@ class HydraulicNetwork:
                                 self.roughness)
 
 
-# ------------------------------------------------------------------------ sizing
+# ==============================================================================
+# SIZING
+# ==============================================================================
 @dataclass
 class SizingResult:
     """What the engine chose, and what it achieves."""
@@ -575,6 +623,9 @@ def size_headers(network: HydraulicNetwork, mass_flow: float, fluid: Fluid,
                         shares=state.riser_flow / mass_flow, notes=notes)
 
 
+# ==============================================================================
+# ORIFICES
+# ==============================================================================
 def orifice_loss(area_ratio: np.ndarray) -> np.ndarray:
     """Loss coefficient of a thin sharp-edged orifice plate in a pipe [-].
 
@@ -604,6 +655,9 @@ def orifice_bore(k: np.ndarray, bore: float) -> np.ndarray:
     return bore * np.sqrt(ratio)
 
 
+# ==============================================================================
+# TARGET SHARES
+# ==============================================================================
 def voronoi_shares(points: np.ndarray, radius: float, samples: int = 240) -> np.ndarray:
     """Share of a disc of ``radius`` closest to each of ``points`` (plan, about its centre).
 

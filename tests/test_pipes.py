@@ -1,11 +1,16 @@
-"""Buried pipe networks: the layout rules, the header plumbing and the accounting.
+"""
+tests.test_pipes
+================
+Buried pipe networks: the layout rules, the header plumbing and the accounting.
 
-The point of these tests is that a network is a *design*, not a drawing: the risers
-must sit inside the vessel, every riser must run from the bottom header to the top one,
-the rings must be linked to each other and to the duct, the branch flows must add up to
-the whole, the wetted area must be the geometric ``pi d L`` of the centreline (never
-the staircase surface of the mask), and the same configuration must always build the
-same network.
+WHAT IT DOES
+------------
+The point of these tests is that a network is a *design*, not a drawing: the
+risers must sit inside the vessel, every riser must run from the bottom header
+to the top one, the rings must be linked to each other and to the duct, the
+branch flows must add up to the whole, the wetted area must be the geometric
+``pi d L`` of the centreline (never the staircase surface of the mask), and the
+same configuration must always build the same network.
 """
 from __future__ import annotations
 
@@ -57,7 +62,9 @@ def combinations() -> list[tuple[str, str]]:
     return pairs
 
 
-# ----------------------------------------------------------------------- geometry
+# ==============================================================================
+# GEOMETRY
+# ==============================================================================
 @pytest.mark.parametrize("layout,collection", combinations())
 def test_every_riser_sits_inside_the_vessel_between_the_two_headers(layout, collection):
     """The bundle is inside the wall and every riser spans the active band exactly."""
@@ -193,7 +200,9 @@ def test_the_central_header_takes_its_flow_along_the_vessel_axis():
                                  side.inlet.points[:, 1] - side.center[1]))) > 1.0
 
 
-# --------------------------------------------------------------------- the ducts
+# ==============================================================================
+# THE DUCTS
+# ==============================================================================
 def test_the_two_nozzles_cross_the_wall_and_stay_under_the_roof():
     """Both ducts come in through the lateral wall: the roof carries the insulation."""
     config = vessel()
@@ -226,7 +235,9 @@ def test_an_outlet_below_the_inlet_is_refused():
     assert any("above the inlet" in problem for problem in problems)
 
 
-# ---------------------------------------------------------------- the accounting
+# ==============================================================================
+# THE ACCOUNTING
+# ==============================================================================
 def test_the_wetted_area_is_geometric_and_adds_up_to_the_centreline_length():
     """``sum(pi d L_cell) = pi d L_total``: the mask never contributes a square metre."""
     net = network()
@@ -316,7 +327,9 @@ def test_the_summary_reports_the_design_numbers():
     assert "split equal" in text
 
 
-# ------------------------------------------------------------------- the guards
+# ==============================================================================
+# THE GUARDS
+# ==============================================================================
 def test_a_ring_with_no_riser_on_it_is_refused():
     """A ring main that feeds nothing is a piece of plumbing that cannot work."""
     net = network(vessel(layout=LAYOUT_RINGS))
@@ -394,7 +407,9 @@ def test_a_warning_does_not_stop_the_build():
     assert not any(problem.startswith("warning:") for problem in net.validate())
 
 
-# -------------------------------------------------------------- reproducibility
+# ==============================================================================
+# REPRODUCIBILITY
+# ==============================================================================
 def test_the_same_configuration_always_builds_the_same_network():
     """No randomness, no dependence on the history: a design is reproducible."""
     config = vessel(layout=LAYOUT_RINGS, collection=COLLECTION_REVERSE)
@@ -433,10 +448,9 @@ def test_the_voxelisation_can_move_to_another_grid():
     assert float(np.sum(fine[2])) == pytest.approx(coarse.total_area, rel=1e-12)
 
 
-# --------------------------------------------------------- the fluid integration
-
-
-# ------------------------------------------------------- the tube and its options
+# ==============================================================================
+# THE FLUID INTEGRATION AND THE TUBE OPTIONS
+# ==============================================================================
 def test_the_wall_thickness_sets_the_bore_the_gas_flows_through():
     """The outer diameter is the geometry, the bore is the hydraulics: both reported."""
     config = vessel(wall_thickness=0.003, duct_diameter=0.1)
@@ -495,7 +509,9 @@ def test_the_junction_refinement_names_the_band_the_mesh_must_resolve():
                for problem in coarse.validate())
 
 
-# ------------------------------------------------------------- the distributions
+# ==============================================================================
+# THE DISTRIBUTIONS
+# ==============================================================================
 def test_the_sector_split_gives_every_sector_the_same_flow():
     """A sector valve per quadrant: the flow follows the sector, not the lattice."""
     config = vessel(n_sectors=4, split_mode=SPLIT_SECTOR)
@@ -544,7 +560,9 @@ def test_the_ring_split_gives_every_ring_main_the_same_flow():
     assert counts[inner][0] > counts[outer][0]
 
 
-# ------------------------------------------------------------ painting the mesh
+# ==============================================================================
+# PAINTING THE MESH
+# ==============================================================================
 def test_the_paint_marks_the_pipes_inside_the_vessel_and_keeps_the_area():
     """What ``paint`` marks is a pipe cell of the bed, never a cell outside the wall."""
     mesh = box(spacing=0.25, cells=32)
@@ -634,7 +652,9 @@ def test_a_lagged_header_is_painted_without_a_gas_film():
         mesh.boundary_type[tubes] == int(BoundaryType.CONVECTION))) == int(tubes.sum())
 
 
-# ------------------------------------------------------- the circuit of the loop
+# ==============================================================================
+# THE CIRCUIT OF THE LOOP
+# ==============================================================================
 def test_the_hydraulics_adds_the_riser_to_the_pipes_the_branches_share():
     """The branch pays for its tube, its header arcs and the two ducts it crosses."""
     net = network(vessel(duct_diameter=0.1))
@@ -705,7 +725,9 @@ def test_the_loop_can_be_built_on_the_mesh_the_solve_will_use():
         net.inner_diameter * np.pi * net.risers[0].total_length, rel=1e-12)
 
 
-# ------------------------------------------------------------------- the spiral
+# ==============================================================================
+# THE SPIRAL
+# ==============================================================================
 def test_the_spiral_layout_winds_the_tubes_one_pitch_per_turn():
     """An Archimedean spiral: the arc steps are horizontal pitches, the turns vertical."""
     config = vessel(layout=LAYOUT_SPIRAL)
@@ -735,7 +757,9 @@ def test_the_spiral_layout_winds_the_tubes_one_pitch_per_turn():
     assert "spiral" in net.summary()
 
 
-# ------------------------------------------------------- the surface power rating
+# ==============================================================================
+# THE SURFACE POWER RATING
+# ==============================================================================
 def test_the_power_of_the_plant_is_rated_on_the_surface_of_the_pipes():
     """The wall that delivers the power is the tubes': P over the wetted area.
 

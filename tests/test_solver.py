@@ -1,4 +1,27 @@
-"""Solver tests: assembly exactness, analytic regressions, linear backends."""
+"""
+tests.test_solver
+=================
+Solver assembly exactness, analytic regressions and linear backends.
+
+WHAT IT DOES
+------------
+Pins the structured assembly and the solvers in ``src/solver``: the interior
+stencil is the textbook 7-point scheme, the matrix matches an independent
+assembly, the steady solution is exact for Dirichlet faces and a source, a
+convective face flux matches the analytic resistance, an imposed flux adds
+exactly its power, and Dirichlet elimination keeps the matrix symmetric.  The
+linear backends - direct, iterative and AMG when available - agree on the same
+system, and an asymmetric operator is solved without CG.
+
+The transient driver is checked against the analytic slab series and the
+lumped rate ``dT/dt = Q/(rho*cp)``, which is independent of the mesh; it
+enforces Dirichlet faces exactly, caps extraction by availability, refuses a
+power profile with no source, stops cleanly on request, shortens the last
+step, runs a single step when ``dt > t_final``, saves every step on a fine
+save interval, and stays finite with radiation.  A loop that changes the tube
+film rebuilds the operator, and the environment film carries the radiative
+share instead of the excluded box faces.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -18,7 +41,9 @@ def column(mesh, field=None):
     return field[0, 0, :]
 
 
-# ------------------------------------------------------------------ assembly
+# ==============================================================================
+# ASSEMBLY
+# ==============================================================================
 def test_interior_stencil_is_the_textbook_7_point_scheme():
     """Interior node of a fully insulated box: six equal couplings, diagonal 6a."""
     mesh = Mesh3D(Lx=1.0, Ly=1.0, Lz=1.0, spacing=0.25)
@@ -167,7 +192,9 @@ def test_amg_is_used_when_available(slab):
     assert np.abs(result.T - direct.T).max() < 1e-8
 
 
-# ----------------------------------------------------------------- transient
+# ==============================================================================
+# TRANSIENT
+# ==============================================================================
 @pytest.mark.parametrize("spacing", [0.25, 0.125])
 def test_transient_rate_is_mesh_independent(adiabatic_box, spacing):
     """dT/dt = Q/(rho*cp).  With a cell-volume factor the rate scales as 1/d^3."""
@@ -290,7 +317,9 @@ def test_radiation_increases_the_steady_losses(storage_model):
     assert plain.T.max() > 0
 
 
-# ------------------------------------------------------- transient edge cases
+# ==============================================================================
+# TRANSIENT EDGE CASES
+# ==============================================================================
 def test_last_step_is_shortened_when_t_final_is_not_a_multiple_of_dt(adiabatic_box):
     mesh = adiabatic_box
     mesh.source_mask[:] = True

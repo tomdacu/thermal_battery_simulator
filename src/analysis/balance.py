@@ -1,26 +1,37 @@
-"""Energy and exergy bookkeeping - one implementation for the whole application.
+"""
+src.analysis.balance
+====================
+Energy and exergy bookkeeping for the whole application, from one implementation.
 
-Definitions used here (documented once, used everywhere):
+WHAT IT DOES
+------------
+The field definitions are documented here once and used everywhere:
 
-* ``p_input``      total power injected [W]: the volumetric sources (``Q_source``)
-                   plus the net film of the heat-transfer fluid when it heats the
-                   solid - the gas loop charging through the pipe walls.
-* ``p_extracted``  power removed [W]: the volumetric sinks plus the net fluid film
-                   when it cools the solid.
-* ``q_domain``     power leaving through the six box faces [W].  It is computed
-                   with the faces and the conductances the assembly used - the mesh's
-                   own face list for a tree, the ``GridIndex`` tables for ``Mesh3D``
-                   (:mod:`src.analysis.fluxes`) - so
-                   ``p_input - p_extracted - q_domain - dE/dt`` closes to
-                   numerical precision: that identity is the self-check.
+* ``p_input``      total power injected [W]: the volumetric sources
+                   (``Q_source``) plus the net film of the heat-transfer fluid
+                   when it heats the solid - the gas loop charging through the
+                   pipe walls.
+* ``p_extracted``  power removed [W]: the volumetric sinks plus the net fluid
+                   film when it cools the solid.
+* ``q_domain``     power leaving through the six box faces [W].
 * ``q_battery``    power crossing the battery envelope (sand/insulation/steel/
                    concrete against air) [W] - the physically meaningful loss,
                    which does not scale with the size of the air box.
 * ``e_stored``     sensible energy above the ambient [J]; ``ex_stored`` the
                    corresponding exergy.
 
-The same fields are filled from either mesh: only the flux report knows which face list
-it is reading.
+HOW IT WORKS
+------------
+-> CLOSING IDENTITY <-
+   ``q_domain`` is computed with the faces and the conductances the assembly
+   used - the mesh's own face list for a tree, the ``GridIndex`` tables for
+   ``Mesh3D`` (:mod:`src.analysis.fluxes`) - so
+   ``p_input - p_extracted - q_domain - dE/dt`` closes to numerical precision:
+   that identity is the self-check.
+
+-> TWO MESHES <-
+   The same fields are filled from either mesh: only the flux report knows
+   which face list it is reading.
 """
 from __future__ import annotations
 
@@ -61,7 +72,10 @@ class Balance:
     t_min: float
     t_mean_insulation: float
     t_mean_shell: float
+    #: ``p_input - p_extracted - q_domain - dE/dt`` [W]: zero when the ledger
+    #: closed at the round-off of the terms.
     imbalance: float
+    #: ``q_battery / p_input`` [-]; ``None`` when nothing is injected.
     eta_energy: float | None = None
     notes: list = field(default_factory=list)
 

@@ -1,4 +1,14 @@
-"""Core domain model: mesh, materials, geometry, time profiles."""
+"""
+src.core
+========
+Core domain model: mesh, materials, geometry and time profiles.
+
+WHAT IT DOES
+------------
+Re-exports the public vocabulary of the domain: the structured mesh and its
+boundary conditions, the material database and the packed-bed model, the
+geometry description and its painters, and the transient driving profiles.
+"""
 from .materials import MATERIALS, MaterialManager, ThermalProperties
 from .mesh import BoundaryType, FaceBC, MaterialID, Mesh3D, NodeProperties
 from .geometry import (

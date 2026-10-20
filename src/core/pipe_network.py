@@ -1,109 +1,162 @@
-"""Buried pipe networks of a cylindrical vessel: layouts, headers and voxelisation.
+"""
+src.core.pipe_network
+=====================
+Buried pipe networks of a cylindrical vessel: layouts, headers and voxelisation.
 
-Polar Night Energy's published architecture (see ``docs/13_REDESIGN.md``) is a closed
-air loop through pipes buried in the sand: the electric resistors heat the *air*, the
-air heats the bed through the pipe walls and on discharge the same loop delivers the
-heat to an exchanger, so the pipes are the only heat-transfer surface.  A silo holds a
-bundle of vertical tubes; a vessel large enough to matter cannot be fed by one header,
-so the bundle is organised as a **network**: risers in parallel between a bottom
-*distributor* and a top *collector*, and two lateral ducts crossing the vessel wall.
+WHAT IT DOES
+------------
+Extends :mod:`src.core.pipes` into a whole network of buried pipes in a cylindrical
+vessel: risers in parallel between a bottom *distributor* and a top *collector*, two
+lateral ducts crossing the wall, and the headers that carry the flow.  The module
+plans the layout, rasterises every pipe, splits the flow between the branches,
+voxelises the network on a mesh, folds the circuit into a fluid loop and sizes the
+headers.
 
-This module extends :mod:`src.core.pipes` and keeps its two invariants:
+WHY
+---
+Polar Night Energy's published architecture (see ``docs/13_REDESIGN.md``) is a
+closed air loop through pipes buried in the sand: the electric resistors heat the
+*air*, the air heats the bed through the pipe walls and on discharge the same loop
+delivers the heat to an exchanger, so the pipes are the only heat-transfer surface.
+A silo holds a bundle of vertical tubes; a vessel large enough to matter cannot be
+fed by one header, so the bundle is organised as a **network**.  The wetted area is
+the physical surface and is never read off the voxel mask: the mask is a staircase
+and its surface is a mesh artefact, not a heat-transfer surface.
 
-* every pipe - riser, ring, header, jumper, duct - is a
-  :class:`~src.core.pipes.PipeRun`, so its wetted area is the geometric ``pi d L`` of
-  its centreline.  The area is **never** read off the voxel mask: the mask is a
-  staircase and its surface is a mesh artefact, not a heat-transfer surface;
-* the length rasterised into each cell sums to the centreline length to machine
-  precision, so ``sum(area per cell) = pi d L_total`` for every run and for the whole
-  network.  The collectors carry their area and their pressure loss like any other run.
+HOW IT WORKS
+------------
+-> WETTED AREA <-
+   Every pipe - riser, ring, header, jumper, duct - is a
+   :class:`~src.core.pipes.PipeRun`, so its wetted area is the geometric ``pi d L``
+   of its centreline.  The area is **never** read off the voxel mask.  The
+   collectors carry their area and their pressure loss like any other run.
 
-Layouts (the plan inside the circle of radius ``radius - wall_clearance``):
+-> LENGTH PER CELL <-
+   The length rasterised into each cell sums to the centreline length to machine
+   precision, so ``sum(area per cell) = pi d L_total`` for every run and for the
+   whole network.
 
-``staggered``
-    equilateral lattice, alternate rows shifted by half a pitch: the arrangement the
-    bundle literature recommends;
-``grid``
-    square lattice on the same rows;
-``rings``
-    concentric rings - **every ring carries its own risers** and is linked to its
-    neighbours by radial jumpers, so a ring with no riser or with no link is a
-    configuration error (``PipeNetwork.validate``);
-``spiral``
-    one Archimedean spiral: radius ``r(phi) = p_v phi / 2 pi`` with the tubes one
-    horizontal pitch apart *along* the arc and one vertical pitch apart *between*
-    turns, walked from the wall inwards, so the distributor is a spiral feeder;
-``radial``
-    radial files of risers, spaced by the horizontal pitch along the radius and with
-    the files pitched by the vertical pitch at the mean radius (the inner radius of the
-    files is the pitch circle, where two neighbouring files are exactly one horizontal
-    pitch apart, so no other riser of a file can sit closer than the pitch).
+-> LAYOUTS <-
+   The plan inside the circle of radius ``radius - wall_clearance``:
+   - ``staggered``: equilateral lattice, alternate rows shifted by half a pitch,
+     the arrangement the bundle literature recommends;
+   - ``grid``: square lattice on the same rows;
+   - ``rings``: concentric rings - **every ring carries its own risers** and is
+     linked to its neighbours by radial jumpers, so a ring with no riser or with no
+     link is a configuration error (``PipeNetwork.validate``);
+   - ``spiral``: one Archimedean spiral, radius ``r(phi) = p_v phi / 2 pi``, with the
+     tubes one horizontal pitch apart *along* the arc and one vertical pitch apart
+     *between* turns, walked from the wall inwards, so the distributor is a spiral
+     feeder;
+   - ``radial``: radial files of risers, spaced by the horizontal pitch along the
+     radius and with the files pitched by the vertical pitch at the mean radius (the
+     inner radius of the files is the pitch circle, where two neighbouring files are
+     exactly one horizontal pitch apart, so no other riser of a file can sit closer
+     than the pitch).
 
-Collection modes (how the flow is distributed and collected):
+-> COLLECTION MODES <-
+   How the flow is distributed and collected:
+   - ``distributor_collector``: the reference - cold in at the bottom, hot out at
+     the top, and the collector discharges at the *same* end of the ladder the
+     distributor is fed from (*direct return*: the branch closest to the inlet is
+     also closest to the outlet, so its path is the shortest and the flow favours
+     it);
+   - ``reverse_return``: the collector discharges at the *far* end of the ladder
+     (Tichelmann) - every branch then travels the same total header length, which is
+     what keeps the flow between the risers uniform;
+   - ``central_header``: the two nozzles sit below and above the two header levels
+     and the flow reaches them through vertical ducts on the axis; the headers are
+     take-offs (*derivazioni*) that branch off those ducts, and the return trunk
+     crosses the bundle;
+   - ``two_level_rings``: the concentric ring headers alternate between two
+     elevations one duct diameter apart, so adjacent rings clear each other and the
+     droppers between them have a defined length; the chain is walked the balancing
+     way (the two levels are a plumbing variant of the reverse return);
+   - ``radial_manifold``: the rings fed in parallel by a straight trunk along the
+     inlet diameter, which meets every ring at its two taps on that diameter (the
+     collector mirrors it at the top).
 
-``distributor_collector``
-    the reference: cold in at the bottom, hot out at the top, and the collector
-    discharges at the *same* end of the ladder the distributor is fed from (*direct
-    return*: the branch closest to the inlet is also closest to the outlet, so its path
-    is the shortest and the flow favours it);
-``reverse_return``
-    the collector discharges at the *far* end of the ladder (Tichelmann): every branch
-    then travels the same total header length, which is what keeps the flow between
-    the risers uniform;
-``central_header``
-    the two nozzles sit below and above the two header levels and the flow reaches
-    them through vertical ducts on the axis; the headers are take-offs (*derivazioni*)
-    that branch off those ducts, and the return trunk crosses the bundle;
-``two_level_rings``
-    the concentric ring headers alternate between two elevations one duct diameter
-    apart, so adjacent rings clear each other and the droppers between them have a
-    defined length; the chain is walked the balancing way (the two levels are a
-    plumbing variant of the reverse return).
+-> TUBE AND BORE <-
+   The *tube* is a tube and not a line: ``diameter`` is its outer diameter and
+   ``wall_thickness`` its wall, so the gas flows in a bore of ``diameter - 2 t``.
+   The bore is what the hydraulics uses (velocity, Reynolds, friction); the outer
+   diameter stays what the pitches, the clearance and the wetted area ``pi d L`` are
+   made of.  The tube material is a label with a wall roughness: ``stainless_steel``
+   is a drawn tube (eps = 15 um), ``carbon_steel`` a commercial one (eps = 46 um),
+   and the relative roughness ``eps / d_bore`` is what the friction factor of the
+   march sees.
 
-Design rules, with the sources collected in ``docs/15_PIPE_NETWORKS.md``:
+-> DESIGN RULES <-
+   The rules the configuration is checked against, with the sources collected in
+   ``docs/15_PIPE_NETWORKS.md``:
+   - pitches as multiples of the outer diameter: ``2.0 d`` horizontal, ``2.5 d``
+     vertical, ``sqrt(3) d`` for an equilateral lattice (:mod:`src.core.pipes`);
+   - header span (the distance between the two header elevations): below 1 m no care
+     is needed, 1-3 m needs flow-distribution care, above 3 m the bundle must be
+     split into parallel modules;
+   - a module keeps its bed below 4 m of height;
+   - the nozzles must leave through the *wall*: an outlet that would go through the
+     roof is refused, because the roof carries the insulation and the cone, not a
+     nozzle band;
+   - the junctions between the tubes and the headers are where the gas turns and
+     where the surface is singular, so the mesh band around the two header
+     elevations is refined to ``junction_refinement`` when it is set.
 
-* pitches as multiples of the outer diameter: ``2.0 d`` horizontal, ``2.5 d``
-  vertical, ``sqrt(3) d`` for an equilateral lattice (:mod:`src.core.pipes`);
-* header span (the distance between the two header elevations): below 1 m no care is
-  needed, 1-3 m needs flow-distribution care, above 3 m the bundle must be split into
-  parallel modules;
-* a module keeps its bed below 4 m of height;
-* the nozzles must leave through the *wall*: an outlet that would go through the roof
-  is refused, because the roof carries the insulation and the cone, not a nozzle band;
-* the junctions between the tubes and the headers are where the gas turns and where the
-  surface is singular, so the mesh band around the two header elevations is refined to
-  ``junction_refinement`` when it is set.
+-> INSULATED HEADERS <-
+   With ``insulated_headers`` a lagged distributor and collector exchange nothing
+   with the bed - they only carry the gas - so the heat-transfer surface of the
+   design is the risers (and the ducts, which are never lagged in a real plant)
+   instead of the whole network.
 
-The *tube* is a tube and not a line: ``diameter`` is its outer diameter and
-``wall_thickness`` its wall, so the gas flows in a bore of ``diameter - 2 t``.  The bore
-is what the hydraulics uses (velocity, Reynolds, friction); the outer diameter stays
-what the pitches, the clearance and the wetted area ``pi d L`` are made of.  The tube
-material is a label with a wall roughness: ``stainless_steel`` is a drawn tube
-(eps = 15 um), ``carbon_steel`` a commercial one (eps = 46 um), and the relative
-roughness ``eps / d_bore`` is what the friction factor of the march sees.
+-> VOXELISATION AND PAINT <-
+   :meth:`PipeNetwork.paint` voxelises the network on a mesh, marks the cells it
+   crosses with :data:`~src.core.mesh.MaterialID.TUBES` (the entry of the material
+   table that *is* a pipe: the same one the lumped tube bank uses) and writes the
+   convective link of every exchanging pipe cell, so a transient that runs without a
+   loop sees the pipes where they are.  :meth:`PipeNetwork.voxelize` returns the flat
+   cells with the length and the wetted area inside each.
 
-The headers can be **insulated** (``insulated_headers``): a lagged distributor and
-collector exchange nothing with the bed - they only carry the gas - so the heat
-transfer surface of the design is the risers (and the ducts, which are never lagged
-in a real plant) instead of the whole network.
+-> FLUID LOOP <-
+   :meth:`PipeNetwork.fluid_loop` builds the gas circuit as a
+   :class:`~src.solver.fluid.FluidLoop`: one run per branch with the branch split of
+   :meth:`PipeNetwork.split`, and the pressure drop the headers, the connectors and
+   the ducts add folded into the loop as its circuit fittings
+   (:meth:`PipeNetwork.hydraulics`).  :meth:`PipeNetwork.gas_graph` is the same
+   circuit as the gas walks it, segment by segment, on a mesh.
 
-Three methods take the network out of the drawing and into the solver:
+-> HEADER ENGINE <-
+   :func:`design_headers` sizes the headers and lifts them into the sand: the
+   risers' target flows are the shares of the bed they serve (their Voronoi areas in
+   plan), the diameters are chosen so every riser gets its target within a tolerance
+   and no header exceeds the maximum velocity, and the lift (one radius plus a
+   quarter diameter of cover, at least 50 mm) is iterated against the pressures it
+   moves.
 
-* :meth:`PipeNetwork.paint` voxelises the network on a mesh, marks the cells it
-  crosses with :data:`~src.core.mesh.MaterialID.TUBES` (the entry of the material
-  table that *is* a pipe: the same one the lumped tube bank uses) and writes the
-  convective link of every exchanging pipe cell, so a transient that runs without a
-  loop sees the pipes where they are;
-* :meth:`PipeNetwork.fluid_loop` builds the gas circuit as a
-  :class:`~src.solver.fluid.FluidLoop`: one run per branch with the branch split of
-  :meth:`PipeNetwork.split`, and the pressure drop the headers, the connectors and the
-  ducts add folded into the loop as its circuit fittings
-  (:meth:`PipeNetwork.hydraulics`);
-* :meth:`PipeNetworkConfig.junction_bands` returns the elevation bands a graded mesh
-  should refine around the two header elevations (the tube-header junctions).
+-> JUNCTION BANDS <-
+   :meth:`PipeNetworkConfig.junction_bands` returns the elevation bands a graded
+   mesh should refine around the two header elevations (the tube-header junctions).
 
-Every length is metres and every elevation is measured from the domain floor, exactly
-as in :mod:`src.core.geometry`.
+INPUTS
+------
+A :class:`PipeNetworkConfig` (vessel, band, tube, layout, collection and split
+mode), the mesh to rasterise on, the vessel centre in the domain plan [m], the
+design mass flow [kg/s] and the gas.
+
+OUTPUTS
+-------
+A :class:`PipeNetwork` with its runs and branches, a :class:`PaintReport` from
+:meth:`PipeNetwork.paint`, a :class:`Hydraulics` from
+:meth:`PipeNetwork.hydraulics` and a :class:`HeaderDesign` from
+:func:`design_headers`.
+
+LIMITS
+------
+The configuration describes geometry and plumbing only; the grid is not involved.
+The module does not solve the gas - the march is :mod:`src.solver.fluid` and the
+friction :mod:`src.solver.hydraulics` - and a lagged header is an ideal insulator.
+Nothing here measures a surface from the voxel mask.  Every length is metres and
+every elevation is measured from the domain floor, exactly as in
+:mod:`src.core.geometry`.
 """
 from __future__ import annotations
 
@@ -123,7 +176,10 @@ if TYPE_CHECKING:                       # the solver layer imports this module's
     from ..solver.hydraulics import HydraulicNetwork
     from .adaptive_mesh import AdaptiveMesh
 
-# ---------------------------------------------------------------------- vocabulary
+# ==============================================================================
+# VOCABULARY
+# ==============================================================================
+
 LAYOUT_STAGGERED = "staggered"
 LAYOUT_GRID = "grid"
 LAYOUT_RINGS = "rings"
@@ -161,18 +217,22 @@ WARNING = "warning: "
 #: to cross the wall in the voxel mask
 WALL_STUB = 0.2
 
-#: distance between the two ring levels of ``two_level_rings``, in duct diameters:
-#: two crossing pipes need one diameter, so two leave one diameter of clearance
+#: distance between the two ring levels of ``two_level_rings``, as a multiple of the
+#: duct diameter [-]: two crossing pipes need one diameter, so two leave one diameter
+#: of clearance
 TWO_LEVEL_GAP = 2.0
 
 #: a module keeps its bed below this height [m] (``docs/13_REDESIGN.md``)
 MODULE_HEIGHT_LIMIT = 4.0
 
-#: the tube-header junction band spans one tube diameter either side of the header
+#: the tube-header junction band spans one tube diameter either side of the header [-]
 JUNCTION_BAND = 1.0
 
 
-# -------------------------------------------------------------------- materials
+# ==============================================================================
+# MATERIALS
+# ==============================================================================
+
 @dataclass(frozen=True)
 class PipeMaterial:
     """The material of the tube wall: the label it carries and its roughness.
@@ -202,15 +262,18 @@ PIPE_MATERIALS: dict[str, PipeMaterial] = {
     PIPE_CARBON: PipeMaterial("carbon steel, commercial", 4.6e-5, 38.0),
 }
 
-#: above this relative roughness the friction factor leaves the Moody chart range
+#: above this relative roughness [-] the friction factor leaves the Moody chart range
 ROUGHNESS_LIMIT = 0.05
 
-#: share of the wetted area the uninsulated headers may carry before it is worth
+#: share [-] of the wetted area the uninsulated headers may carry before it is worth
 #: saying so: above a quarter the exchange is no longer the tube bundle's
 HEADER_AREA_LIMIT = 0.25
 
 
-# ------------------------------------------------------------------- configuration
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
 @dataclass
 class PipeNetworkConfig:
     """Geometry and plumbing of a buried pipe network; the grid is not involved.
@@ -239,8 +302,8 @@ class PipeNetworkConfig:
     vertical_pitch: float | None = None     # [m] spacing between rows / rings / files
     layout: str = LAYOUT_STAGGERED
     collection: str = COLLECTION_DIRECT
-    n_rings: int | None = None              # None = as many as the pitch fits
-    n_files: int | None = None              # None = as many as the pitch fits
+    n_rings: int | None = None              # [-] None = as many as the pitch fits
+    n_files: int | None = None              # [-] None = as many as the pitch fits
     duct_diameter: float | None = None      # [m]; None = the tube diameter
     wall_clearance: float | None = None     # [m]; None = two tube diameters
     azimuth_in: float = 0.0                 # [deg] azimuth of the inlet nozzle
@@ -248,7 +311,7 @@ class PipeNetworkConfig:
     elevation_in: float | None = None       # [m]; None = below the distributor
     elevation_out: float | None = None      # [m]; None = at the collector
     split_mode: str = SPLIT_EQUAL
-    n_sectors: int = 4                      # sectors of the `sector` split
+    n_sectors: int = 4                      # [-] sectors of the `sector` split
     insulated_headers: bool = False         # the headers exchange nothing with the bed
     junction_refinement: float | None = None  # [m] cell size asked at the junctions
     #: outer diameter of every header group [m], as the sizing engine chose it
@@ -598,16 +661,24 @@ class PipeNetworkConfig:
         return problems
 
 
-# ---------------------------------------------------------------------------- plan
+# ==============================================================================
+# PLAN
+# ==============================================================================
+
 @dataclass
 class _Plan:
     """Riser plan of a configuration: positions, groups and the arcs a path needs."""
 
-    points: list[tuple[float, float]]     # riser positions, branch order, vessel-local
-    group: list[int]                      # row / ring / file index of each riser
-    forward: list[float]                  # arc inside the group from its entry vertex
-    perimeter: list[float]                # full perimeter of the group (0 for a lattice)
-    radii: list[float]                    # ring radius [m]; [] for the ladder layouts
+    #: riser positions [m], branch order, vessel-local
+    points: list[tuple[float, float]]
+    #: row / ring / file index of each riser [-]
+    group: list[int]
+    #: arc inside the group from its entry vertex [m]
+    forward: list[float]
+    #: full perimeter of the group [m] (0 for a lattice)
+    perimeter: list[float]
+    #: ring radius [m]; [] for the ladder layouts
+    radii: list[float]
 
     @property
     def family(self) -> str:
@@ -794,11 +865,15 @@ def _group_share(labels: list[int], count: int) -> np.ndarray:
     return np.asarray([1.0 / (groups * sizes[label]) for label in labels], dtype=float)
 
 
-# --------------------------------------------------------------- branch and network
+# ==============================================================================
+# BRANCH AND NETWORK
+# ==============================================================================
+
 @dataclass(frozen=True)
 class Branch:
     """One parallel branch: a riser and the header arcs that feed and return it."""
 
+    #: branch position in the network's order [-]
     index: int
     riser: PipeRun
     distributor: PipeRun
@@ -828,7 +903,7 @@ class PipeNetwork:
     """
 
     config: PipeNetworkConfig
-    center: tuple[float, float]
+    center: tuple[float, float]          # [m] vessel axis in the domain plan
     risers: list[PipeRun]
     distributors: list[PipeRun]
     collectors: list[PipeRun]
@@ -837,8 +912,8 @@ class PipeNetwork:
     outlet: PipeRun
     branches: list[Branch] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    #: plan group of every branch (the ring main on the ring layouts; the riser itself
-    #: on the ladder layouts), in branch order: what the ``ring`` split divides
+    #: plan group of every branch [-] (the ring main on the ring layouts; the riser
+    #: itself on the ladder layouts), in branch order: what the ``ring`` split divides
     groups: list[int] = field(default_factory=list)
 
     # ---------------------------------------------------------------- geometry
@@ -1713,7 +1788,10 @@ class PipeNetwork:
                          variable_properties=variable_properties, hydraulic=hydraulic)
 
 
-# -------------------------------------------------------------- the two reports
+# ==============================================================================
+# THE TWO REPORTS
+# ==============================================================================
+
 @dataclass(frozen=True)
 class Hydraulics:
     """What the gas circuit of the network costs at a design mass flow."""
@@ -1755,8 +1833,8 @@ class Hydraulics:
 class PaintReport:
     """What :meth:`PipeNetwork.paint` marked on a mesh."""
 
-    cells: int                # pipe cells painted
-    riser_cells: int          # of them, reached by a riser (they always exchange)
+    cells: int                # pipe cells painted [-]
+    riser_cells: int          # of them, reached by a riser [-] (they always exchange)
     area: float               # [m^2] wetted area painted (inside the vessel)
     dropped: float            # [m^2] wetted area left out (the nozzle stubs)
     insulated: float          # [m^2] painted but lagged: no gas film
@@ -1777,7 +1855,10 @@ class PaintReport:
         return "\n".join(lines)
 
 
-# ----------------------------------------------------------------- connectivity
+# ==============================================================================
+# CONNECTIVITY
+# ==============================================================================
+
 def _point_on_polyline(point: np.ndarray, points: np.ndarray, tol: float) -> bool:
     """Whether ``point`` lies within ``tol`` of the polyline ``points``."""
     start = points[:-1]
@@ -1826,7 +1907,10 @@ def _unconnected(runs: list[PipeRun], start: PipeRun) -> list[PipeRun]:
     return [run for run in runs if id(run) not in seen]
 
 
-# ---------------------------------------------------------------------- builder
+# ==============================================================================
+# BUILDER
+# ==============================================================================
+
 def _wall_point(config: PipeNetworkConfig, center: tuple[float, float],
                 azimuth_deg: float, elevation: float,
                 outside: float = 0.0) -> tuple[float, float, float]:
@@ -2113,8 +2197,12 @@ def build_pipe_network(mesh: Mesh3D | AdaptiveMesh, config: PipeNetworkConfig,
     return network
 
 
-# ------------------------------------------------------------------ the engine
-#: sand left under a lifted header, in header diameters (and at least HEADER_COVER_MIN)
+# ==============================================================================
+# THE ENGINE
+# ==============================================================================
+
+#: sand left under a lifted header, as a multiple of the header diameter [-] (and at
+#: least ``HEADER_COVER_MIN`` [m])
 HEADER_COVER = 0.25
 HEADER_COVER_MIN = 0.05
 #: room kept between two ring mains [m]
@@ -2128,6 +2216,7 @@ class HeaderDesign:
     config: PipeNetworkConfig
     sizing: object                       # src.solver.hydraulics.SizingResult
     lift: float                          # [m] header centreline into the sand
+    #: number of sizing rounds run [-]
     rounds: int
 
     def summary(self) -> str:

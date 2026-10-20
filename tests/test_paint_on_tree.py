@@ -1,24 +1,34 @@
-"""The painters that need a point, on a tree: the pipe rasteriser and the network.
+"""
+tests.test_paint_on_tree
+========================
+The painters that need a point, on a tree: the pipe rasteriser and the network.
 
-Step 6 of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``.  A mask over ``(i, j, k)`` becomes a mask
-over the cell centres and the "cells the axis crosses" walk measures the leaf edge instead
-of ``dx``/``dy``/``dz``; what the module pins is that the model painted does not move:
+WHAT IT DOES
+------------
+Step 6 of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``.  A mask over ``(i, j, k)``
+becomes a mask over the cell centres and the "cells the axis crosses" walk
+measures the leaf edge instead of ``dx``/``dy``/``dz``; what the module pins
+is that the model painted does not move:
 
-* **the rasteriser splits a centreline the same way** - the same cells with the same length
-  in each, on the uniform tree and on the ``Mesh3D`` of the same cells (the ``box_pair``
-  fixture of ``tests/conftest.py``) - including a run that sits exactly on a cell face and
-  one that leaves the box;
-* **the network paints the same leaves** - ``PipeNetwork.paint`` marks the same tube cells
-  with the same material, the same gas film and the same report, on either mesh;
-* **the wetted area stays geometric** - ``sum(pi d L_cell) = pi d L_total`` on the tree as
-  on the grid, and the cells the paint leaves out (outside the vessel, outside the domain)
-  are the same ones on both roads;
-* **a refined tree paints too** - where no structured twin exists the invariants are the
-  check: the area is still ``pi d L_total`` and every painted leaf is a cell the network's
-  centrelines reach.
+* **the rasteriser splits a centreline the same way** - the same cells with the
+  same length in each, on the uniform tree and on the ``Mesh3D`` of the same
+  cells (the ``box_pair`` fixture of ``tests/conftest.py``) - including a run
+  that sits exactly on a cell face and one that leaves the box;
+* **the network paints the same leaves** - ``PipeNetwork.paint`` marks the same
+  tube cells with the same material, the same gas film and the same report, on
+  either mesh;
+* **the wetted area stays geometric** - ``sum(pi d L_cell) = pi d L_total`` on
+  the tree as on the grid, and the cells the paint leaves out (outside the
+  vessel, outside the domain) are the same ones on both roads;
+* **a refined tree paints too** - where no structured twin exists the
+  invariants are the check: the area is still ``pi d L_total`` and every
+  painted leaf is a cell the network's centrelines reach.
 
-Nothing here reads an area off the mask: the mask paints material, the centreline measures
-surface.
+HOW IT WORKS
+------------
+-> WETTED AREA <-
+   Nothing here reads an area off the mask: the mask paints material, the
+   centreline measures surface.
 """
 from __future__ import annotations
 
@@ -47,7 +57,9 @@ CENTRELINES = [
 ]
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def vessel(**kwargs) -> PipeNetworkConfig:
     """A small vessel centred in the box; the pitches are explicit to keep it quick."""
     base = dict(radius=1.5, height=5.0, band_bottom=0.3, diameter=0.04,
@@ -120,7 +132,9 @@ def distance_to_runs(centres: np.ndarray, runs) -> np.ndarray:
     return out
 
 
-# ------------------------------------------------------------- the point location
+# ==============================================================================
+# THE POINT LOCATION
+# ==============================================================================
 def test_the_tree_answers_a_point_with_its_leaf_and_the_leaf_size(box_pair):
     """The prerequisite of the step: the octree locates a point and measures its leaf.
 
@@ -151,7 +165,9 @@ def test_the_tree_answers_a_point_with_its_leaf_and_the_leaf_size(box_pair):
             octree.cell_size_at(*outside)
 
 
-# ------------------------------------------------------------- the pipe rasteriser
+# ==============================================================================
+# THE PIPE RASTERISER
+# ==============================================================================
 @pytest.mark.parametrize("points", [case[0] for case in CENTRELINES],
                          ids=[case[1] for case in CENTRELINES])
 def test_the_rasteriser_splits_a_centreline_the_same_way_on_a_tree(box_pair, points):
@@ -176,7 +192,9 @@ def test_the_rasteriser_splits_a_centreline_the_same_way_on_a_tree(box_pair, poi
     assert float(np.sum(on_tree.area)) <= on_tree.total_area * (1.0 + 1e-12)
 
 
-# --------------------------------------------------------------- the network paint
+# ==============================================================================
+# THE NETWORK PAINT
+# ==============================================================================
 def test_the_network_paints_the_same_leaves_on_a_tree(box_pair):
     """The tube cells, their material and their gas film: one model, two meshes."""
     tree, structured = box_pair()
@@ -290,7 +308,9 @@ def test_a_network_that_leaves_the_domain_books_no_length_there_on_a_tree(box_pa
     assert differences(tree, structured) == dict.fromkeys(PAINTED, 0)
 
 
-# ------------------------------------------------------------------ the refined tree
+# ==============================================================================
+# THE REFINED TREE
+# ==============================================================================
 def test_the_network_paints_a_refined_tree_and_keeps_its_area(box_pair):
     """Where no structured twin exists, the invariants are the check."""
     coarse, _structured = box_pair()

@@ -1,94 +1,107 @@
-"""Steady conduction on the adaptive octree, and the refinement that pays for itself.
-
-:mod:`src.core.octree` builds the mesh and assembles the operator; this module gives it
-the physics the structured solver has - a conductivity and a source per leaf, the leaves
-held at a fixed temperature - and the diagnostics an energy balance needs (the heat rate
-through every face, the total leaving the domain, the per-cell closure error).  It also
-drives the a posteriori refinement: solve coarse, look at the flux jump between
-neighbours, refine where it is large, solve again, and stop when the *objective* - the
-loss flux, the storage mean - stops moving by more than the tolerance the caller asked
-for, the same criterion :mod:`src.analysis.convergence` applies to a sequence of
-structured grids (its :class:`ConvergenceTarget` and :class:`ConvergenceLevel` are the
-vocabulary of the report this module hands back).
-
-PHYSICS CONTRACT
-----------------
-The coefficients are exactly the ones of :mod:`src.solver.matrix`: a face is
-``k_face A / (d_centers V)`` with ``k_face`` the harmonic mean of the two leaves, so a
-tree of uniform leaves and a uniform :class:`~src.core.mesh.Mesh3D` of the same cell size
-assemble **the same matrix** and the two solvers agree to the tolerance of the linear
-solve: measured on a two-layer wall (1-D) and on a slab with a source in half the box
-(2-D) the largest temperature difference is 2.5e-10 K and 2.0e-11 K, against a CG
-tolerance of 1e-12 (``tests/test_octree_solver.py``).  The walls of an octree carry no
-face at all, so they are adiabatic by construction: the only way heat enters or leaves is
-through the leaves the caller holds at a fixed temperature, which is what
-:func:`wall_cells` and :func:`dirichlet_walls` build.
-
-WHAT THE FLUX REPORT IS
------------------------
-Every entry of ``Octree.faces()`` describes one interface with one conductance
-``g`` [W/K], so the heat rate ``q = g (T_i - T_j)`` is a single number shared by both
-cells: the flux field is conservative *by construction*, at machine precision, on any
-combination of levels.  ``OctreeSteadyResult.divergence`` is the divergence of that
-field, so summing it over the mesh cancels face by face - measured at 4.5e-13 W on a
-graded test tree (288 leaves, 768 faces, up to 459 W per face), which is a part in 1e-15
-of the largest rate and the round-off of the sum rather than a truncation error - while
-``total_flux``, the rate leaving the free region through the fixed cells, equals the power
-the sources deposit there to the residual of the linear solve (measured 1.1e-15 of the
-largest face rate for a 10 kW model).  The heat rate is reported positive from the first cell
-of the entry to the second; a caller wanting the flow through one wall wants
-``wall_cells`` and the flux of the entries on it.
-
-WHEN THE ADAPTIVE MESH PAYS
----------------------------
-It pays when the error is *concentrated* and the objective is **local**: a hot spot in a
-sand bed, a boundary layer, a pipe wall.  Cells are then spent on the feature and the far
-field stays coarse.  Measured on the battery of ``tests/test_octree_solver.py`` - a
-0.25 m cube of source of 100 W in a 1 m box, every wall at 300 K, the objective the
-volume-weighted mean temperature of the source region - the cycle starting from 64 leaves
-reaches 0.88 K of the 4096-leaf answer after two rounds and 176 leaves, against 6.83 K
-for a uniform tree of 512 leaves: **7.8x closer with 2.9x fewer cells**.  It does *not*
-pay, and this module says so rather than burning cells, when:
-
-* the field is smooth everywhere (a uniform source in a box): the local error is spread
-  evenly, so refining a region moves the error somewhere else, and the objective stalls
-  on the first round;
-* the objective is an integral over a smooth far field: on the battery above the same
-  adaptive tree that answers the hot spot 7.8x better than the uniform one is *worse* on
-  the whole field (3.60 K of root-mean-square error against 2.31 K) and on the mean of
-  the whole box, because the far field, which adaptivity leaves coarse, is what those
-  numbers weigh.  A local objective is what it buys, not a global one;
-* the feature is invisible to the solution: a source or a material boundary falling
-  *inside* a leaf changes the physics the estimator cannot see (leaves are homogeneous by
-  definition).  No residual estimator finds it - the caller must start from a mesh whose
-  leaf faces already sit on the interface;
-* the answer is an integral that conservation fixes anyway: the total loss of a closed
-  box is the source power on *any* mesh, so ``total_flux`` is not an objective
-  refinement can improve.  Use the storage mean or the peak;
-* the tree is too coarse to read: the estimator is a second difference, so a leaf must
-  have a face on both sides of an axis to say anything.  A tree of two cells per side has
-  one face per axis, and every leaf of it touches a wall - the honest answer there is
-  "nothing to refine", which is what the report says;
-* the linear algebra dominates: see the cost below.
-
-MEASURED COST
--------------
-Windows x64, Python 3.13, SciPy CG, i3-1125G4, with three other test processes running
-at the same time (so the numbers are pessimistic by a factor of two): a uniform tree of
-64 leaves (144 faces) solves in 4 ms, 512 leaves (1344 faces) in 29-45 ms, 4096 leaves
-(11_520 faces) in 0.29-0.48 s and 32_768 leaves (95_232 faces) in about 1.5 s.  That is
-**45 to 120 us per leaf, flat in the tree size**, and the split on the 4096-leaf tree is
-68 ms of face list plus 109 ms of assembly against 64 ms of CG - three quarters the
-geometry, one quarter the solve.  The refinement round on the battery above - solve,
-estimate, refine, balance, solve again - took 66 ms for 64 -> 176 leaves.
-
-The cost per leaf is flat because the Python loops over the face list and the linear
-solve grow together: a tree twice as large costs twice as much and no level of refinement
-is intrinsically more expensive than another.  The practical limit of this module is
-therefore the Python face list (about 10^5 faces per second), not the solver; past that,
-the block refinement of Afivo noted in :mod:`src.core.octree` is the next step, and it
-changes no formula here.
 """
+src.solver.octree_solver
+========================
+Steady conduction on the adaptive octree, and the refinement that pays for itself.
+
+WHAT IT DOES
+------------
+Gives the octree the physics the structured solver has - a conductivity and a
+source per leaf, the leaves held at a fixed temperature - and the diagnostics an
+energy balance needs (the heat rate through every face, the total leaving the
+domain, the per-cell closure error).  :mod:`src.core.octree` builds the mesh and
+assembles the operator; this module also drives the a posteriori refinement: solve
+coarse, look at the flux jump between neighbours, refine where it is large, solve
+again, and stop when the *objective* - the loss flux, the storage mean - stops
+moving by more than the tolerance the caller asked for, the same criterion
+:mod:`src.analysis.convergence` applies to a sequence of structured grids (its
+:class:`ConvergenceTarget` and :class:`ConvergenceLevel` are the vocabulary of the
+report this module hands back).
+
+HOW IT WORKS
+------------
+-> PHYSICS CONTRACT <-
+   The coefficients are exactly the ones of :mod:`src.solver.matrix`: a face is
+   ``k_face A / (d_centers V)`` with ``k_face`` the harmonic mean of the two
+   leaves, so a tree of uniform leaves and a uniform
+   :class:`~src.core.mesh.Mesh3D` of the same cell size assemble **the same
+   matrix** and the two solvers agree to the tolerance of the linear solve:
+   measured on a two-layer wall (1-D) and on a slab with a source in half the box
+   (2-D) the largest temperature difference is 2.5e-10 K and 2.0e-11 K, against a
+   CG tolerance of 1e-12 (``tests/test_octree_solver.py``).  The walls of an
+   octree carry no face at all, so they are adiabatic by construction: the only
+   way heat enters or leaves is through the leaves the caller holds at a fixed
+   temperature, which is what :func:`wall_cells` and :func:`dirichlet_walls`
+   build.
+
+-> THE FLUX REPORT <-
+   Every entry of ``Octree.faces()`` describes one interface with one conductance
+   ``g`` [W/K], so the heat rate ``q = g (T_i - T_j)`` is a single number shared
+   by both cells: the flux field is conservative *by construction*, at machine
+   precision, on any combination of levels.  ``OctreeSteadyResult.divergence`` is
+   the divergence of that field, so summing it over the mesh cancels face by face
+   - measured at 4.5e-13 W on a graded test tree (288 leaves, 768 faces, up to
+   459 W per face), which is a part in 1e-15 of the largest rate and the round-off
+   of the sum rather than a truncation error - while ``total_flux``, the rate
+   leaving the free region through the fixed cells, equals the power the sources
+   deposit there to the residual of the linear solve (measured 1.1e-15 of the
+   largest face rate for a 10 kW model).  The heat rate is reported positive from
+   the first cell of the entry to the second; a caller wanting the flow through
+   one wall wants ``wall_cells`` and the flux of the entries on it.
+
+-> MEASURED COST <-
+   Windows x64, Python 3.13, SciPy CG, i3-1125G4, with three other test
+   processes running at the same time (so the numbers are pessimistic by a factor
+   of two): a uniform tree of 64 leaves (144 faces) solves in 4 ms, 512 leaves
+   (1344 faces) in 29-45 ms, 4096 leaves (11_520 faces) in 0.29-0.48 s and 32_768
+   leaves (95_232 faces) in about 1.5 s.  That is **45 to 120 us per leaf, flat
+   in the tree size**, and the split on the 4096-leaf tree is 68 ms of face list
+   plus 109 ms of assembly against 64 ms of CG - three quarters the geometry, one
+   quarter the solve.  The refinement round on the battery below - solve,
+   estimate, refine, balance, solve again - took 66 ms for 64 -> 176 leaves.
+
+   The cost per leaf is flat because the Python loops over the face list and the
+   linear solve grow together: a tree twice as large costs twice as much and no
+   level of refinement is intrinsically more expensive than another.  The
+   practical limit of this module is therefore the Python face list (about 10^5
+   faces per second), not the solver; past that, the block refinement of Afivo
+   noted in :mod:`src.core.octree` is the next step, and it changes no formula
+   here.
+
+LIMITS
+------
+Adaptivity pays when the error is *concentrated* and the objective is **local**:
+a hot spot in a sand bed, a boundary layer, a pipe wall.  Cells are then spent on
+the feature and the far field stays coarse.  Measured on the battery of
+``tests/test_octree_solver.py`` - a 0.25 m cube of source of 100 W in a 1 m box,
+every wall at 300 K, the objective the volume-weighted mean temperature of the
+source region - the cycle starting from 64 leaves reaches 0.88 K of the 4096-leaf
+answer after two rounds and 176 leaves, against 6.83 K for a uniform tree of 512
+leaves: **7.8x closer with 2.9x fewer cells**.  It does *not* pay, and this module
+says so rather than burning cells, when:
+
+* the field is smooth everywhere (a uniform source in a box): the local error is
+  spread evenly, so refining a region moves the error somewhere else, and the
+  objective stalls on the first round;
+* the objective is an integral over a smooth far field: on the battery above the
+  same adaptive tree that answers the hot spot 7.8x better than the uniform one is
+  *worse* on the whole field (3.60 K of root-mean-square error against 2.31 K) and
+  on the mean of the whole box, because the far field, which adaptivity leaves
+  coarse, is what those numbers weigh.  A local objective is what it buys, not a
+  global one;
+* the feature is invisible to the solution: a source or a material boundary
+  falling *inside* a leaf changes the physics the estimator cannot see (leaves are
+  homogeneous by definition).  No residual estimator finds it - the caller must
+  start from a mesh whose leaf faces already sit on the interface;
+* the answer is an integral that conservation fixes anyway: the total loss of a
+  closed box is the source power on *any* mesh, so ``total_flux`` is not an
+  objective refinement can improve.  Use the storage mean or the peak;
+* the tree is too coarse to read: the estimator is a second difference, so a leaf
+  must have a face on both sides of an axis to say anything.  A tree of two cells
+  per side has one face per axis, and every leaf of it touches a wall - the honest
+  answer there is "nothing to refine", which is what the report says;
+* the linear algebra dominates: see the measured cost above.
+"""
+
 from __future__ import annotations
 
 import time
@@ -107,7 +120,9 @@ PerLeaf = Mapping[Leaf, float] | Callable[[Leaf], float] | np.ndarray | float
 FixedSet = Mapping[Leaf, float] | Callable[[Octree], Mapping[Leaf, float]]
 
 
-# --------------------------------------------------------------------- geometry
+# ==============================================================================
+# GEOMETRY
+# ==============================================================================
 def wall_cells(tree: Octree, face: str) -> list[Leaf]:
     """The leaves touching a box face: the cells a face condition would drive.
 
@@ -202,7 +217,9 @@ def _per_leaf(tree: Octree, values: PerLeaf | None, default: float,
     return array.astype(float, copy=True)
 
 
-# --------------------------------------------------------------------- results
+# ==============================================================================
+# RESULTS
+# ==============================================================================
 @dataclass
 class OctreeSteadyResult:
     """Steady field on a tree and the fluxes it drives."""
@@ -434,7 +451,9 @@ def _flux_jump(tree: Octree, i: np.ndarray, j: np.ndarray, axis: np.ndarray,
     return np.abs(np.where(two_sided, net, 0.0)).sum(axis=1)
 
 
-# ------------------------------------------------------------------ refinement
+# ==============================================================================
+# REFINEMENT
+# ==============================================================================
 #: a flux jump below this fraction of the largest face heat rate is round-off and not
 #: curvature: a linear field leaves residuals of about 1e-14 of the flux it carries
 _NOISE_FLOOR = 1e-12

@@ -1,16 +1,36 @@
-"""Losses analysis: power needed to hold the storage at a target temperature.
+"""
+src.analysis.losses
+===================
+Power needed to hold the storage at a target temperature.
 
+WHAT IT DOES
+------------
+Iterates the heater power (or the gas loop's external power) until the mean
+storage temperature reaches ``LossesConfig.t_target``, and reports the
+converged operating point with its balance.
+
+WHY
+---
 The iterative solver used to live inside the GUI thread (with
 ``processEvents``), which made it untestable and re-entrant.  It now lives here
 and is driven by the GUI controller in a worker thread.
 
-Iteration: secant/Newton on the mean storage temperature, with an
-under-relaxation factor and a bounded power floor.  With a gas loop the power is
-the resistors' and it reaches the bed through the pipe walls (the coupled steady
-state of :class:`~src.solver.steady.SteadyStateSolver`); without one it is a
-uniform source over the sand.  The model is the mesh's as built - the same ground,
-the same envelope the steady run sees - unless ``h_ground`` asks for a convective
-ground explicitly, which then stays on the mesh.
+HOW IT WORKS
+------------
+-> ITERATION <-
+   Secant/Newton on the mean storage temperature, with an under-relaxation
+   factor and a bounded power floor.
+
+-> HEATING PATH <-
+   With a gas loop the power is the resistors' and it reaches the bed through
+   the pipe walls (the coupled steady state of
+   :class:`~src.solver.steady.SteadyStateSolver`); without one it is a uniform
+   source over the sand.
+
+-> THE MODEL <-
+   The model is the mesh's as built - the same ground, the same envelope the
+   steady run sees - unless ``h_ground`` asks for a convective ground
+   explicitly, which then stays on the mesh.
 """
 from __future__ import annotations
 

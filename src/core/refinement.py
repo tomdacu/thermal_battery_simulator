@@ -1,23 +1,52 @@
-"""Mesh refinement: turn *physical* targets into cell sizes.
+"""
+src.core.refinement
+===================
+Mesh refinement: turn *physical* targets into cell sizes.
 
-The user asks for cells of a given size in a region of the domain (the storage, the
-insulation, the sheath of a heater); this module turns that request into the edges of
-a graded grid.  The rules are:
+WHAT IT DOES
+------------
+The user asks for cells of a given size in a region of the domain (the storage,
+the insulation, the sheath of a heater); this module turns that request into
+the edges of a graded grid, axis by axis, within a cell budget.
 
-* a **band** declares the size a slice of an axis needs;
-* outside the bands the size follows a **linear ramp** ``h + (growth-1)*distance``, so
-  the ratio between neighbouring cells never exceeds ``growth`` (a cell of size ``h``
-  can grow by ``(growth-1)*h`` per step) — an exponential ramp would look shorter but
-  its per-cell ratio grows with the cell size;
-* the size field is a plain function of the coordinate, so a request and its mirror
-  image give mirrored grids: symmetric targets, symmetric mesh;
-* inside a band the cells are placed by **equidistributing the density** ``1/h``, so
-  the local size follows the field, a uniform field gives an exactly uniform grid and
-  the last cell of a band absorbs the remainder (never a sliver);
-* band boundaries stay **exactly on grid lines**, so the geometry masks never split a
-  cell, and the axis ends exactly on the domain;
-* a **cell budget** only limits the request: if the targets do not fit, every target is
-  scaled by one common factor until they do (the finest grid that fits is returned).
+HOW IT WORKS
+------------
+-> BANDS <-
+   A **band** declares the size a slice of an axis needs.  Overlapping bands
+   are partitioned at every declared boundary and the overlap takes the finest
+   target, which is what a user expects.
+
+-> RAMP <-
+   Outside the bands the size follows a **linear ramp**
+   ``h + (growth-1)*distance``, so the ratio between neighbouring cells never
+   exceeds ``growth`` (a cell of size ``h`` can grow by ``(growth-1)*h`` per
+   step) - an exponential ramp would look shorter but its per-cell ratio grows
+   with the cell size.  The size field is a plain function of the coordinate,
+   so a request and its mirror image give mirrored grids: symmetric targets,
+   symmetric mesh.
+
+-> EQUIDISTRIBUTION <-
+   Inside a band the cells are placed by **equidistributing the density**
+   ``1/h``, so the local size follows the field, a uniform field gives an
+   exactly uniform grid and the last cell of a band absorbs the remainder
+   (never a sliver).
+
+-> BAND BOUNDARIES <-
+   Band boundaries stay **exactly on grid lines**, so the geometry masks never
+   split a cell, and the axis ends exactly on the domain.
+
+-> CELL BUDGET <-
+   A **cell budget** only limits the request: if the targets do not fit, every
+   target is scaled by one common factor until they do (the finest grid that
+   fits is returned).  The automatic mesh search uses :meth:`GridSpec.scaled`,
+   so level *k* is ``scaled(refine ** k)``: the grid keeps its shape and only
+   gets finer.
+
+LIMITS
+------
+An axis with no band gets one background band over its whole length in
+:meth:`GridSpec.edges`, sized by the coarsest declared target.  A request that
+cannot be fitted even by scaling raises ``RuntimeError``.
 """
 from __future__ import annotations
 
@@ -27,12 +56,18 @@ from dataclasses import dataclass
 import numpy as np
 
 
+# ==============================================================================
+# BANDS AND EDGES
+# ==============================================================================
 @dataclass(frozen=True)
 class Band:
     """A slice of one axis with the cell size that region needs [m]."""
 
+    #: start of the band on its axis [m].
     start: float
+    #: end of the band on its axis [m].
     end: float
+    #: cell size the band asks for [m].
     target: float
 
     @property
@@ -198,6 +233,9 @@ def bands_from_triples(items: Iterable[tuple[float, float, float]]) -> list[Band
             if e - s > 0 and t > 0]
 
 
+# ==============================================================================
+# THE GRID SPEC
+# ==============================================================================
 @dataclass(frozen=True)
 class GridSpec:
     """Refinement targets of the three axes plus the shared knobs.
@@ -207,9 +245,13 @@ class GridSpec:
     say "outside the refined regions use this size".
     """
 
+    #: bands along x [m].
     x: tuple[Band, ...] = ()
+    #: bands along y [m].
     y: tuple[Band, ...] = ()
+    #: bands along z [m].
     z: tuple[Band, ...] = ()
+    #: largest allowed neighbour size ratio [-]; the ramp slope is ``growth - 1``.
     growth: float = 1.3
     #: total cell budget: it only limits the request (see :meth:`edges`)
     max_cells: int = 1_500_000

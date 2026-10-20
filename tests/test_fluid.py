@@ -1,9 +1,32 @@
-"""The fluid loop: effectiveness relation, conservation, and the two regimes.
-
-The point of these tests is the physics the lumped film model cannot represent: a
-storage discharges with a large NTU, where the extraction is limited by the *flow*
-(``m_dot c_p dT``) and not by the area (``h A dT``).
 """
+tests.test_fluid
+================
+The fluid loop: effectiveness relation, conservation, and the two regimes.
+
+WHAT IT DOES
+------------
+Pins the physics the lumped film model cannot represent: a storage discharges
+with a large NTU, where the extraction is limited by the *flow*
+(``m_dot c_p dT``) and not by the area (``h A dT``).
+
+The checks run from the rasterised pipe - the wetted area is the geometric
+one, not the voxel mask - through the film coefficient against its
+correlations and the effectiveness relation, to the power leaving the fluid
+entering the solid, the area-limited and flow-limited regimes, the lumped
+model that would overstate the extraction, and the loop itself: a closed loop
+without external power settles at the wall temperature, the resistors charge
+the bed while the exchanger discharges it, the bank splits the flow and keeps
+the total power, and an impossible operating point is refused.
+
+They then cover the hydraulics - the classical friction factors, the pressure
+drop scaling with the square of the flow, pressure as the cheap lever of a
+gas loop, the circulation loss against both denominators, a pressurised loop
+using the density of its pressure, and a circuit that drops its own pressure
+being flagged - and the layouts: the staggered bank against the published
+pitches, a tall bundle flagged for the header limit, and a pitch smaller than
+the tube refused.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -30,7 +53,9 @@ def vertical_run(mesh: Mesh3D, diameter: float = 0.05):
                           diameter, name="riser")
 
 
-# ------------------------------------------------------------------ geometry
+# ==============================================================================
+# GEOMETRY
+# ==============================================================================
 def test_the_rasterised_area_is_the_geometric_one():
     """The wetted area must come from pi d L, not from the voxel mask."""
     mesh = uniform_bed()
@@ -55,7 +80,9 @@ def test_a_bank_splits_the_same_total_area_between_the_pipes():
     assert total == pytest.approx(4 * np.pi * 0.05 * mesh.Lz, rel=1e-9)
 
 
-# --------------------------------------------------------------------- film
+# ==============================================================================
+# FILM
+# ==============================================================================
 def test_the_film_coefficient_follows_the_correlations():
     fluid = Fluid()
     # laminar: Nu = 3.66 -> h = 3.66 k / d
@@ -71,7 +98,9 @@ def test_the_film_coefficient_follows_the_correlations():
     assert re > 4000.0                     # the case above is really turbulent
 
 
-# --------------------------------------------------------------- behaviour
+# ==============================================================================
+# BEHAVIOUR
+# ==============================================================================
 def test_a_uniform_wall_gives_the_effectiveness_relation():
     mesh = uniform_bed()
     run = vertical_run(mesh)
@@ -177,7 +206,9 @@ def test_an_impossible_operating_point_is_refused():
                   external_power=-60_000.0).solve(mesh)
 
 
-# ------------------------------------------------------------------ hydraulics
+# ==============================================================================
+# HYDRAULICS
+# ==============================================================================
 def test_the_friction_factor_matches_the_classical_values():
     from src.solver.fluid import friction_factor
     # laminar: f = 64/Re
@@ -265,7 +296,9 @@ def test_a_circuit_that_drops_its_own_pressure_is_flagged():
     assert any("incompressible" in note for note in result.notes)
 
 
-# ------------------------------------------------------------------- layouts
+# ==============================================================================
+# LAYOUTS
+# ==============================================================================
 def test_the_staggered_bank_follows_the_published_pitches():
     from src.core.pipes import staggered_bank
     mesh = uniform_bed(spacing=0.25, cells=16)          # 4 m box

@@ -1,12 +1,40 @@
-"""Figures for the README: geometry, fields, mesh, and the gas-loop schema.
+"""
+scripts.figures
+===============
+Figures for the README: geometry, fields, mesh, and the gas-loop schema.
 
+WHAT IT DOES
+------------
+Builds the documentation pictures from the code: the buried pipe bundle, a
+steady temperature slice, the graded mesh, the 2:1 octree concept, the closed
+gas loop and the flow/effectiveness design curves.  Output goes to
+``docs/figures/``.
+
+WHY
+---
+Everything is generated offscreen and deterministically, so the pictures in
+the documentation are reproducible from the code that produced them instead
+of being one-off screenshots.
+
+HOW IT WORKS
+------------
+-> OFFSCREEN RENDERING <-
+   Qt runs with ``QT_QPA_PLATFORM=offscreen``, matplotlib with the ``Agg``
+   backend and PyVista with ``pv.OFF_SCREEN = True``, so the script needs no
+   display and opens no window.
+
+-> FIGURE SET <-
+   ``battery_with_pipes`` draws the two riser rows on their manifold rings,
+   ``temperature_field`` a steady slice of the small battery,
+   ``graded_mesh`` the banded grid in cross-section, ``adaptive_concept``
+   the 2:1 octree rule, ``gas_loop_schema`` the closed circuit and
+   ``design_curves`` effectiveness and blower share against the mass flow.
+
+OPTIONS
+-------
 Run it from the repository root::
 
     python scripts/figures.py
-
-Everything is generated offscreen and deterministically, so the pictures in the
-documentation are reproducible from the code that produced them instead of being
-one-off screenshots.  Output goes to ``docs/figures/``.
 """
 from __future__ import annotations
 
@@ -22,14 +50,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt          # noqa: E402
 import numpy as np                       # noqa: E402
 import pyvista as pv                     # noqa: E402
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch  # noqa: E402
+from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 from src.analysis.balance import compute_balance        # noqa: E402
 from src.core.geometry import create_small_test_geometry  # noqa: E402
 from src.core.mesh import Mesh3D                        # noqa: E402
-from src.core.pipes import rasterize_pipe, staggered_bank  # noqa: E402
 from src.core.refinement import Band, GridSpec          # noqa: E402
-from src.solver.fluid import Fluid, FluidLoop, pipe_h   # noqa: E402
+from src.solver.fluid import Fluid                      # noqa: E402
 from src.solver.steady import SolverConfig, SteadyStateSolver  # noqa: E402
 
 OUT = pathlib.Path("docs/figures")
@@ -46,7 +73,9 @@ def _save(fig, name: str, dpi: int = 190) -> None:
     print(f"  {name}")
 
 
-# ---------------------------------------------------------------------------
+# ==============================================================================
+# FIGURE BUILDERS
+# ==============================================================================
 def battery_with_pipes() -> None:
     """Annular riser bundle: every manifold ring carries risers and is connected.
 
@@ -103,7 +132,7 @@ def battery_with_pipes() -> None:
     plot.add_mesh(inlet.tube(radius=0.105, n_sides=12), color=COLD, smooth_shading=True)
     outlet = pv.Line((rows[0][0], 0.0, z1), (radius + 1.1, 0.0, z1))
     plot.add_mesh(outlet.tube(radius=0.105, n_sides=12), color=HOT, smooth_shading=True)
-    for x_sign, colour in ((-1.0, COLD), (1.0, HOT)):
+    for x_sign in (-1.0, 1.0):
         flange = pv.Cylinder(center=(x_sign * (radius + 0.1), 0.0, z0 if x_sign < 0 else z1),
                              direction=(1, 0, 0), radius=0.17, height=0.16, resolution=28)
         plot.add_mesh(flange, color="#b9b9b9", smooth_shading=True)
@@ -145,9 +174,6 @@ def graded_mesh() -> None:
                     z=(Band(0, 2.4, 0.25),), growth=1.3)
     edges = spec.edges(2.4, 2.4, 2.4)
     fig, ax = plt.subplots(figsize=(7.2, 6.4))
-    for x in edges[0]:
-        for y in edges[1]:
-            pass
     for x0, x1 in zip(edges[0][:-1], edges[0][1:], strict=True):
         for y0, y1 in zip(edges[1][:-1], edges[1][1:], strict=True):
             ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,

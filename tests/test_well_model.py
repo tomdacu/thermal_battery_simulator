@@ -1,12 +1,20 @@
-"""The tube in its cell (Peaceman's well model) and the whole gas circuit.
+"""
+tests.test_well_model
+=====================
+The tube in its cell (Peaceman's well model) and the whole gas circuit.
 
-A tube is a line inside a cell of the bed.  Without a correction the exchange depends
-on the cell: the bed between the wall and the cell centre is counted as whatever the
-mesh makes of it.  With the well model the exchange of one tube in a square of sand held
-at a fixed temperature is the conduction shape factor of a cylinder centred in a square
-(Incropera et al., *Fundamentals of Heat and Mass Transfer*, Table 4.1:
-``S = 2 pi L / ln(1.08 w / D)``) in series with the gas film, on a coarse and on a fine
-mesh alike.  The circuit tests pin the network graph: mass conserved at every node, the
+WHAT IT DOES
+------------
+A tube is a line inside a cell of the bed.  Without a correction the exchange
+depends on the cell: the bed between the wall and the cell centre is counted as
+whatever the mesh makes of it.  With the well model the exchange of one tube
+in a square of sand held at a fixed temperature is the conduction shape factor
+of a cylinder centred in a square (Incropera et al., *Fundamentals of Heat and
+Mass Transfer*, Table 4.1: ``S = 2 pi L / ln(1.08 w / D)``) in series with the
+gas film, on a coarse and on a fine mesh alike.  A cell smaller than the tube
+is left uncorrected.
+
+The circuit tests pin the network graph: mass conserved at every node, the
 headers exchanging, the bed receiving exactly the external power.
 """
 from __future__ import annotations
@@ -19,12 +27,18 @@ from src.core.mesh import BoundaryType
 from src.core.pipes import rasterize_pipe
 from src.solver.fluid import Fluid, FluidLoop, pipe_h
 
-SIDE = 2.4          # [m] the square of sand
-BORE = 0.046        # [m]
-WALL = 0.002        # [m]
-FLOW = 0.01         # [kg/s]
-T_GAS = 700.0       # [K] gas in
-T_SAND = 300.0      # [K] the sides of the square
+#: Side of the square of sand [m].
+SIDE = 2.4
+#: Tube bore [m].
+BORE = 0.046
+#: Tube wall thickness [m].
+WALL = 0.002
+#: Gas mass flow through the tube [kg/s].
+FLOW = 0.01
+#: Gas temperature at the inlet [K].
+T_GAS = 700.0
+#: Temperature held on the sides of the square [K].
+T_SAND = 300.0
 
 
 def _tube_in_a_square(cell: float, well: bool) -> float:

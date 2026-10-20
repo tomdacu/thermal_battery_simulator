@@ -1,10 +1,20 @@
-"""Thin steel on coarse cells, and the soil under the foundation.
+"""
+tests.test_thin_layers_and_soil
+===============================
+Thin steel on coarse cells, and the soil under the foundation.
 
-A 20 mm shell on 100 mm cells used to be painted as 100 mm of steel over the insulation:
-five times the steel's heat capacity, and a fifth of the insulation gone.  The outer cell
-is now a blend - steel and insulation in series across it, their capacities by volume -
-so the insulation keeps its resistance and the shell its own mass.  The soil layer puts
-the deep-ground temperature a few metres down instead of right under the pad.
+WHAT IT DOES
+------------
+A 20 mm shell on 100 mm cells used to be painted as 100 mm of steel over the
+insulation: five times the steel's heat capacity, and a fifth of the insulation
+gone.  The outer cell is now a blend - steel and insulation in series across
+it, their capacities by volume - so the insulation keeps its resistance and
+the shell its own mass.
+
+The soil layer puts the deep-ground temperature a few metres down instead of
+right under the pad: every soil cell sits below the ground level, none is
+excluded, the side faces stay internal (the soil goes on) and the bottom face
+is Dirichlet.
 """
 from __future__ import annotations
 

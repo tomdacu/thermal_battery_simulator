@@ -1,13 +1,23 @@
-"""The a priori plan and the regions a mesh refines: the air is not one of them.
+"""
+tests.test_mesh_plan
+====================
+The a priori plan and the regions a mesh refines: the air is not one of them.
 
-The plan answers two questions: how fine does each *region of the battery* have to be
-(``plan_regions``: ``thickness / N`` across a layer, ``2 k / h`` under a convective
-surface), and *where* are those regions (``active_regions`` as boxes, one
-:class:`~src.core.adaptive_mesh.RefinementBand` each).  What the tests below pin is the
-second answer, because it is the one that spends cells: the boxes cover the vessel - the
-sand, the insulation, the shell, the casing the ambient film sits on - and none of them
-covers the air around it, which ``apply_environment`` excludes from the problem and holds
-at the ambient temperature.
+WHAT IT DOES
+------------
+The plan answers two questions: how fine does each *region of the battery*
+have to be (``plan_regions``: ``thickness / N`` across a layer, ``2 k / h``
+under a convective surface), and *where* are those regions
+(``active_regions`` as boxes, one
+:class:`~src.core.adaptive_mesh.RefinementBand` each).
+
+What the tests below pin is the second answer, because it is the one that
+spends cells: the boxes cover the vessel - the sand, the insulation, the
+shell, the casing the ambient film sits on - and none of them covers the air
+around it, which ``apply_environment`` excludes from the problem and holds at
+the ambient temperature.  The bands keep every target, an empty request is
+rejected, the shared battery's plan is physical, and a ring region refines the
+annulus but not the air at its corners.
 """
 from __future__ import annotations
 

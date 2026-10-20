@@ -1,10 +1,33 @@
-"""Slot guard: a failure inside a slot is reported where the user can see it.
+"""
+gui.safe
+========
+Slot guard: a failure inside a slot is reported where the user can see it.
 
-PySide6 prints the traceback of an exception raised in a slot and keeps running, so a
-mistake in one handler no longer takes the process down - but the error lands on a
-console that a windowed or packaged run does not have, and a handler that silently does
-nothing is a defect the user cannot report.  Wrapping the user-interaction slots keeps
-the traceback *and* routes the message to the log tab and the status bar.
+WHAT IT DOES
+------------
+``safe_slot`` wraps the user-interaction slots of the window.  An exception
+raised inside a wrapped slot is printed as a traceback and also routed to the
+log tab and the status bar, instead of disappearing into a console.
+
+WHY
+---
+PySide6 prints the traceback of an exception raised in a slot and keeps
+running, so a mistake in one handler no longer takes the process down - but the
+error lands on a console that a windowed or packaged run does not have, and a
+handler that silently does nothing is a defect the user cannot report.
+Wrapping the user-interaction slots keeps the traceback *and* routes the
+message to the log tab and the status bar.
+
+HOW IT WORKS
+------------
+-> ARITY <-
+   Qt may pass signal arguments the slot does not declare, so the wrapper
+   counts the positional parameters of the method, excludes ``self``, and
+   forwards only that many positional arguments.
+-> FAILURE PATH <-
+   The traceback is printed; ``[error] <qualname>: <type>: <text>`` goes to
+   ``self.log`` when the owner has one, and the status bar shows
+   ``<type>: <text>`` when the owner is a window.  The wrapper returns ``None``.
 """
 from __future__ import annotations
 

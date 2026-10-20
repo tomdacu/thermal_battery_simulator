@@ -1,14 +1,49 @@
-"""Run configuration and the worker/state machine that executes a simulation.
+"""
+gui.controller
+==============
+Run configuration and the worker/state machine that executes a simulation.
 
-The GUI never runs physics: it assembles a :class:`RunConfig` from its widgets
-and hands it to :class:`SimulationController`, which owns the threads, the
-progress reporting and the cancel flag.  All the numerics happen in ``src/``.
+WHAT IT DOES
+------------
+Defines ``RunConfig``, the run description in SI/Kelvin units, and
+``SimulationController``, which starts, cancels and finishes the runs on behalf
+of the window.  ``ANALYSIS_TYPES`` holds the analysis names the analysis panel
+offers.
 
-Every analysis runs the plant: when the window has painted a pipe network, the gas
-loop of that network is the heat path of the run - the steady state and the losses
-analysis couple it (``SteadyStateSolver(fluid_loop=...)``), the transient marches it
-step by step - and each run sets the state it needs on the mesh itself, so nothing
-a previous run left behind (a transient's last sources, its films) leaks into it.
+WHY
+---
+The GUI never runs physics: it assembles a ``RunConfig`` from its widgets and
+hands it to ``SimulationController``, which owns the threads, the progress
+reporting and the cancel flag.  All the numerics happen in ``src/``.
+
+HOW IT WORKS
+------------
+-> WORKER AND STATE MACHINE <-
+   One ``SimulationJob`` (a ``QThread``) runs one callable.  The job emits
+   ``progressed(int, str)`` from the work, ``completed(object)`` with the result
+   and ``failed(str)`` with the exception; the controller re-emits progress,
+   the log, the finished result and the failure, and exposes ``running``.
+   ``start`` refuses a second job while one is running.  Cancel sets the job's
+   stop flag and requests interruption; the callable receives ``should_stop``
+   and unwinds.  The job's own ``finished`` clears the job and emits
+   ``running_changed(False)``.
+-> ANALYSIS ROUTES <-
+   ``standby`` solves the storage held at a target temperature for the power
+   that holds it (the losses), with the gas loop coupled when a network exists;
+   ``automesh`` runs the adaptive search, each level built and - when a pipe
+   recipe is present - painted with the network, then measured by a tight
+   standby solve; ``transient`` marches the profiles, optionally from a standby
+   pre-run.
+-> THE PLANT IS THE HEAT PATH <-
+   Every analysis runs the plant: when the window has painted a pipe network,
+   the gas loop of that network is the heat path of the run - the steady state
+   and the losses analysis couple it (``SteadyStateSolver(fluid_loop=...)``),
+   the transient marches it step by step - and each run sets the state it needs
+   on the mesh itself, so nothing a previous run left behind (a transient's
+   last sources, its films) leaks into it.
+-> SHUTDOWN <-
+   ``wait`` blocks until the worker stops: closing the window must not destroy
+   a running ``QThread``.
 """
 from __future__ import annotations
 

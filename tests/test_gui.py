@@ -1,9 +1,24 @@
-"""GUI smoke test: the window must build a mesh and survive a full run cycle.
-
-Runs head-less; skipped when PySide6 is not installed.  The 3D view is disabled
-unless a display is available, so the test exercises the panels, the controller
-and the result wiring without needing OpenGL.
 """
+tests.test_gui
+==============
+GUI smoke test: the window must build a mesh and survive a full run cycle.
+
+WHAT IT DOES
+------------
+Runs head-less; skipped when PySide6 is not installed.  The 3D view is
+disabled unless a display is available, so the test exercises the panels, the
+controller and the result wiring without needing OpenGL.
+
+Opens the window on the panel defaults and checks, in order: the build paints
+the plant's network and the mesh in kelvin; the run configuration is read from
+the widgets; a steady run fills every result panel and a transient run
+produces a time series; an invalid geometry is refused without clipping; the
+Mesh tab solves the standby case on a tree, end to end through the controller,
+and its automatic search refines a tree and adopts the plan; the window fits
+the screen and explanations take no room; and a model edit makes the built
+mesh stale until a run rebuilds it.
+"""
+
 from __future__ import annotations
 
 import os

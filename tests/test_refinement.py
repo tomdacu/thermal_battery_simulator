@@ -1,4 +1,19 @@
-"""Mesh refinement tests: the graded grid must be predictable and exact."""
+"""
+tests.test_refinement
+=====================
+The graded grid must be predictable and exact.
+
+WHAT IT DOES
+------------
+Checks the refiners in ``src/core/refinement.py``: a uniform request gives an
+exactly uniform grid, the grid starts at zero and ends exactly at the domain,
+band boundaries land on grid lines (otherwise a mask splits a cell), a refined
+region gets the requested size, the growth between neighbours stays bounded, no
+sliver cells appear, the cell budget is respected by scaling the targets, the
+partition keeps the finest target in the overlap, the size lookup used to size
+element masks is consistent, and degenerate requests are rejected or degraded
+gracefully.
+"""
 from __future__ import annotations
 
 import numpy as np

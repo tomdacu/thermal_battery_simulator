@@ -1,26 +1,48 @@
-"""Transient solver: backward Euler with a per-volume mass matrix, on either mesh.
-
-Key correctness points (each one was wrong in the previous implementation):
-
-* ``M = diag(rho*cp)`` [J/(m^3*K)].  Including the cell volume scales every time
-  constant by ``1/d^3`` and makes the result depend on the mesh resolution.
-* Dirichlet rows are replaced by ``T = T_bc`` in both the matrix and the RHS, so
-  a fixed-temperature face is exact instead of relaxing with a time constant.
-* The power profile drives ``mesh.Q_source`` on the cells flagged in
-  ``mesh.source_mask``; a run whose profile asks for power with no source cell
-  raises instead of silently heating nothing.
-* With a gas loop the profiles drive the loop, never the sand: the resistors add
-  ``power`` to the gas, the exchanger takes the extraction out of it (or returns the gas
-  at a fixed temperature), and the march is handed to the solid as an *implicit* film
-  on the pipe cells (:meth:`~src.solver.fluid.FluidResult.apply`), which is stable at
-  any step.  Without a loop the extraction is the legacy tube film or a capped sink.
-* One march, either mesh: the operators and the right-hand side are asked of the
-  mesh (``build_transient_operators``/``transient_rhs`` dispatch to the tree's own
-  assembly), and the driver is left with what the two have in common - the profiles,
-  the fluid loop, the per-step ``should_stop`` hook, the balance and the samples.
-  ``Mesh3D`` keeps its ``GridIndex`` tables and its 3-D field; a tree carries the flat
-  per-leaf vector and no index arithmetic at all.
 """
+src.solver.transient
+====================
+Transient solver: backward Euler with a per-volume mass matrix, on either mesh.
+
+WHAT IT DOES
+------------
+Marches the packed-bed field in time under a power profile and an extraction
+profile, with or without a closed gas loop, and samples the run into
+:class:`~src.solver.results.TransientResults`.  Each correctness point below was
+wrong in the previous implementation.
+
+HOW IT WORKS
+------------
+-> MASS MATRIX <-
+   ``M = diag(rho*cp)`` [J/(m^3*K)].  Including the cell volume scales every
+   time constant by ``1/d^3`` and makes the result depend on the mesh
+   resolution.
+
+-> DIRICHLET ROWS <-
+   Replaced by ``T = T_bc`` in both the matrix and the RHS, so a
+   fixed-temperature face is exact instead of relaxing with a time constant.
+
+-> POWER PROFILE <-
+   The profile drives ``mesh.Q_source`` on the cells flagged in
+   ``mesh.source_mask``; a run whose profile asks for power with no source cell
+   raises instead of silently heating nothing.
+
+-> GAS LOOP <-
+   With a gas loop the profiles drive the loop, never the sand: the resistors
+   add ``power`` to the gas, the exchanger takes the extraction out of it (or
+   returns the gas at a fixed temperature), and the march is handed to the solid
+   as an *implicit* film on the pipe cells
+   (:meth:`~src.solver.fluid.FluidResult.apply`), which is stable at any step.
+   Without a loop the extraction is the legacy tube film or a capped sink.
+
+-> ONE MARCH, EITHER MESH <-
+   The operators and the right-hand side are asked of the mesh
+   (``build_transient_operators``/``transient_rhs`` dispatch to the tree's own
+   assembly), and the driver is left with what the two have in common - the
+   profiles, the fluid loop, the per-step ``should_stop`` hook, the balance and
+   the samples.  ``Mesh3D`` keeps its ``GridIndex`` tables and its 3-D field; a
+   tree carries the flat per-leaf vector and no index arithmetic at all.
+"""
+
 from __future__ import annotations
 
 import time
@@ -47,6 +69,9 @@ if TYPE_CHECKING:                      # the tree is the target, not a runtime d
     from ..core.adaptive_mesh import AdaptiveMesh
 
 
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 @dataclass
 class TransientConfig:
     """Time stepping, initial state and the two driving profiles."""
@@ -87,6 +112,9 @@ class TransientConfig:
         return problems
 
 
+# ==============================================================================
+# THE SOLVER
+# ==============================================================================
 class TransientSolver:
     """Time integration of the non-linear-free heat equation (Backward Euler).
 
@@ -389,6 +417,9 @@ class TransientSolver:
         return results
 
 
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
 def run_transient_simulation(mesh: Mesh3D | AdaptiveMesh, config: TransientConfig,
                              solver_config: SolverConfig = None,
                              progress_callback: Callable[[int, str], None] | None = None,

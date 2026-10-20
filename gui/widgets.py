@@ -1,13 +1,45 @@
-"""Small widget factories shared by the GUI panels.
+"""
+gui.widgets
+===========
+Small widget factories shared by the GUI panels.
 
+WHAT IT DOES
+------------
+Builds the spin boxes, combos, check boxes, buttons, hints, info labels and
+scroll areas the panels are made of, and the ``FormPanel`` wrapper that keeps a
+form's rows and their accessors together.
+
+WHY
+---
 Every combo stores its machine value in ``itemData``, so no panel has to map
-translated label strings back to numbers - the failure mode that silently pinned
-tolerance/precision/thread selectors to their defaults.
+translated label strings back to numbers - the failure mode that silently
+pinned tolerance/precision/thread selectors to their defaults.
 
-Explanations never take room in a form: a control's explanation is its tooltip, and the
-row's label carries an "ⓘ" when there is one; a section's explanation is one small "ⓘ"
-line whose tooltip holds the text.  Tooltips are rich text, so Qt wraps them instead of
-drawing one line wider than the screen.
+HOW IT WORKS
+------------
+-> EXPLANATIONS <-
+   Explanations never take room in a form: a control's explanation is its
+   tooltip, and the row's label carries an "ⓘ" when there is one; a section's
+   explanation is one small "ⓘ" line whose tooltip holds the text.  Tooltips
+   are rich text, so Qt wraps them instead of drawing one line wider than the
+   screen.
+-> SIGNAL ADAPTER <-
+   Qt hands the control's own value to the callback (``valueChanged(float)``,
+   ``currentIndexChanged(int)``, ``toggled(bool)``, ``clicked(bool)``).
+   PySide6 forwards it to a Python callable that takes it and drops it for one
+   that does not - but a bound ``Signal.emit`` is a builtin it cannot inspect,
+   so a value-less signal *refuses* the argument where PyQt6 dropped it
+   silently and the notification stops arriving.  Those are wrapped to be
+   called with no arguments at all.  A callback that wants the value simply
+   declares the parameter; a signal that takes arguments is connected with its
+   own arity (as ``controller.py`` does), not here.
+-> CHILD LOOKUP <-
+   ``findChildren`` takes a single type - PySide6 rejects the tuple of types
+   that PyQt6 accepted - so ``spin_boxes`` merges the double and integer spin
+   boxes into one list.
+-> VALUES <-
+   ``FormPanel.value`` returns the value of a spin box, the ``currentData`` of
+   a combo (the text when that is ``None``) or the state of a check box.
 """
 from __future__ import annotations
 

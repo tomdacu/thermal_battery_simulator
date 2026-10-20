@@ -1,8 +1,15 @@
-"""Scene-building tests: the rendering path is exercised head-less.
+"""
+tests.test_scene
+================
+Scene building, with the rendering path exercised head-less.
 
+WHAT IT DOES
+------------
 PyVista can build and render a scene off-screen, so every field, clip plane and
 colormap combination is checked without a display.  This is the test that would
 have caught the "list of RGB tuples as cmap" crash (PyVista wants strings).
+The same coverage runs on an adaptive tree, converted to an unstructured grid
+of its leaves, and the exported files are read back.
 """
 from __future__ import annotations
 
@@ -130,7 +137,9 @@ def test_geometry_preview_covers_the_whole_stack(plotter, model):
     assert min(zs) <= 1e-6 and max(zs) >= cyl.z_cone_apex - 1e-6
 
 
-# ------------------------------------------------------------------ an adaptive tree
+# ==============================================================================
+# AN ADAPTIVE TREE
+# ==============================================================================
 def test_a_tree_becomes_an_unstructured_grid_of_its_leaves(tree_model):
     """The leaves *are* the cells: one hexahedron each, in the mesh's own leaf order."""
     mesh = tree_model

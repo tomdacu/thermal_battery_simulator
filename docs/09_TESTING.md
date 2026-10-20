@@ -4,7 +4,7 @@
 python -m pytest tests/ -q --ignore=tests/test_gui_sweep.py   # 300 tests, the fast suite
 python -m pytest tests/ -q                                    # 311 tests incl. the GUI sweep
 python -m pytest tests/ --collect-only -q                     # what is collected, per file
-python -m ruff check src tests gui --select F,E9,B,SIM,UP      # lint
+python -m ruff check src tests gui scripts run_gui.py --select F,E9,B,SIM,UP  # lint
 python scripts/benchmark.py --max-cells 60000                 # timings per mesh size
 ```
 
@@ -38,6 +38,9 @@ informational step rather than as a red build.
 | `tests/test_convergence.py` | 9 | the automatic mesh search and its GCI report |
 | `tests/test_graded_mesh.py` | 6 | the graded grid inside the solver: exactness, mesh independence |
 | `tests/test_gui.py` | 5 | head-less GUI smoke test (skipped without PySide6) |
+
+The `tests/test_heaters.py` row is historical: the file was removed with the
+hairpin bank on 2026-09-22 ([13](13_REDESIGN.md), [03](03_GEOMETRY.md) §3).
 
 One case is a **wall-clock budget** rather than a physics statement:
 `tests/test_octree.py::test_a_tree_of_twenty_thousand_leaves_builds_and_lists_its_faces_in_under_a_second`

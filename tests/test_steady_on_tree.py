@@ -1,27 +1,39 @@
-"""The steady solver on both meshes: one physics, two assemblies.
+"""
+tests.test_steady_on_tree
+=========================
+The steady solver on both meshes: one physics, two assemblies.
 
-What this module pins, in the order the claims matter:
+WHAT IT DOES
+------------
+Pins the claims below, in the order they matter:
 
-* **the same face coefficient** - the conductance an octree face carries and the one the
-  structured neighbour tables carry are the *same number* on the same interface, because
-  :func:`src.solver.matrix.face_conductance` is one rule with two adapters
-  (:func:`~src.solver.matrix.face_coefficients` and
-  :meth:`~src.core.adaptive_mesh.AdaptiveMesh._face_table`).  The operators the two
-  assemblies build then agree on the free rows to the round-off of the arithmetic;
-* **the battery model on both meshes** - ``create_small_test_geometry()`` painted on a
-  uniform tree and on the matching ``Mesh3D`` (the ``paint_pair`` fixture), solved by the
-  same :class:`~src.solver.steady.SteadyStateSolver`: the same field leaf by leaf and the
-  same balance, with and without radiation.  The radiative share of the outer film is the
-  point of the second half: it rides on the environment film of both roads, which
-  re-evaluates it at the surface temperature the film itself drives;
-* **a refined tree** - hanging nodes against the graded grid that refines the same way:
-  the exact profile of a sourceless two-layer wall (the scheme reproduces it on any mesh,
-  which is why the kink and the flux are comparable at all), and the environment film on a
-  refined interface, where the two meshes do share their cells.
+* **the same face coefficient** - the conductance an octree face carries and
+  the one the structured neighbour tables carry are the *same number* on the
+  same interface, because :func:`src.solver.matrix.face_conductance` is one
+  rule with two adapters (:func:`~src.solver.matrix.face_coefficients` and
+  :meth:`~src.core.adaptive_mesh.AdaptiveMesh._face_table`).  The operators
+  the two assemblies build then agree on the free rows to the round-off of the
+  arithmetic;
+* **the battery model on both meshes** - ``create_small_test_geometry()``
+  painted on a uniform tree and on the matching ``Mesh3D`` (the ``paint_pair``
+  fixture), solved by the same
+  :class:`~src.solver.steady.SteadyStateSolver`: the same field leaf by leaf
+  and the same balance, with and without radiation.  The radiative share of
+  the outer film is the point of the second half: it rides on the environment
+  film of both roads, which re-evaluates it at the surface temperature the film
+  itself drives;
+* **a refined tree** - hanging nodes against the graded grid that refines the
+  same way: the exact profile of a sourceless two-layer wall (the scheme
+  reproduces it on any mesh, which is why the kink and the flux are comparable
+  at all), and the environment film on a refined interface, where the two
+  meshes do share their cells.
 
-The box is 8 m with 0.5 m cells for the battery (16 leaves a side, so a uniform tree and a
-uniform ``Mesh3D`` have exactly the same cells), and 1 m with a 1/16 m finest edge for the
-refined cases.
+HOW IT WORKS
+------------
+-> TEST BOX <-
+   The box is 8 m with 0.5 m cells for the battery (16 leaves a side, so a
+   uniform tree and a uniform ``Mesh3D`` have exactly the same cells), and 1 m
+   with a 1/16 m finest edge for the refined cases.
 """
 from __future__ import annotations
 
@@ -37,15 +49,22 @@ from src.core.refinement import Band, GridSpec
 from src.solver.matrix import build_steady_matrix, face_coefficients
 from src.solver.steady import SolverConfig, SteadyStateSolver
 
+#: Side of the test box [m].
 BOX = 1.0
-FINEST = 16                       # finest cells per side
-H = BOX / FINEST                  # edge of one finest cell [m]
-KINK = 0.25                       # where the two conductivities meet [m]
-#: the film-side cell of the refined cases: the whole active slab is at the finest edge
+#: Finest cells per side.
+FINEST = 16
+#: Edge of one finest cell [m].
+H = BOX / FINEST
+#: Where the two conductivities meet [m].
+KINK = 0.25
+#: The film-side cell of the refined cases: the whole active slab is at the
+#: finest edge.
 FILM = 0.5
 
 
-# ------------------------------------------------------------------- helpers
+# ==============================================================================
+# HELPERS
+# ==============================================================================
 def cell_of(structured: Mesh3D, tree: AdaptiveMesh) -> np.ndarray:
     """Flat index of the ``Mesh3D`` cell every leaf centre falls in."""
     return np.array([structured.ijk_to_linear(*structured.find_cell(*tree.centre(position)))
@@ -130,7 +149,9 @@ def wall_grid() -> Mesh3D:
     return mesh
 
 
-# --------------------------------------------------- the shared face coefficient
+# ==============================================================================
+# THE SHARED FACE COEFFICIENT
+# ==============================================================================
 def test_the_face_coefficient_is_the_same_number_on_both_roads(paint_pair):
     """One interface, two assemblies: the same conductance, so the same operator.
 
@@ -169,7 +190,9 @@ def test_the_face_coefficient_is_the_same_number_on_both_roads(paint_pair):
     assert np.abs(difference.data).max() < 1e-12 * np.abs(tree_free.data).max()
 
 
-# ------------------------------------------------------- the battery model, both roads
+# ==============================================================================
+# THE BATTERY MODEL, BOTH ROADS
+# ==============================================================================
 def test_the_battery_model_matches_on_both_meshes(paint_pair):
     """The same geometry painted twice, solved twice: the same field and the same balance."""
     tree, structured = paint_pair()
@@ -228,7 +251,9 @@ def test_the_radiant_battery_model_matches_on_both_meshes(paint_pair):
     assert abs(structured_balance.imbalance) < 1e-6 * structured_balance.p_input
 
 
-# ------------------------------------------------------------------ a refined tree
+# ==============================================================================
+# A REFINED TREE
+# ==============================================================================
 def test_a_refined_tree_matches_the_equivalent_graded_grid():
     """Hanging nodes against the graded grid: the same wall, the same law, the same flux.
 

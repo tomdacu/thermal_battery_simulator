@@ -1,16 +1,50 @@
-"""Steady-state heat solver, on either mesh.
-
-Optional radiation makes the problem non-linear (the linearised coefficient
-depends on the surface temperature); it is solved by a Picard sweep that rebuilds
-the operators until the field stops moving.  The gas loop is coupled the same way:
-with a :class:`~src.solver.fluid.FluidLoop` every sweep marches the gas on the current
-field, hands the exchange to the solid as an implicit film on the pipe cells and solves
-again, so the steady state is the plant's own - the resistors' power entering the bed
-through the pipe walls - and not a source spread over the sand.  The outer film of an excluded-air
-model is non-linear in the same way, and for the same reason: its radiative share
-is evaluated on the surface temperature the film itself drives, so every sweep
-re-evaluates it and the field and the film converge together.
 """
+src.solver.steady
+=================
+Steady-state heat solver, on either mesh.
+
+WHAT IT DOES
+------------
+Solves ``div(k grad T) + Q = 0`` with Robin, Dirichlet and Neumann faces on a
+structured :class:`~src.core.mesh.Mesh3D` or on an adaptive tree, and returns
+the flat field with its residual, its sweep count and its temperature
+statistics.
+
+HOW IT WORKS
+------------
+-> PICARD SWEEPS <-
+   Optional radiation makes the problem non-linear (the linearised coefficient
+   depends on the surface temperature); it is solved by a Picard sweep that
+   rebuilds the operators until the field stops moving.
+
+-> GAS LOOP <-
+   The gas loop is coupled the same way: with a
+   :class:`~src.solver.fluid.FluidLoop` every sweep marches the gas on the
+   current field, hands the exchange to the solid as an implicit film on the
+   pipe cells and solves again, so the steady state is the plant's own - the
+   resistors' power entering the bed through the pipe walls - and not a source
+   spread over the sand.
+
+-> EXCLUDED-AIR FILM <-
+   The outer film of an excluded-air model is non-linear in the same way, and
+   for the same reason: its radiative share is evaluated on the surface
+   temperature the film itself drives, so every sweep re-evaluates it and the
+   field and the film converge together.
+
+-> TWO MESHES <-
+   A structured mesh is assembled by
+   :func:`src.solver.matrix.build_steady_matrix` and handed to the linear layer;
+   an adaptive mesh assembles and solves itself with the same layer underneath.
+   The driver owns the warm start, the progress callback and the
+   :class:`SolverResult` vocabulary.
+
+LIMITS
+------
+``converged`` stays the linear layer's verdict.  A Picard coupling that does not
+settle within ``max_picard`` sweeps keeps the last field and reports the
+remaining change in ``notes``.
+"""
+
 from __future__ import annotations
 
 import time
@@ -34,6 +68,9 @@ if TYPE_CHECKING:                      # the tree is the target, not a runtime d
     from ..core.adaptive_mesh import AdaptiveMesh
 
 
+# ==============================================================================
+# CONFIGURATION AND RESULT
+# ==============================================================================
 @dataclass
 class SolverConfig(LinearConfig):
     """Linear settings + the non-linear/steady-specific options."""
@@ -60,6 +97,9 @@ class SolverResult:
         return mesh.unflatten_field(self.T)
 
 
+# ==============================================================================
+# THE SOLVER
+# ==============================================================================
 class SteadyStateSolver:
     """Solve ``div(k grad T) + Q = 0`` with Robin/Dirichlet/Neumann faces.
 

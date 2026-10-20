@@ -1,4 +1,28 @@
-"""Shared fixtures: small but physically complete models."""
+"""
+tests.conftest
+==============
+Shared fixtures: small but physically complete models.
+
+WHAT IT DOES
+------------
+Builds the meshes and the two-mesh pairs the test modules start from:
+
+* ``slab`` - a 1 m tall column, 1D conduction with adiabatic sides and the
+  ground at the bottom;
+* ``adiabatic_box`` - a closed box of uniform properties, pure storage plus
+  source;
+* ``storage_model`` - the complete battery of
+  :func:`~src.core.geometry.create_small_test_geometry`;
+* ``box_pair``, ``paint_pair``, ``tree_model``, ``structured_twin`` - the same
+  geometry on a uniform tree and on the ``Mesh3D`` of the same cells.
+
+An octree spans a *cube* with a power-of-two number of cells per side, so the
+structured twin has to be a cube too.  ``box_pair`` hands out a *fresh* empty
+pair on every call and ``paint_pair`` paints one geometry object twice, so a
+test can compare the two meshes leaf by leaf.  ``relative_residual`` is the
+scalar the tolerance checks use.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable

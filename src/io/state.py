@@ -1,14 +1,48 @@
-"""Persistent simulation state (HDF5).
+"""
+src.io.state
+============
+Persistent simulation state (HDF5), guarded by a hash of the geometry.
 
+WHAT IT DOES
+------------
+Reads and writes :class:`SimulationState`, a snapshot of a mesh plus the
+metadata needed to validate it: the per-cell fields, the material map, the
+face boundary conditions, a content hash of the geometry description and the
+temperature unit.
+
+WHY
+---
 The file records everything needed to decide whether a stored field is still
-compatible with the current model: the grid, the material map, a content hash of
-the geometry description and the temperature unit.  ``load_state`` refuses a
-file whose geometry hash does not match the mesh it is applied to, instead of
-silently mixing two different models.
+compatible with the current model.  ``load_state`` refuses a file whose
+geometry hash does not match the mesh it is applied to, instead of silently
+mixing two different models.
 
-Either mesh is stored: a structured :class:`~src.core.mesh.Mesh3D` writes its
-three edge lists, a tree writes the leaf list - the geometry it *is* - and both
-write the same per-cell fields, so a state file says which mesh produced it.
+HOW IT WORKS
+------------
+-> GEOMETRY HASH <-
+   The hash covers everything that changes the physics of a stored field: the
+   mesh structure, the domain size, the cell spacing, the per-material cell
+   counts, the number of source cells and the geometry parameters.  Unlike the
+   old ``(shape, sum of material ids)`` digest, moving a heater or changing a
+   material is detected.  Parameter values may be numbers or strings (material
+   names).
+
+-> TWO MESHES, ONE FORMAT <-
+   Either mesh is stored: a structured :class:`~src.core.mesh.Mesh3D` writes
+   its three edge lists, a tree writes the leaf list - the geometry it *is* -
+   and both write the same per-cell fields, so a state file says which mesh
+   produced it.
+
+-> VERIFICATION <-
+   The field shape is the cell count of the mesh the file was written on - a
+   3-D array on a grid, the flat per-leaf vector on a tree - so a file written
+   on one mesh is refused by the other by shape alone, before the hash says
+   which model it came from.
+
+LIMITS
+------
+Without ``h5py`` a save or a load raises :class:`StateError`; the module has
+no fallback format.
 """
 from __future__ import annotations
 
@@ -35,7 +69,13 @@ except ImportError:  # pragma: no cover
     h5py = None
     HAS_H5PY = False
 
-FORMAT_VERSION = 3                     # 3 added the leaf list a tree is stored as
+# ==============================================================================
+# STATE MODEL
+# ==============================================================================
+
+#: On-disk schema version [-]: 3 added the leaf list a tree is stored as.
+FORMAT_VERSION = 3
+#: Unit of every stored temperature field; the package contract is Kelvin.
 TEMPERATURE_UNIT = "K"
 
 
@@ -47,22 +87,39 @@ class StateError(RuntimeError):
 class SimulationState:
     """Snapshot of a mesh plus the metadata needed to validate it."""
 
+    #: Human-readable name of the state (the file stem when loaded).
     name: str = "state"
+    #: Epoch time of the save [s], as :func:`time.time` returned it.
     created: float = 0.0
+    #: Domain facts: ``Lx``, ``Ly``, ``Lz`` and ``spacing`` [m], ``cell_size_max``
+    #: [m], and the stored ``edges`` or ``leaves``.
     grid: dict[str, float] = field(default_factory=dict)
+    #: Content hash of the geometry (see :func:`geometry_hash`), or "" if absent.
     geometry_hash: str = ""
+    #: Geometry inputs the hash was computed from, one canonical value each.
     geometry_params: dict[str, float] = field(default_factory=dict)
+    #: Unit of ``T``; a degC file is converted to K on load.
     temperature_unit: str = TEMPERATURE_UNIT
+    #: Schema version of the file that produced the state [-].
     version: int = FORMAT_VERSION
+    #: Per-cell material ids, in the mesh's own cell order.
     material_id: np.ndarray | None = None
+    #: Absolute temperature field [K], in the mesh's own cell order.
     T: np.ndarray | None = None
+    #: Volumetric heat source field [W/m^3], in the mesh's own cell order.
     Q_source: np.ndarray | None = None
+    #: Face name -> stored boundary-condition descriptor (``"face:kind"``).
     face_bc: dict[str, str] = field(default_factory=dict)
+    #: Free-text notes, including the degC-to-K upgrade of an old file.
     notes: list[str] = field(default_factory=list)
 
     def temperature_celsius(self) -> np.ndarray:
         return self.T - T0
 
+
+# ==============================================================================
+# GEOMETRY HASH
+# ==============================================================================
 
 def _canonical(value):
     """Stable representation of a geometry parameter of any simple type."""
@@ -146,6 +203,10 @@ def geometry_hash(mesh: Mesh3D | AdaptiveMesh,
     blob = json.dumps(payload, sort_keys=True).encode()
     return hashlib.blake2b(blob, digest_size=16).hexdigest()
 
+
+# ==============================================================================
+# PERSISTENCE
+# ==============================================================================
 
 class StateManager:
     """Read/write :class:`SimulationState` objects as HDF5."""
@@ -278,6 +339,10 @@ class StateManager:
         return sorted(os.path.join(self.directory, f) for f in os.listdir(self.directory)
                       if f.endswith(".h5"))
 
+
+# ==============================================================================
+# RECONSTRUCTION
+# ==============================================================================
 
 def face_bc_from_state(state: SimulationState) -> dict[str, FaceBC]:
     """Rebuild FaceBC objects from the stored face descriptors."""

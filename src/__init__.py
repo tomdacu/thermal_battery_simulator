@@ -1,4 +1,14 @@
-"""Thermal battery simulator core: mesh, materials, geometry, profiles."""
+"""
+src
+===
+Thermal battery simulator core: mesh, materials, geometry, profiles.
+
+WHAT IT DOES
+------------
+Re-exports the public vocabulary of the simulator - constants, unit helpers,
+the mesh, the material database, the geometry and the driving profiles - and
+carries the package version.
+"""
 
 __version__ = "2.1.0"
 

@@ -1,7 +1,43 @@
-"""Index tables shared by the assembler, the flux integrals and the analysis.
+"""
+src.core.grid
+=============
+Index tables shared by the assembler, the flux integrals and the analysis.
 
-Living in :mod:`src.core` keeps the dependency graph acyclic: ``analysis`` needs
-the same neighbour tables as the solver, but must not import the solver package.
+WHAT IT DOES
+------------
+Turns a :class:`~src.core.mesh.Mesh3D` into the flat tables the solver works
+on: for every node its linear id, its six neighbour ids, the domain face it
+lies on, the cell size and face area along each axis, and its cell volume.
+Nodal fields are in Fortran order, the layout of ``mesh.field.ravel(order="F")``.
+
+WHY
+---
+Living in :mod:`src.core` keeps the dependency graph acyclic: ``analysis``
+needs the same neighbour tables as the solver, but must not import the solver
+package.
+
+HOW IT WORKS
+------------
+-> NEIGHBOURS <-
+   The six neighbour ids are clipped per axis, so a neighbour beyond the box is
+   the node itself; ``on_face`` tells the assembly where the exchange is the
+   boundary film rather than a conduction link.
+
+-> FACE FACTORS <-
+   ``A / (d_centers V)`` for each of the six faces, in the ``FACES`` order: the
+   geometric part of the face coefficients.  Built on first use, because a
+   caller that only wants the masks must not pay for six full-length arrays.
+
+-> FACE ROWS <-
+   The conservative face list of the structured mesh, one entry per interior
+   interface, in the ``(cell_i, cell_j, axis, area, d_centers)`` layout that
+   :meth:`src.core.mesh_api.MeshAPI.faces` returns for an adaptive mesh.
+
+LIMITS
+------
+Sources and sinks deposited on Dirichlet nodes never reach the solver: the rows
+are replaced by the identity, so the energy balance must not count them as
+input.
 """
 from __future__ import annotations
 
@@ -11,6 +47,7 @@ import numpy as np
 
 from .mesh import FACES, BoundaryType, Mesh3D
 
+#: cell index of each domain face, to slice the ``(Nx, Ny, Nz)`` fields.
 FACE_SLICES: dict[str, tuple] = {
     "x_min": (0, slice(None), slice(None)),
     "x_max": (-1, slice(None), slice(None)),
@@ -53,17 +90,22 @@ def dirichlet_mask(mesh: Mesh3D, index: GridIndex) -> np.ndarray:
 class GridIndex:
     """Linear-index tables of a mesh, built once and reused."""
 
-    flat: np.ndarray                     # (N,) node ids in Fortran order
-    neighbours: tuple[np.ndarray, ...]   # (W, E, S, N, D, U) node ids
-    on_face: dict[str, np.ndarray]       # bool mask per domain face
-    interior_tube: np.ndarray            # CONVECTION cells (the fluid film), box faces included
-    #: cell size along each axis broadcast to every node and flattened (Fortran):
-    #: the assembly and the flux integrals need it on every face, so it is built once
+    #: (N,) node ids in Fortran order.
+    flat: np.ndarray
+    #: (W, E, S, N, D, U) node ids.
+    neighbours: tuple[np.ndarray, ...]
+    #: bool mask per domain face.
+    on_face: dict[str, np.ndarray]
+    #: CONVECTION cells (the fluid film), box faces included.
+    interior_tube: np.ndarray
+    #: cell size along each axis broadcast to every node and flattened (Fortran
+    #: order) [m]: the assembly and the flux integrals need it on every face, so
+    #: it is built once
     sizes: tuple[np.ndarray, np.ndarray, np.ndarray]
-    #: face area normal to each axis, same layout (V is not cached: ``mesh.V`` is
-    #: a real array while the areas are broadcast views)
+    #: face area normal to each axis [m^2], same layout (V is not cached:
+    #: ``mesh.V`` is a real array while the areas are broadcast views)
     areas: tuple[np.ndarray, np.ndarray, np.ndarray]
-    #: cell volume flattened (Fortran order)
+    #: cell volume [m^3] flattened (Fortran order).
     volume: np.ndarray
     #: scratch space for the lazily built tables below (the dataclass is frozen)
     _cache: dict = field(default_factory=dict, compare=False, repr=False)

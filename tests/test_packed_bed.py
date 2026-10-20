@@ -1,13 +1,20 @@
-"""The conductivity of the packed bed: Zehner-Bauer-Schlunder with radiation.
+"""
+tests.test_packed_bed
+=====================
+The conductivity of the packed bed: Zehner-Bauer-Schlunder with radiation.
 
-Pinned: the model reduces to the gas when the grains are the gas (and the radiation is
-switched off), grows with the temperature and the grain size (the radiation across the
-voids), stays between the two phases' series and parallel bounds without radiation,
-and lands in the measured range of dry sand beds at room temperature (0.25-0.45
-W/(m K) in the sources, e.g. VDI Heat Atlas D6.3 fig. 3 and the dry-sand data of
-Farouki, CRREL 81-1; the assert is looser, 0.25-0.5, because the models differ).
-The solvers then evaluate it on the field: a steady bed at 500 degC carries the
-conductivity of 500 degC.
+WHAT IT DOES
+------------
+Pins the model: it reduces to the gas when the grains are the gas (and the
+radiation is switched off), grows with the temperature and the grain size (the
+radiation across the voids), stays between the two phases' series and parallel
+bounds without radiation, and lands in the measured range of dry sand beds at
+room temperature (0.25-0.45 W/(m K) in the sources, e.g. VDI Heat Atlas D6.3
+fig. 3 and the dry-sand data of Farouki, CRREL 81-1; the assert is looser,
+0.25-0.5, because the models differ).
+
+The solvers then evaluate it on the field: a steady bed at 500 degC carries
+the conductivity of 500 degC.
 """
 from __future__ import annotations
 

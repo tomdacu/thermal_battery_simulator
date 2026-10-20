@@ -1,49 +1,71 @@
-"""The operating cycle: charge, standby, discharge, and where the energy goes.
+"""
+src.analysis.cycle
+==================
+The operating cycle: charge, standby, discharge, and where the energy goes.
 
-A storage is judged by a cycle, not by a steady state.  This module drives the three
-phases with the transient solver and accounts for the energy in the only way that
-cannot hide a term:
+WHAT IT DOES
+------------
+Drive the three phases with the transient solver and account for the energy in
+the only way that cannot hide a term:
 
-    E_in(electric) = dE_stored + E_delivered + E_standby + E_circulation
+      E_in(electric) = dE_stored + E_delivered + E_standby + E_circulation
 
 where
 
-* ``E_in`` is what the plant draws from the grid, **blower included** (the resistors
-  heat the gas, the fan pushes it: both are electric loads of the same system);
-* ``dE_stored`` is the sensible energy above the ambient at the end of the cycle minus
-  the same at the start.  The energy still inside the bed when the discharge stops
-  (``E_unrecovered``) is the part of ``dE_stored`` the user never got: with a store that
-  starts at the ambient reference the two are the *same number*, which is why they are
-  reported as one term.  Writing ``... + E_circulation + E_unrecovered`` on top of
-  ``dE_stored`` counts the stored energy twice and never closes;
+* ``E_in`` is what the plant draws from the grid, **blower included** (the
+  resistors heat the gas, the fan pushes it: both are electric loads of the same
+  system);
+* ``dE_stored`` is the sensible energy above the ambient at the end of the cycle
+  minus the same at the start.  The energy still inside the bed when the
+  discharge stops (``E_unrecovered``) is the part of ``dE_stored`` the user never
+  got: with a store that starts at the ambient reference the two are the *same
+  number*, which is why they are reported as one term.  Writing
+  ``... + E_circulation + E_unrecovered`` on top of ``dE_stored`` counts the
+  stored energy twice and never closes;
 * ``E_delivered`` is what the exchanger hands to the user during the discharge;
-* ``E_standby`` is what leaks through the envelope, summed over the three phases (the
-  standby leg is the quiet one, but the charge and the discharge leak too);
-* ``E_circulation`` is the blower work, from the pressure drop of the actual network.
+* ``E_standby`` is what leaks through the envelope, summed over the three phases
+  (the standby leg is the quiet one, but the charge and the discharge leak too);
+* ``E_circulation`` is the blower work, from the pressure drop of the actual
+  network.
 
-The three phases are driven by the *gas loop*, so the resistors heat the gas and the
-gas heats the bed; nothing is deposited in the sand directly.  Every energy above is
-*measured* from the balance of the field after each step - what the sources deposit
-against what the sinks and the envelope carry away - and not assumed from the power the
-profile asked for, so the identity closes to the solver's own imbalance
-(``CycleReport.balance_residual``) rather than to a book entry.
+WHY
+---
+A storage is judged by a cycle, not by a steady state.
 
-Stopping: every phase stops on a **per-step criterion** (``StopWhen``), evaluated after
-each step with the state the solver has reached.  A phase is driven in chunks so the
-driver can report progress, but the chunks are only reporting boundaries: the criterion
-stops the phase *inside* a chunk, which is what lets the discharge end when the gas
-leaving the bed drops below the delivery floor instead of hours later - and it is also
-what keeps a small bed from being driven towards the Kelvin contract by a discharge
-much faster than its capacity.  The reason travels back in ``CyclePhase.notes``, so a
-report says why every phase ended.
+HOW IT WORKS
+------------
+-> GAS LOOP <-
+   The three phases are driven by the *gas loop*, so the resistors heat the gas
+   and the gas heats the bed; nothing is deposited in the sand directly.
 
-Rounding of the phases: the charge runs until the storage mean reaches the target
-temperature, the standby for a prescribed time, the discharge until the gas delivered to
-the user falls below its floor.
+-> MEASURED ENERGIES <-
+   Every energy above is *measured* from the balance of the field after each
+   step - what the sources deposit against what the sinks and the envelope
+   carry away - and not assumed from the power the profile asked for, so the
+   identity closes to the solver's own imbalance
+   (``CycleReport.balance_residual``) rather than to a book entry.
 
-The mesh is the transient's: a structured ``Mesh3D`` or an adaptive tree, and the ledger
-below reads only the protocol's per-cell fields and the balance, so the same numbers come
-out of either (the transient march is the only part that knows which one is running).
+-> STOPPING <-
+   Every phase stops on a **per-step criterion** (``StopWhen``), evaluated after
+   each step with the state the solver has reached.  A phase is driven in chunks
+   so the driver can report progress, but the chunks are only reporting
+   boundaries: the criterion stops the phase *inside* a chunk, which is what
+   lets the discharge end when the gas leaving the bed drops below the delivery
+   floor instead of hours later - and it is also what keeps a small bed from
+   being driven towards the Kelvin contract by a discharge much faster than its
+   capacity.  The reason travels back in ``CyclePhase.notes``, so a report says
+   why every phase ended.
+
+-> PHASE ROUNDING <-
+   The charge runs until the storage mean reaches the target temperature, the
+   standby for a prescribed time, the discharge until the gas delivered to the
+   user falls below its floor.
+
+-> TWO MESHES <-
+   The mesh is the transient's: a structured ``Mesh3D`` or an adaptive tree, and
+   the ledger below reads only the protocol's per-cell fields and the balance,
+   so the same numbers come out of either (the transient march is the only part
+   that knows which one is running).
 """
 from __future__ import annotations
 
@@ -453,7 +475,7 @@ def run_cycle(mesh: Mesh3D | AdaptiveMesh, loop: FluidLoop, settings: CycleSetti
                 return True
         return False
 
-    # ------------------------------------------------------------------ charge
+    # ---- charge ----
     phase = report.charge
     phase.t_start, phase.stored_start = snapshot()
     phase.t_end, phase.stored_end = phase.t_start, phase.stored_start
@@ -464,14 +486,14 @@ def run_cycle(mesh: Mesh3D | AdaptiveMesh, loop: FluidLoop, settings: CycleSetti
             f"the charge stopped at {phase.t_end:.1f} K, below the target "
             f"{settings.t_target:.1f} K: raise the power or the time limit")
 
-    # ----------------------------------------------------------------- standby
+    # ---- standby ----
     phase = report.standby
     phase.t_start, phase.stored_start = snapshot()
     phase.t_end, phase.stored_end = phase.t_start, phase.stored_start
     drive(phase, 0.0, 0.0, None,
           min(settings.standby_time, settings.max_chunks * settings.chunk))
 
-    # --------------------------------------------------------------- discharge
+    # ---- discharge ----
     phase = report.discharge
     phase.t_start, phase.stored_start = snapshot()
     phase.t_end, phase.stored_end = phase.t_start, phase.stored_start

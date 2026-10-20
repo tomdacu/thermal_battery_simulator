@@ -1,24 +1,70 @@
-"""The outside of the storage: film coefficients, without simulating the air.
+"""
+src.core.environment
+====================
+The outside of the storage: film coefficients, without simulating the air.
 
-A storage vessel sits in air that is not part of the machine: simulating it costs
-cells and buys a thermal resistance that is a few percent of the envelope.  What the
-model needs instead is the **film coefficient of the outer surface**, which is the sum
-of two mechanisms acting on the same surface:
+WHAT IT DOES
+------------
+Provides the film coefficient of the outer surface from the air properties, the
+natural-convection correlations and a wind term, and adds the two shares as
+conductances in parallel.
 
-* **natural convection** on the vertical wall and on the top/bottom faces, from the
-  Rayleigh number (Churchill-Chu correlation for a vertical plate, which is the
-  standard for a cylinder of this aspect ratio);
-* **forced convection from the wind**, for which the engineering practice uses the
-  simple combined expression ``h = 4 + 4 v`` (v in m/s, ISO 6946 external surface) or,
-  when the direction matters, the cylinder-in-crossflow correlation with a windward
-  weighting.
+WHY
+---
+A storage vessel sits in air that is not part of the machine: simulating it
+costs cells and buys a thermal resistance that is a few percent of the
+envelope.  What the model needs instead is the **film coefficient of the outer
+surface**, which is the sum of two mechanisms acting on the same surface:
 
-The two add as conductances in parallel, which is what the standard combined
-expressions already assume (their constant term *is* the natural-convection share).
+* **natural convection** on the vertical wall and on the top/bottom faces, from
+  the Rayleigh number (Churchill-Chu correlation for a vertical plate, which is
+  the standard for a cylinder of this aspect ratio);
+* **forced convection from the wind**, for which the engineering practice uses
+  the simple combined expression ``h = 4 + 4 v`` (v in m/s, ISO 6946 external
+  surface) or, when the direction matters, the cylinder-in-crossflow
+  correlation with a windward weighting.
 
-Everything here is a *closure*, not a PDE: the error it carries is the correlation
-uncertainty (tens of percent), which is why the model reports the sensitivity of the
-losses to ``h_out`` instead of pretending to know it.
+HOW IT WORKS
+------------
+-> AIR PROPERTIES <-
+   ``AirProperties.at`` evaluates the transport properties on power laws around
+   the 300 K reference.  The natural-convection correlations take them at the
+   film temperature ``0.5 (T_surface + T_ambient)``; ``h_wind`` uses the
+   ambient.
+
+-> NATURAL CONVECTION <-
+   The Rayleigh number follows from ``g beta |dT| L^3 / (nu alpha)``.  The
+   vertical wall uses Churchill-Chu (valid over all Ra); the horizontal faces
+   use ``Nu = 0.15 Ra^(1/3)`` hot face up and ``Nu = 0.27 Ra^(1/4)`` hot face
+   down.
+
+-> WIND <-
+   ``h = 4 + 4 v`` when ``simple``; otherwise the cylinder-in-crossflow
+   correlation ``Nu = 0.26 Re^0.6 Pr^0.37`` for the windward side, halved to
+   represent the average over a cylinder.
+
+-> THE TWO SHARES <-
+   They add as conductances in parallel, which is what the standard combined
+   expressions already assume (their constant term *is* the natural-convection
+   share).  ``h_out`` averages the vertical, top and bottom natural values and
+   adds the wind term.
+
+LIMITS
+------
+Everything here is a *closure*, not a PDE: the error it carries is the
+correlation uncertainty (tens of percent), which is why the model reports the
+sensitivity of the losses to ``h_out`` instead of pretending to know it.
+``h_out`` returns the convective film only; the linearised radiative share
+``h_rad`` is added by the caller that paints the boundary condition
+(:meth:`src.core.geometry.BatteryGeometry.apply_environment`).
+
+SOURCES
+-------
+- [CC75] S. W. Churchill, H. H. S. Chu, "Correlating equations for laminar and
+  turbulent free convection from a vertical plate", Int. J. Heat Mass Transfer
+  18 (1975) 1323-1329.
+- [ISO6946] ISO 6946:2017, Building components - Thermal resistance and thermal
+  transmittance, Annex C (external surface coefficient 4 + 4 v).
 """
 from __future__ import annotations
 
@@ -33,11 +79,16 @@ from ..constants import GRAVITY, T_AMBIENT_DEFAULT
 class AirProperties:
     """Air properties for the film correlations (film temperature)."""
 
-    k: float = 0.0262        # [W/(m K)]
-    nu: float = 1.57e-5      # [m^2/s]
-    alpha: float = 2.2e-5    # [m^2/s]
-    pr: float = 0.71         # [-]
-    beta: float = 1.0 / 300.0   # [1/K] ideal gas at ~300 K
+    #: Thermal conductivity of air at the 300 K reference [W/(m K)].
+    k: float = 0.0262
+    #: Kinematic viscosity of air at the 300 K reference [m^2/s].
+    nu: float = 1.57e-5
+    #: Thermal diffusivity of air at the 300 K reference [m^2/s].
+    alpha: float = 2.2e-5
+    #: Prandtl number of air [-].
+    pr: float = 0.71
+    #: Volumetric expansion coefficient of an ideal gas at ~300 K [1/K].
+    beta: float = 1.0 / 300.0
 
     @staticmethod
     def at(temperature: float) -> AirProperties:

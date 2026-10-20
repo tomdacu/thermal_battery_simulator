@@ -1,5 +1,9 @@
 # 7. Code structure
 
+The descriptions in this tree follow the house standard of the author's
+Master thesis packages; the template, the section vocabulary and the
+banner width are in [20_CODE_STYLE.md](20_CODE_STYLE.md).
+
 Two levels of API are worth knowing:
 
 * the names a package **re-exports** (`src/__init__.py`, `src/core/__init__.py`,
@@ -7,7 +11,7 @@ Two levels of API are worth knowing:
   `src/viz/__init__.py`, `gui/views/__init__.py`) - the convenient surface;
 * the module-level names below - what a caller imports from the module itself.
   Several modules are deliberately *not* re-exported (`core/grid.py`,
-  `core/physics.py`, `core/refinement.py`, `core/octree.py`, `core/heaters.py`,
+  `core/physics.py`, `core/refinement.py`, `core/octree.py`,
   `core/pipes.py`, `core/pipe_network.py`, `core/environment.py`,
   `solver/fluid.py`, `analysis/cycle.py`, `analysis/convergence.py`,
   `analysis/mesh_plan.py`), so the package surface stays small and a rename inside
@@ -23,8 +27,7 @@ Two levels of API are worth knowing:
 | `core/grid.py` | linear-index tables shared by assembler and analysis, cached face factors | `GridIndex`, `FACE_SLICES`, `INNER_SLICES`, `FACE_AXIS`, `dirichlet_mask` |
 | `core/physics.py` | interface coefficients (harmonic mean, half cell, radiation) | `harmonic_mean`, `half_cell_h`, `radiation_h` |
 | `core/materials.py` | material database + packed-bed model | `MATERIALS`, `STORAGE_MATERIALS`, `INSULATION_MATERIALS`, `CATEGORIES`, `ThermalProperties`, `MaterialManager` |
-| `core/geometry.py` | geometry configuration and voxel painting | `BatteryGeometry`, `CylinderGeometry`, `HeaterConfig`, `HeaterPattern`, `TubeConfig`, `TubePattern`, `TubeElement`, `BuildReport`, `create_small_test_geometry` |
-| `core/heaters.py` | hairpin (U-shaped) sheathed elements, their bank, rasteriser and validation | `HairpinElement`, `HeaterBank`, `RasterResult`, `rasterize`, `validate_bank`, `SURFACE_POWER_MIN_W_CM2`, `SURFACE_POWER_LIMIT_W_CM2`, `DEFAULT_SHEATH_DIAMETER`, `DEFAULT_SHEATH_MATERIAL` |
+| `core/geometry.py` | geometry configuration and voxel painting | `BatteryGeometry`, `CylinderGeometry`, `HeaterConfig`, `BuildReport`, `create_small_test_geometry` |
 | `core/refinement.py` | physical refinement targets → graded rectilinear grid | `Band`, `GridSpec`, `partition`, `graded_edges`, `uniform_edges`, `edges_to_centers`, `edges_to_sizes`, `bands_from_triples`, `size_at`, `worst_ratio`, `describe` |
 | `core/octree.py` | cell-level octree with the 2:1 balance, conservative face list and its own Laplacian | `Octree`, `Leaf`, `uniform_tree`, `refine_by_gradient`, `MORTON_BITS`, `FACES`, `FACE_AXIS`, `FACE_SIGN` |
 | `core/pipes.py` | buried pipe runs: geometry, rasterisation, bank layouts, design pitches | `PipeRun`, `BankLayout`, `rasterize_pipe`, `vertical_bank`, `serpentine`, `staggered_bank`, `describe`, `PITCH_HORIZONTAL`, `PITCH_VERTICAL`, `PITCH_TRIANGULAR`, `HEADER_SAFE`, `HEADER_LIMIT` |

@@ -1,11 +1,20 @@
-"""The circuit's hydraulics and the header engine (``src/solver/hydraulics.py``).
+"""
+tests.test_hydraulics
+=====================
+The circuit's hydraulics and the header engine.
 
-Pinned: a single pipe drops what Darcy-Weisbach says; two parallel pipes share the flow
-as their resistances say; a hot riser draws at a low flow and starves at a high one;
-the balancing orifices put every riser exactly on its target; and the engine, on a ring
-network, picks the radial manifold over the chain, keeps every header under the velocity
-limit, lifts the headers into the sand and hands back a network whose own hydraulics
-deliver the target flows.
+WHAT IT DOES
+------------
+Pins the behaviour of ``src/solver/hydraulics.py``: a single pipe drops what
+Darcy-Weisbach says; two parallel pipes share the flow as their resistances
+say; a hot riser draws at a low flow and starves at a high one; the balancing
+orifices put every riser exactly on its target.  The Voronoi flow shares cover
+the disc, and an orifice hole gives its loss back.
+
+On a ring network the engine picks the radial manifold over the chain, keeps
+every header under the velocity limit, lifts the headers into the sand and
+hands back a network whose own hydraulics deliver the target flows.  The gas
+loop built on that network follows the hydraulics of the hot gas.
 """
 from __future__ import annotations
 

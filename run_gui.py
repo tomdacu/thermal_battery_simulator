@@ -1,4 +1,14 @@
-"""Entry point: launch the Thermal Battery Simulator GUI."""
+"""
+run_gui
+========
+Launches the Thermal Battery Simulator GUI.
+
+WHAT IT DOES
+------------
+Puts the repository root on ``sys.path`` so the ``gui`` and ``src`` packages
+import from a checkout, calls :func:`gui.main_window.main` and exits with the
+status it returns.
+"""
 import sys
 from pathlib import Path
 

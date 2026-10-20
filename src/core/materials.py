@@ -1,4 +1,14 @@
-"""Material database and porous-media models.  SI units, temperatures in KELVIN.
+"""
+src.core.materials
+==================
+Material database and porous-media models.
+
+WHAT IT DOES
+------------
+Holds the material table the geometry and the solver read - constant thermal
+properties per material, grouped in four categories - and the effective-property
+models of a porous medium and of a packed bed.  All quantities are SI and
+temperatures are KELVIN.
 
 Public API (frozen - the rest of the package is written against it)::
 
@@ -9,29 +19,67 @@ Public API (frozen - the rest of the package is written against it)::
     MaterialManager.get_energy_density(name, t_high, t_low, packing_fraction=1.0)
     MaterialManager.compare_materials(names, t_high, t_low, packing_fraction=1.0)
 
-Packed bed.  The density is the arithmetic mean and the specific heat the mass-weighted
-mean of the grains and the pore gas.  The conductivity is the **Zehner-Bauer-Schlunder**
-model of the VDI Heat Atlas (2nd ed., 2010, chapter D6.3, E. Tsotsas; Zehner and
-Schlunder, Chem. Ing. Tech. 42 (1970) 933), with the radiation between the grains
-(Breitbach and Barthels, Nucl. Technol. 49 (1980) 392): the gas in the voids, the
-contact through the grain cores and the radiation across the voids - which grows as
-``T^3 d`` and at 500 degC carries a third of the heat of a millimetre sand.  In the
-VDI's notation (``psi`` porosity, ``kappa = k_s / k_f``, ``B`` the deformation
-parameter of the unit cell, ``k_rad`` the radiative conductivity over ``k_f``)::
+HOW IT WORKS
+------------
+-> MATERIAL DATABASE <-
+   Four categories - storage, insulation, structural, fluid - are merged into
+   ``MATERIALS``.  A storage entry is the *grain*, not the bed: the packing
+   dilutes it to the bed value.  Properties are constant in temperature and
+   ``t_max`` is a service limit, not a model input.
 
-    k_rad = 4 sigma T^3 d / ((2 / eps - 1) k_f)
-    B     = C_f ((1 - psi) / psi)^(10/9)            C_f = 1.25 spheres, 1.4 broken grains
-    N     = 1 + (k_rad - B) / kappa
-    k_c   = 2/N [ B (kappa + k_rad - 1) / (N^2 kappa) ln((kappa + k_rad) / B)
-                  + (B + 1) / (2 B) (k_rad - B) - (B - 1) / N ]
-    k_bed / k_f = (1 - sqrt(1 - psi)) (1 + psi k_rad)
-                  + sqrt(1 - psi) (phi kappa + (1 - phi) k_c)
+-> PACKED BED <-
+   The density is the arithmetic mean and the specific heat the mass-weighted
+   mean of the grains and the pore gas.  The conductivity is the
+   **Zehner-Bauer-Schlunder** model of the VDI Heat Atlas (2nd ed., 2010,
+   chapter D6.3, E. Tsotsas; Zehner and Schlunder, Chem. Ing. Tech. 42 (1970)
+   933), with the radiation between the grains (Breitbach and Barthels, Nucl.
+   Technol. 49 (1980) 392): the gas in the voids, the contact through the grain
+   cores and the radiation across the voids - which grows as ``T^3 d`` and at
+   500 degC carries a third of the heat of a millimetre sand.  In the VDI's
+   notation (``psi`` porosity, ``kappa = k_s / k_f``, ``B`` the deformation
+   parameter of the unit cell, ``k_rad`` the radiative conductivity over
+   ``k_f``)::
 
-with ``phi = 0.0077`` the flattening of the contacts (VDI) and the pore gas at its own
-temperature (the air of Incropera's Table A.4).  The Smoluchowski reduction of the gas
-conductivity near the contacts is left out: it matters below ~0.1 mm or under vacuum,
-not for millimetre grains at one atmosphere.  The older model - the geometric mean
-``k_s^(1-psi) k_f^psi``, constant in temperature - stays available as ``"geometric"``.
+       k_rad = 4 sigma T^3 d / ((2 / eps - 1) k_f)
+       B     = C_f ((1 - psi) / psi)^(10/9)    C_f = 1.25 spheres, 1.4 broken grains
+       N     = 1 + (k_rad - B) / kappa
+       k_c   = 2/N [ B (kappa + k_rad - 1) / (N^2 kappa) ln((kappa + k_rad) / B)
+                     + (B + 1) / (2 B) (k_rad - B) - (B - 1) / N ]
+       k_bed / k_f = (1 - sqrt(1 - psi)) (1 + psi k_rad)
+                     + sqrt(1 - psi) (phi kappa + (1 - phi) k_c)
+
+   with ``phi = 0.0077`` the flattening of the contacts (VDI) and the pore gas
+   at its own temperature (the air of Incropera's Table A.4).  The older
+   model - the geometric mean ``k_s^(1-psi) k_f^psi``, constant in
+   temperature - stays available as ``"geometric"``.
+
+-> EFFECTIVE PROPERTIES <-
+   ``compute_effective_properties`` applies the geometric-mean conductivity
+   and the means above to a solid and a pore fluid.
+   ``compute_packed_bed_properties`` reuses them and, for ``"zbs"``, replaces
+   the conductivity with the law evaluated at the requested temperature [K]
+   (293.15 K by default) for grains of the given diameter [m].
+
+-> ENERGY DENSITY <-
+   ``rho cp (t_high - t_low)`` [J/m^3], optionally on the packed-bed properties
+   of a given packing fraction; ``compare_materials`` ranks a set of materials
+   by it.
+
+LIMITS
+------
+The Smoluchowski reduction of the gas conductivity near the contacts is left
+out: it matters below ~0.1 mm or under vacuum, not for millimetre grains at one
+atmosphere.  The ``"geometric"`` bed model is constant in temperature.
+
+SOURCES
+-------
+- Tsotsas, "D6.3 Thermal conductivity of packed beds", in *VDI Heat Atlas*,
+  2nd ed., Springer, 2010 [VDI-D6.3]
+- Zehner and Schlunder, Chem. Ing. Tech. 42 (1970) 933 [ZS70]
+- Breitbach and Barthels, Nucl. Technol. 49 (1980) 392 [BB80]
+- Incropera et al., *Fundamentals of Heat and Mass Transfer*, 7th ed., Wiley,
+  2011, Tables A.3 and A.4 [Incropera]
+- VDI 4640 Part 1, *Thermal use of the underground*, 2010, Table 1 [VDI4640]
 """
 from __future__ import annotations
 
@@ -46,25 +94,36 @@ from ..units import c_to_k
 SIGMA = 5.670374419e-8
 #: grain diameter of the bed by default [m]: a millimetre, crushed rock or coarse sand
 PARTICLE_DIAMETER_DEFAULT = 1.0e-3
-#: bed conductivity models
+#: bed conductivity models: the ZBS law (temperature-dependent) and the constant
+#: geometric mean
 BED_MODELS = ("zbs", "geometric")
 
 
+# ==============================================================================
+# MATERIAL DATABASE
+# ==============================================================================
 @dataclass(frozen=True)
 class ThermalProperties:
     """Constant thermal properties of a material."""
 
+    #: display name, used as the label in the GUI.
     name: str
-    k: float                    # [W/(m*K)]
-    rho: float                  # [kg/m^3]
-    cp: float                   # [J/(kg*K)]
-    t_max: float                # [K] maximum service temperature
-    emissivity: float = 0.9     # [-] total hemispherical emissivity
+    #: thermal conductivity [W/(m K)].
+    k: float
+    #: density [kg/m^3].
+    rho: float
+    #: specific heat [J/(kg K)].
+    cp: float
+    #: maximum service temperature [K].
+    t_max: float
+    #: total hemispherical emissivity [-].
+    emissivity: float = 0.9
     description: str = ""
 
 
 def _p(name: str, k: float, rho: float, cp: float, t_max_c: float, eps: float = 0.9,
        description: str = "") -> ThermalProperties:
+    """Build a material entry; ``t_max_c`` is converted from degC to kelvin."""
     return ThermalProperties(name, k, rho, cp, c_to_k(t_max_c), eps, description)
 
 
@@ -104,10 +163,12 @@ FLUID_MATERIALS: dict[str, ThermalProperties] = {
     "thermal_oil": _p("Thermal oil", 0.12, 900, 2100, 350),
 }
 
+#: every material of the database, keyed by the short name the geometry uses.
 MATERIALS: dict[str, ThermalProperties] = {
     **STORAGE_MATERIALS, **INSULATION_MATERIALS, **STRUCTURAL_MATERIALS, **FLUID_MATERIALS
 }
 
+#: category name -> its material table, the keys ``list_materials`` accepts.
 CATEGORIES = {
     "storage": STORAGE_MATERIALS,
     "insulation": INSULATION_MATERIALS,
@@ -116,6 +177,9 @@ CATEGORIES = {
 }
 
 
+# ==============================================================================
+# BED CONDUCTIVITY
+# ==============================================================================
 @dataclass(frozen=True)
 class PackedBed:
     """The conductivity of a packed bed as a function of temperature (see the module).
@@ -126,14 +190,23 @@ class PackedBed:
     conductivity [W/(m K)], elementwise.
     """
 
+    #: grain conductivity [W/(m K)].
     solid_k: float
+    #: void fraction of the bed [-].
     porosity: float
+    #: grain size [m].
     diameter: float = PARTICLE_DIAMETER_DEFAULT
+    #: grain surface emissivity [-].
     emissivity: float = 0.9
+    #: ``C_f``, the unit-cell deformation factor [-]: 1.25 spheres, 1.4 broken grains.
     shape: float = 1.4
+    #: ``phi``, the flattening of the contacts [-].
     flattening: float = 0.0077
-    fluid_k: float = 0.0263          # the pore gas at 300 K
+    #: pore gas conductivity at 300 K [W/(m K)].
+    fluid_k: float = 0.0263
+    #: pore gas name, looked up in the fluid property tables.
     fluid: str = "air"
+    #: ``"zbs"`` or ``"geometric"``.
     model: str = "zbs"
 
     def gas_k(self, temperature: np.ndarray) -> np.ndarray:
@@ -171,6 +244,9 @@ class PackedBed:
         return ratio * k_f
 
 
+# ==============================================================================
+# MATERIAL LOOKUP AND EFFECTIVE PROPERTIES
+# ==============================================================================
 class MaterialManager:
     """Lookup and effective-property models for the material database."""
 

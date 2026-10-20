@@ -1,43 +1,59 @@
-"""Finite-difference assembly for the steady and transient heat equation.
-
-DISCRETIZATION (per unit volume, coefficients in W/(m^3*K))
------------------------------------------------------------
-Balance over a cell of volume ``V = d^3``::
-
-    sum_faces k_eff * (T_nb - T_P) * A / d + Q * V = 0
-
-Divided by ``V`` (``A = d^2``) it becomes the assembled row::
-
-    a_P * T_P - sum_nb a_nb * T_nb = Q ,   a_nb = k_eff / d^2
-
-``k_eff = 2 k_P k_nb / (k_P + k_nb)`` is the series conductance of the two half
-cells.  ``Q`` is a volumetric source [W/m^3] - exactly ``Mesh3D.Q_source``.
-
-Boundary conditions
--------------------
-* Each domain face carries its own :class:`FaceBC`: a node on an edge or corner
-  receives one contribution **per exposed face**, with that face's ``h``/``T_inf``.
-* Convection uses the half-cell series conductance ``h_eff = 2kh/(2k+hd)``
-  (the surface sits ``d/2`` away from the node centre); ``a = h_eff/d``.
-* Dirichlet rows are replaced by ``T = T_bc`` (exact, not relaxed).
-* Neumann adds ``q/d`` to the RHS (``q`` [W/m^2] entering the domain).
-* Interior cells with ``boundary_type == CONVECTION`` (heat-exchanger tubes)
-  exchange ``h*(T_fluid - T_P)`` with the cell volume -> ``h/d``.
-* Radiation is opt-in and linearised: ``h_r = eps*sigma*(Ts+Tinf)*(Ts^2+Tinf^2)``,
-  added to the convective coefficient of the exposed face, and to the environment film
-  of an excluded-air model (:func:`environment_film`), whose surface temperature the
-  coefficient itself drives.
-
-TRANSIENT
----------
-Backward Euler with the mass matrix ``M = diag(rho*cp)`` [J/(m^3*K)]::
-
-    (M/dt + L) T^{n+1} = (M/dt) T^n + b
-
-``M`` must NOT contain the cell volume: ``L`` is already per unit volume, and a
-``V`` factor scales every time constant by ``1/d^3``, making the answer depend on
-the mesh resolution.
 """
+src.solver.matrix
+=================
+Finite-difference assembly of the steady and transient heat equation.
+
+WHAT IT DOES
+------------
+Builds the sparse operators and the right-hand sides that the steady and the
+transient driver share: the face conductances of both meshes, the per-volume
+conduction stencil of a structured mesh, the contributions of the domain faces,
+the Dirichlet rows and the backward-Euler mass diagonal.
+
+HOW IT WORKS
+------------
+-> DISCRETIZATION <-
+   Per unit volume, coefficients in W/(m^3*K).  Balance over a cell of volume
+   ``V = d^3``::
+
+       sum_faces k_eff * (T_nb - T_P) * A / d + Q * V = 0
+
+   Divided by ``V`` (``A = d^2``) it becomes the assembled row::
+
+       a_P * T_P - sum_nb a_nb * T_nb = Q ,   a_nb = k_eff / d^2
+
+   ``k_eff = 2 k_P k_nb / (k_P + k_nb)`` is the series conductance of the two
+   half cells.  ``Q`` is a volumetric source [W/m^3] - exactly
+   ``Mesh3D.Q_source``.
+
+-> BOUNDARY CONDITIONS <-
+   * Each domain face carries its own :class:`FaceBC`: a node on an edge or
+     corner receives one contribution **per exposed face**, with that face's
+     ``h``/``T_inf``.
+   * Convection uses the half-cell series conductance ``h_eff = 2kh/(2k+hd)``
+     (the surface sits ``d/2`` away from the node centre); ``a = h_eff/d``.
+   * Dirichlet rows are replaced by ``T = T_bc`` (exact, not relaxed).
+   * Neumann adds ``q/d`` to the RHS (``q`` [W/m^2] entering the domain).
+   * Interior cells with ``boundary_type == CONVECTION`` (heat-exchanger tubes)
+     exchange ``h*(T_fluid - T_P)`` with the cell volume -> ``h/d``.
+   * Radiation is opt-in and linearised:
+     ``h_r = eps*sigma*(Ts+Tinf)*(Ts^2+Tinf^2)``, added to the convective
+     coefficient of the exposed face, and to the environment film of an
+     excluded-air model (:func:`environment_film`), whose surface temperature
+     the coefficient itself drives.
+
+-> TRANSIENT <-
+   Backward Euler with the mass matrix ``M = diag(rho*cp)`` [J/(m^3*K)]::
+
+       (M/dt + L) T^{n+1} = (M/dt) T^n + b
+
+LIMITS
+------
+``M`` must NOT contain the cell volume: ``L`` is already per unit volume, and a
+``V`` factor scales every time constant by ``1/d^3``, making the answer depend
+on the mesh resolution.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -54,6 +70,9 @@ if TYPE_CHECKING:                      # the tree is the target, not a runtime d
     from ..core.adaptive_mesh import AdaptiveMesh
 
 
+# ==============================================================================
+# FACE COEFFICIENTS
+# ==============================================================================
 def face_conductance(k_a, k_b, area, distance, *, size_a=None, size_b=None,
                      material_a=None, material_b=None, h_contact: float = 0.0,
                      excluded_b=None) -> np.ndarray:
@@ -180,6 +199,9 @@ def _face_diag_rhs(mesh: Mesh3D, index: GridIndex, face: str, a_p: np.ndarray,
     b[mask] += a_conv * bc.value
 
 
+# ==============================================================================
+# BOUNDARY ROWS AND STEADY ASSEMBLY
+# ==============================================================================
 def dirichlet_rows(mesh: Mesh3D, index: GridIndex) -> tuple[np.ndarray, np.ndarray]:
     """(mask, values) of the nodes whose temperature is fixed by a Dirichlet face."""
     mask = dirichlet_mask(mesh, index)
@@ -253,6 +275,9 @@ def build_steady_matrix(mesh: Mesh3D, index: GridIndex = None, radiation: bool =
     return a, b
 
 
+# ==============================================================================
+# OPERATORS AND RIGHT-HAND SIDES
+# ==============================================================================
 def build_transient_operators(mesh: Mesh3D | AdaptiveMesh, dt: float,
                               index: GridIndex = None,
                               radiation: bool = False) -> tuple[sparse.csr_matrix, np.ndarray]:
@@ -306,6 +331,9 @@ def transient_rhs(mesh: Mesh3D | AdaptiveMesh, m_diag: np.ndarray, dt: float,
     return rhs
 
 
+# ==============================================================================
+# DIRICHLET ELIMINATION
+# ==============================================================================
 def apply_dirichlet(a: sparse.csr_matrix, b: np.ndarray, mask: np.ndarray,
                     values: np.ndarray) -> sparse.csr_matrix:
     """Impose ``T = value`` on the rows selected by ``mask``.

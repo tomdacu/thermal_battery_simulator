@@ -1,49 +1,74 @@
-"""An adaptive mesh over :class:`~src.core.octree.Octree` that implements :class:`MeshAPI`.
+"""
+src.core.adaptive_mesh
+======================
+An adaptive mesh over :class:`~src.core.octree.Octree` that implements
+:class:`MeshAPI`.
 
-The octree already knows *how* to solve (a conservative face list, the 2:1 balance, the
-``k A / (d V)`` assembly); this module gives it the *physics vocabulary* the structured
-consumers are written in - a temperature, a conductivity, sources, boundary conditions,
-the environment film, the energy balance - so that a consumer can be ported from
-``Mesh3D`` to a tree without the physics moving.
+WHAT IT DOES
+------------
+Gives the octree the *physics vocabulary* the structured consumers are written in -
+a temperature, a conductivity, sources, boundary conditions, the environment film,
+the energy balance - so that a consumer can be ported from ``Mesh3D`` to a tree
+without the physics moving.  The octree already knows *how* to solve (a
+conservative face list, the 2:1 balance, the ``k A / (d V)`` assembly); this module
+maps its arrays onto the per-cell fields of :class:`MeshAPI` and adds the steady
+and transient entry points over that mesh.
 
-What is reused, and from where:
+WHY
+---
+The physics must not fork: an adaptive run and a structured run read the same
+fields and must assemble the same operator, so the equivalence tests can hold one
+against the other.
 
-* the mesh, the face list and the operator: :mod:`src.core.octree`
-  (:meth:`Octree.diffusion_matrix`, :meth:`Octree.faces`, :meth:`Octree.refine`);
-* the physics entry points: :func:`src.solver.octree_solver.wall_cells` (which leaves a
-  box face drives), :meth:`src.solver.octree_solver.OctreeSteadySolver.indicator` (the
-  flux-jump estimator a refinement round refines on) and :func:`src.core.physics.half_cell_h`
-  (the half-cell film the structured solver uses);
-* the linear layer and the boundary elimination: :func:`src.solver.linear.solve_linear`
-  (method choice, the volume symmetrisation of a graded operator) and
-  :func:`src.solver.matrix.apply_dirichlet` (the symmetric elimination, with the known
-  columns moved to the right-hand side).
+HOW IT WORKS
+------------
+-> REUSE <-
+   What is reused, and from where:
 
-What could not be reused is listed at the end of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``:
-``octree_solver`` has no box-face film, no environment film, no contact resistance and no
-public per-face conductance array, so those live here - with the *same* formulas as
-:mod:`src.solver.matrix`, which is what the equivalence tests measure.
+   * the mesh, the face list and the operator: :mod:`src.core.octree`
+     (:meth:`Octree.diffusion_matrix`, :meth:`Octree.faces`, :meth:`Octree.refine`);
+   * the physics entry points: :func:`src.solver.octree_solver.wall_cells` (which
+     leaves a box face drives),
+     :meth:`src.solver.octree_solver.OctreeSteadySolver.indicator` (the flux-jump
+     estimator a refinement round refines on) and
+     :func:`src.core.physics.half_cell_h` (the half-cell film the structured solver
+     uses);
+   * the linear layer and the boundary elimination:
+     :func:`src.solver.linear.solve_linear` (method choice, the volume
+     symmetrisation of a graded operator) and
+     :func:`src.solver.matrix.apply_dirichlet` (the symmetric elimination, with the
+     known columns moved to the right-hand side).
 
-Sameness, in the form the tests check it:
+-> WHAT COULD NOT BE REUSED <-
+   Listed at the end of ``docs/16_ADAPTIVE_MESH_MIGRATION.md``: ``octree_solver``
+   has no box-face film, no environment film, no contact resistance and no public
+   per-face conductance array, so those live here - with the *same* formulas as
+   :mod:`src.solver.matrix`, which is what the equivalence tests measure.
 
-* the conduction coefficient is the octree's ``k_face A / (d_centers V)`` with the
-  harmonic mean, so a uniform tree and a uniform ``Mesh3D`` assemble the same operator;
-* the box-face film is ``h_eff / d`` with ``h_eff = 2kh/(2k + h d)`` and ``d`` the local
-  leaf edge - the structured solver's half-cell law, exact for a flux that is constant
-  across the half cell.  A source in the boundary leaf leaves it short by
-  ``q d^2 / (8 k)``, and the adaptive mesh reproduces *that* shift leaf by leaf (it is the
-  same formula): the tests pin both the shift and the film each leaf carries;
-* the environment film acts on the *active* side of an active/excluded face as
-  ``h_out A / V`` towards ``t_ambient``, and the excluded leaves are held at
-  ``t_ambient`` exactly as ``src/solver/matrix.py`` holds them;
-* the balance closes the way the structured one does: ``p_source + p_sink`` equals the
-  heat leaving through the fixed (Dirichlet) leaves plus the films, at the round-off of
-  the per-leaf closure ``div + film - Q V``;
-* the transient is the same assembly: :meth:`AdaptiveMesh.transient_operators` adds the
-  mass matrix ``rho*cp`` to the steady operator and eliminates the same pinned leaves, and
-  :meth:`AdaptiveMesh.transient_rhs` rebuilds the right-hand side of the current state -
-  so the backward-Euler march of :mod:`src.solver.transient` runs on a tree without
-  knowing it is not on a ``Mesh3D``.
+-> SAMENESS <-
+   In the form the tests check it:
+
+   * the conduction coefficient is the octree's ``k_face A / (d_centers V)`` with
+     the harmonic mean, so a uniform tree and a uniform ``Mesh3D`` assemble the same
+     operator;
+   * the box-face film is ``h_eff / d`` with ``h_eff = 2kh/(2k + h d)`` and ``d``
+     the local leaf edge - the structured solver's half-cell law, exact for a flux
+     that is constant across the half cell.  A source in the boundary leaf leaves it
+     short by ``q d^2 / (8 k)``, and the adaptive mesh reproduces *that* shift leaf
+     by leaf (it is the same formula): the tests pin both the shift and the film
+     each leaf carries;
+   * the environment film acts on the *active* side of an active/excluded face as
+     ``h_out A / V`` towards ``t_ambient``, and the excluded leaves are held at
+     ``t_ambient`` exactly as ``src/solver/matrix.py`` holds them;
+   * the balance closes the way the structured one does: ``p_source + p_sink``
+     equals the heat leaving through the fixed (Dirichlet) leaves plus the films, at
+     the round-off of the per-leaf closure ``div + film - Q V``;
+   * the transient is the same assembly:
+     :meth:`AdaptiveMesh.transient_operators` adds the mass matrix ``rho*cp`` to the
+     steady operator and eliminates the same pinned leaves, and
+     :meth:`AdaptiveMesh.transient_rhs` rebuilds the right-hand side of the current
+     state - so the backward-Euler march of :mod:`src.solver.transient` runs on a
+     tree without knowing it is not on a ``Mesh3D``.
 """
 from __future__ import annotations
 
@@ -72,7 +97,9 @@ FIELDS = ("T", "k", "rho", "cp", "Q_source", "Q_sink", "material_id", "boundary_
           "bc_h", "bc_T_inf", "excluded", "source_mask")
 
 
-# --------------------------------------------------------------- construction
+# ==============================================================================
+# CONSTRUCTION
+# ==============================================================================
 @dataclass(frozen=True)
 class RefinementBand:
     """A box of the domain that needs cells of a given size [m].
@@ -135,7 +162,9 @@ def _check_bands(bands: Sequence[RefinementBand]) -> None:
                 raise ValueError(f"empty band {band}")
 
 
-# ------------------------------------------------------------------- results
+# ==============================================================================
+# RESULTS
+# ==============================================================================
 @dataclass
 class AdaptiveBalance:
     """Energy balance of an adaptive mesh, in the vocabulary of ``src.analysis.balance``.
@@ -199,7 +228,9 @@ class _FaceTable(NamedTuple):
     g: np.ndarray          # conductance the physics asks for [W/K]
 
 
-# --------------------------------------------------------------------- the mesh
+# ==============================================================================
+# THE MESH
+# ==============================================================================
 @dataclass
 class AdaptiveMesh:
     """A cell-centred mesh on an octree: per-leaf fields plus the six box faces.
@@ -361,7 +392,7 @@ class AdaptiveMesh:
         mesh.refine(indicator, threshold, levels=levels)
         return mesh
 
-    # ------------------------------------------------------------- refinement
+    # ---- refinement ----
     def refine_bands(self, bands: Sequence[RefinementBand],
                      max_cells: int | None = None) -> None:
         """Refine to the band sizes, in place (see :meth:`from_bands`).
@@ -579,7 +610,7 @@ class AdaptiveMesh:
         two_sided = (lower > 1e-12 * box) & (upper < box * (1.0 - 1e-12))
         return np.abs(np.where(two_sided, net, 0.0))
 
-    # ------------------------------------------------------- boundary conditions
+    # ---- boundary conditions ----
     def set_adiabatic(self, face: str) -> None:
         """Zero-flux (insulated) domain face."""
         self._check_face(face)
@@ -620,7 +651,7 @@ class AdaptiveMesh:
         if face not in FACES:
             raise ValueError(f"invalid face {face!r}; expected one of {FACES}")
 
-    # ---------------------------------------------------------------- geometry
+    # ---- geometry ----
     @property
     def n_cells(self) -> int:
         return self.tree.n_cells
@@ -849,7 +880,7 @@ class AdaptiveMesh:
         table = self._face_table()
         return (table.i, table.j, table.axis, table.area, table.distance, table.g)
 
-    # -------------------------------------------------------------------- films
+    # ---- films ----
     def _environment_surface(self, faces: _FaceTable | None = None
                              ) -> tuple[np.ndarray, np.ndarray]:
         """``(positions, areas)`` of the leaves the environment film acts on.
@@ -923,7 +954,7 @@ class AdaptiveMesh:
                         self.bc_T_inf[positions]))
         return out
 
-    # ----------------------------------------------------------------- assembly
+    # ---- assembly ----
     def _face_table(self) -> _FaceTable:
         """The face list with the conductance the physics asks for, per entry.
 
@@ -1154,7 +1185,7 @@ class AdaptiveMesh:
         return {"a": a, "a_eliminated": eliminated, "films": films, "film": film,
                 "moved": (row[moved], contributions, mask, values)}
 
-    # ---------------------------------------------------------------- transient
+    # ---- transient ----
     def volume_scale(self) -> np.ndarray | None:
         """The per-leaf volumes ``solve_linear`` wants, or ``None`` on a uniform tree.
 
@@ -1214,7 +1245,7 @@ class AdaptiveMesh:
         rhs[mask] = values[mask]
         return rhs
 
-    # ------------------------------------------------------------------- solve
+    # ---- solve ----
     def solve_steady(self, config: LinearConfig | None = None,
                      radiation: bool | None = None,
                      x0: np.ndarray | None = None) -> AdaptiveSteadyResult:
@@ -1245,7 +1276,7 @@ class AdaptiveMesh:
             iterations=linear.iterations, solve_time=time.perf_counter() - start,
             notes=list(linear.notes), cells=self.tree.n_cells)
 
-    # ----------------------------------------------------------------- balance
+    # ---- balance ----
     def balance(self) -> AdaptiveBalance:
         """Energy balance of the current field, closing at the round-off of the scheme.
 
@@ -1296,7 +1327,7 @@ class AdaptiveMesh:
             closure=abs(p_source + p_sink - q_fixed - p_film) / scale,
             cells=self.tree.n_cells)
 
-    # ---------------------------------------------------------- validation
+    # ---- validation ----
     def validate(self, check_temperature: bool = True) -> None:
         """Reject non-physical fields before an expensive solve.
 
@@ -1324,7 +1355,7 @@ class AdaptiveMesh:
             if bc.kind == BoundaryType.CONVECTION and bc.h < 0:
                 raise ValueError(f"face_bc[{face}].h must be >= 0")
 
-    # -------------------------------------------------------------------- info
+    # ---- info ----
     def level_histogram(self) -> dict:
         """Leaves per level (a cubic tree) or per ``(lxy, lz)`` pair (a box tree)."""
         if self.anisotropic:

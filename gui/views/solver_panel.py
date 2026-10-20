@@ -1,15 +1,32 @@
-"""Solver settings: accuracy in kelvin, threads, radiation, the standby iteration.
+"""
+gui.views.solver_panel
+======================
+Solver settings: accuracy in kelvin, threads, radiation, the standby iteration.
 
-The linear method is not a user choice: every operator the application assembles is
-symmetric once the cell volumes scale it (``src/solver/linear.py``), so it is solved by
-conjugate gradients with an algebraic-multigrid (Ruge-Stuben) preconditioner - the
-fastest of the measured options on the default model.  The linear layer falls back on
-its own (to BiCGSTAB on a non-symmetric operator, to Jacobi without PyAMG) and says so
-in the log.
+WHAT IT DOES
+------------
+``SolverPanel`` builds the Solver page and returns the settings dictionaries
+the window puts in a run: the linear tolerance and iteration cap, the
+temperature tolerance, the thread budget, the radiation switch and the standby
+iteration cap.  ``METHOD`` and ``PRECONDITIONER`` pin the linear solver.
 
-Accuracy is asked the way it is judged, in kelvin: the coupled iterations (the gas loop,
-radiation) and the standby target stop when the temperature moves by less than it.  The
-linear residual sits well below that on its own.
+WHY
+---
+The linear method is not a user choice: every operator the application
+assembles is symmetric once the cell volumes scale it (``src/solver/linear.py``),
+so it is solved by conjugate gradients with an algebraic-multigrid
+(Ruge-Stuben) preconditioner - the fastest of the measured options on the
+default model.  The linear layer falls back on its own (to BiCGSTAB on a
+non-symmetric operator, to Jacobi without PyAMG) and says so in the log.
+
+HOW IT WORKS
+------------
+-> ACCURACY AS TEMPERATURE <-
+   Accuracy is asked the way it is judged, in kelvin: the coupled iterations
+   (the gas loop, radiation) and the standby target stop when the temperature
+   moves by less than it.  The linear residual sits well below that on its own.
+-> THREADS <-
+   The combo passes a BLAS/OpenMP budget: 0 means all cores, -1 all but one.
 """
 from __future__ import annotations
 

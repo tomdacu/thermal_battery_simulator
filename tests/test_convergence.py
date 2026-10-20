@@ -1,4 +1,25 @@
-"""Automatic mesh search: it must stop when the answer stops moving."""
+"""
+tests.test_convergence
+======================
+Automatic mesh search: it must stop when the answer stops moving.
+
+WHAT IT DOES
+------------
+Drives :func:`~src.analysis.convergence.find_mesh` on two structured models,
+an analytic 1-D slab with a source and the small battery, and pins:
+
+* the target refuses nonsense, and ``find_mesh`` rejects an invalid one;
+* the search stops when the answer stops moving, spends fewer cells for a
+  loose tolerance than for a tight one, and reports an unreachable tolerance
+  instead of returning a bad mesh;
+* a blocked refinement is never called converged, and the reported mesh
+  reproduces the converged answer to the round-off;
+* the error model jumps instead of walking one level at a time, and the
+  report carries the observed order and the GCI;
+* a non-monotone probe has no order to fit: the search falls back to a
+  conservative order and reports that it did not converge.
+"""
+
 from __future__ import annotations
 
 import pytest
@@ -65,7 +86,9 @@ def battery_problem() -> tuple:
     return build, observables, grid
 
 
-# ------------------------------------------------------------------ validation
+# ==============================================================================
+# VALIDATION
+# ==============================================================================
 def test_the_target_rejects_nonsense():
     assert ConvergenceTarget(refine=1.0).validate()
     assert ConvergenceTarget(max_levels=1).validate()
@@ -76,7 +99,9 @@ def test_the_target_rejects_nonsense():
         find_mesh(build, observables, spec, ConvergenceTarget(refine=2.0))
 
 
-# ------------------------------------------------------------------- behaviour
+# ==============================================================================
+# BEHAVIOUR
+# ==============================================================================
 def test_the_search_stops_when_the_answer_stops_moving():
     build, observables, spec = slab_problem()
     report = find_mesh(build, observables, spec,
@@ -136,7 +161,9 @@ def test_the_reported_mesh_reproduces_the_converged_answer():
     assert mesh.grid_summary()["cells"] == report.chosen.cells
 
 
-# ------------------------------------------------------- predictive behaviour
+# ==============================================================================
+# PREDICTIVE BEHAVIOUR
+# ==============================================================================
 def test_the_search_jumps_instead_of_walking_one_level_at_a_time():
     """The point of the error model: few solves, and the last one is the right one."""
     build, observables, spec = slab_problem()

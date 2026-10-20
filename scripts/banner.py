@@ -1,9 +1,36 @@
-"""Draw the README banner and the icon in the house style (dark, contour rings).
+"""
+scripts.banner
+==============
+Draws the README banner and the icon in the house style.
 
-The same style as the other projects of the author: a dark slate background, a logo of
-concentric contours from the cold blue outside to the hot red core, and the name in bold
-white.  Here the contours are the isotherms of the silo in section: taller than wide,
-cold at the insulation, hot at the core.
+WHAT IT DOES
+------------
+Writes ``assets/banner.png`` and ``assets/icon.png``: a dark slate
+background, a logo of concentric contours from the cold blue outside to the
+hot red core, and the project name in bold white.  Here the contours are the
+isotherms of the silo in section: taller than wide, cold at the insulation,
+hot at the core.
+
+HOW IT WORKS
+------------
+-> CONTOURS <-
+   Four rounded rectangles share one stroke width and the same gap between
+   every two contours.  The outer contour has half height ``radius`` and is
+   0.86 times as wide, so the silo is taller than wide; the corners grow
+   rounder towards the core, as the isotherms of a bed heated from inside do.
+
+-> DRAWING AND SCALE <-
+   The raster is drawn at ``SCALE`` times its final size and filtered down
+   with Lanczos.
+
+-> FONT <-
+   The first of Artifakt Element Black, Segoe UI Bold and Arial Bold found
+   on the machine is used, with the PIL default font as the last resort.
+   The title is shrunk to fit the width left free by the logo when needed.
+
+OPTIONS
+-------
+The script takes no arguments; it writes both files into ``assets/``::
 
     python scripts/banner.py      # writes assets/banner.png and assets/icon.png
 """

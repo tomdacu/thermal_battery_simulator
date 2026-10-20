@@ -1,4 +1,32 @@
-"""Interactive 3D view: PyVista scene + clip/opacity/colormap controls."""
+"""
+gui.views.viz_view
+==================
+Interactive 3D view: PyVista scene + clip/opacity/colormap controls.
+
+WHAT IT DOES
+------------
+``VizView`` embeds a PyVista plotter and draws either a field of the mesh on a
+cut plane or the geometry preview of the vessel and the pipe network.  The
+controls choose the field, the cut axis and position, the opacity and the
+camera.
+
+HOW IT WORKS
+------------
+-> NO OPENGL <-
+   When no OpenGL context is available (headless session, VM, remote desktop)
+   the widget degrades to a placeholder instead of taking the application down;
+   ``THERMAL_DISABLE_3D=1`` forces that mode.  The controls are disabled in that
+   mode.
+-> STALE MESH <-
+   ``set_stale`` marks the mesh on show as built from another model; a field
+   view then says so in red at the lower left.
+-> GEOMETRY PREVIEW <-
+   ``show_geometry`` draws the vessel and the circuit of the network the Pipes
+   tab built.  Passing ``network=None`` on purpose clears it (a rebuilt mesh
+   invalidates the old one); leaving it out keeps the last preview.
+-> REDRAW <-
+   An edit redraws in place, so the camera stays where the user left it.
+"""
 from __future__ import annotations
 
 

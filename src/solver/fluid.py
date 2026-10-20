@@ -1,77 +1,111 @@
-"""The heat-transfer fluid as a 1-D network: the heart of the sand-battery model.
-
-Polar Night Energy's published architecture is a **closed air loop through pipes
-buried in the sand**: the electric resistors heat the air (not the bed), the air
-charges the bed through the pipe walls, and on discharge the same loop delivers the
-heat to an exchanger.  The fluid is therefore not a boundary condition with a fixed
-temperature: its temperature evolves along the path, and every cell of the bed sees
-the *local* fluid temperature.
-
-The model is the classical 1-D advection with distributed wall exchange,
-
-    m_dot c_p dT/ds = h P (T_wall(s) - T(s))
-
-whose exact solution over a piece of pipe of wetted area ``A`` is the effectiveness
-relation
-
-    T_out = T_wall + (T_in - T_wall) exp(-NTU),      NTU = h A / (m_dot c_p)
-
-with the mean fluid temperature over that piece
-
-    T_mean = T_wall + (T_in - T_wall) (1 - exp(-NTU)) / NTU
-
-and the power exchanged ``m_dot c_p (T_in - T_out)``.  Two limits come out for free and
-they are the two regimes of a storage:
-
-* ``NTU -> 0``  (high flow, small area): ``Q -> h A (T_wall - T_in)``, **area-limited**;
-* ``NTU -> inf`` (low flow, large area): ``Q -> m_dot c_p (T_wall - T_in)``, **flow-limited**.
-
-A storage discharges in the second regime (that is what makes it a storage), which is
-exactly the regime a lumped film model with a fixed inlet temperature gets wrong by a
-factor ``NTU / (1 - exp(-NTU))``.
-
-Every temperature is affine in the loop inlet temperature, so the marching solution
-propagates ``T(s) = a T_in + b`` and the loop energy balance
-
-    sum_i m_dot_i c_p (T_out,i - T_in) = Q_ext
-
-is solved exactly for ``T_in`` in one step.  ``Q_ext > 0`` are the resistors
-(charging), ``Q_ext < 0`` is the exchanger (discharging): the same loop does both.
-
-**The circuit as a network.**  A plant is not a set of parallel tubes: the gas crosses
-the inlet duct, the distributor, one riser, the collector and the outlet duct, and the
-headers are shared - their flow falls tap by tap along the distributor and grows along
-the collector.  :class:`GasGraph` is that circuit: straight segments between nodes, each
-with its own share of the flow, marched in topological order with the enthalpy of the
-streams mixed at every node.  Temperatures stay affine in ``T_in``, so the balance is
-still solved in one step, and the headers exchange with the bed like the risers.  The
-balance is imposed on the exchange itself, ``sum_cells q = Q_ext``, so the energy the
-bed receives is the energy the external device gives whatever the gas properties do.
-
-**Well model.**  A tube is a line inside a cell of the bed, so the cell temperature is
-not the wall temperature: for a line source in a square cell of edge ``h`` the discrete
-solution equals the radial one at the *equivalent radius* ``r_eq = 0.198 h``
-(Peaceman, SPE J. 18 (1978) 183-194; ``0.14 sqrt(a^2 + b^2)`` for an ``a x b`` cell,
-SPE J. 23 (1983) 531-543).  The wall-to-cell resistance per unit length is therefore
-``ln(r_eq / r_o) / (2 pi k)``, in series with the tube wall ``ln(r_o / r_i) /
-(2 pi k_wall)`` and the gas film ``1 / (h pi d_i)``:
-
-    1 / UA' = 1 / (h pi d_i) + ln(r_o / r_i) / (2 pi k_wall) + ln(r_eq / r_o) / (2 pi k)
-
-This is what makes the exchange independent of the mesh: without it the bed between
-the wall and the cell centre is a spurious resistance that grows as the cell shrinks
-towards the tube (on 52 mm leaves around a 50 mm tube it was as large as the gas film).
-The model needs ``r_eq > r_o`` (cells at least ``2.53 d`` wide); a smaller cell gets no
-correction (the resistance is then overstated) and the result says how much surface
-was in that case.  The correction is quasi-steady: it holds once the thermal wave has
-crossed the cell, ``t > r_eq^2 / alpha`` (about an hour for 40 mm in sand).
-
-**Gas properties.**  Air between 20 and 700 degC changes its cp by 12 %, its viscosity
-by a factor 2.2 and its conductivity by 2.4; with ``variable_properties`` every segment
-is marched with the properties of the gas at its own mean temperature (Incropera et
-al., *Fundamentals of Heat and Mass Transfer*, 7th ed., Table A.4), lagged by one march:
-the previous march - or a first pass at the wall temperature - gives the temperatures.
 """
+src.solver.fluid
+================
+The heat-transfer fluid as a 1-D network: the heart of the sand-battery model.
+
+WHAT IT DOES
+------------
+Models the heat path of Polar Night Energy's published architecture: a **closed
+air loop through pipes buried in the sand**.  The electric resistors heat the air
+(not the bed), the air charges the bed through the pipe walls, and on discharge the
+same loop delivers the heat to an exchanger.  The fluid is therefore not a boundary
+condition with a fixed temperature: its temperature evolves along the path, and every
+cell of the bed sees the *local* fluid temperature.
+
+HOW IT WORKS
+------------
+-> EFFECTIVENESS-NTU <-
+   The model is the classical 1-D advection with distributed wall exchange::
+
+       m_dot c_p dT/ds = h P (T_wall(s) - T(s))
+
+   whose exact solution over a piece of pipe of wetted area ``A`` is the
+   effectiveness relation::
+
+       T_out = T_wall + (T_in - T_wall) exp(-NTU),      NTU = h A / (m_dot c_p)
+
+   with the mean fluid temperature over that piece::
+
+       T_mean = T_wall + (T_in - T_wall) (1 - exp(-NTU)) / NTU
+
+   and the power exchanged ``m_dot c_p (T_in - T_out)``.  Two limits come out for
+   free and they are the two regimes of a storage:
+
+   * ``NTU -> 0``  (high flow, small area): ``Q -> h A (T_wall - T_in)``,
+     **area-limited**;
+   * ``NTU -> inf`` (low flow, large area): ``Q -> m_dot c_p (T_wall - T_in)``,
+     **flow-limited**.
+
+   A storage discharges in the second regime (that is what makes it a storage),
+   which is exactly the regime a lumped film model with a fixed inlet temperature
+   gets wrong by a factor ``NTU / (1 - exp(-NTU))``.
+
+   Every temperature is affine in the loop inlet temperature, so the marching
+   solution propagates ``T(s) = a T_in + b`` and the loop energy balance::
+
+       sum_i m_dot_i c_p (T_out,i - T_in) = Q_ext
+
+   is solved exactly for ``T_in`` in one step.  ``Q_ext > 0`` are the resistors
+   (charging), ``Q_ext < 0`` is the exchanger (discharging): the same loop does
+   both.
+
+-> THE CIRCUIT AS A NETWORK <-
+   A plant is not a set of parallel tubes: the gas crosses the inlet duct, the
+   distributor, one riser, the collector and the outlet duct, and the headers are
+   shared - their flow falls tap by tap along the distributor and grows along the
+   collector.  :class:`GasGraph` is that circuit: straight segments between nodes,
+   each with its own share of the flow, marched in topological order with the
+   enthalpy of the streams mixed at every node.  Temperatures stay affine in
+   ``T_in``, so the balance is still solved in one step, and the headers exchange
+   with the bed like the risers.  The balance is imposed on the exchange itself,
+   ``sum_cells q = Q_ext``, so the energy the bed receives is the energy the
+   external device gives whatever the gas properties do.
+
+-> WELL MODEL <-
+   A tube is a line inside a cell of the bed, so the cell temperature is not the
+   wall temperature: for a line source in a square cell of edge ``h`` the discrete
+   solution equals the radial one at the *equivalent radius* ``r_eq = 0.198 h``
+   (Peaceman, SPE J. 18 (1978) 183-194; ``0.14 sqrt(a^2 + b^2)`` for an ``a x b``
+   cell, SPE J. 23 (1983) 531-543).  The wall-to-cell resistance per unit length
+   is therefore ``ln(r_eq / r_o) / (2 pi k)``, in series with the tube wall
+   ``ln(r_o / r_i) / (2 pi k_wall)`` and the gas film ``1 / (h pi d_i)``::
+
+       1 / UA' = 1 / (h pi d_i) + ln(r_o / r_i) / (2 pi k_wall)
+                 + ln(r_eq / r_o) / (2 pi k)
+
+   This is what makes the exchange independent of the mesh: without it the bed
+   between the wall and the cell centre is a spurious resistance that grows as the
+   cell shrinks towards the tube (on 52 mm leaves around a 50 mm tube it was as
+   large as the gas film).
+
+-> GAS PROPERTIES <-
+   Air between 20 and 700 degC changes its cp by 12 %, its viscosity by a factor
+   2.2 and its conductivity by 2.4; with ``variable_properties`` every segment is
+   marched with the properties of the gas at its own mean temperature (Incropera
+   et al., *Fundamentals of Heat and Mass Transfer*, 7th ed., Table A.4), lagged by
+   one march: the previous march - or a first pass at the wall temperature - gives
+   the temperatures.
+
+LIMITS
+------
+The well model needs ``r_eq > r_o`` (cells at least ``2.53 d`` wide); a smaller cell
+gets no correction (the resistance is then overstated) and the result says how much
+surface was in that case.  The correction is quasi-steady: it holds once the thermal
+wave has crossed the cell, ``t > r_eq^2 / alpha`` (about an hour for 40 mm in sand).
+
+SOURCES
+-------
+- [Pea78] D. W. Peaceman, "Interpretation of well-block pressures in numerical
+  reservoir simulation", *SPE J.* 18 (1978) 183-194.
+- [Pea83] D. W. Peaceman, "Interpretation of well-block pressures in numerical
+  reservoir simulation with nonsquare grid blocks and anisotropic permeability",
+  *SPE J.* 23 (1983) 531-543.
+- [Incropera] F. P. Incropera, D. P. DeWitt, T. L. Bergman, A. S. Lavine,
+  *Fundamentals of Heat and Mass Transfer*, 7th ed., Wiley, 2011, Table A.4 (air).
+- [PNE] Polar Night Energy, published descriptions of the closed air loop through
+  buried pipes.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -83,6 +117,9 @@ from ..core.mesh import BoundaryType, MaterialID, Mesh3D
 from ..core.pipes import PipeRun
 
 
+# ==============================================================================
+# GAS PROPERTIES AND PIPE CORRELATIONS
+# ==============================================================================
 #: air at 1 atm (Incropera et al., 7th ed., Table A.4): T [K], cp [J/(kg K)],
 #: mu [1e-7 Pa s], k [1e-3 W/(m K)], Pr [-]
 _AIR_TABLE = np.array([
@@ -236,6 +273,9 @@ def fan_power(mass_flow: float, delta_p: float, fluid: Fluid,
     return float(mass_flow / fluid.rho * delta_p / efficiency)
 
 
+# ==============================================================================
+# RESULTS AND LOOP BALANCE
+# ==============================================================================
 @dataclass
 class RunResult:
     """What one pipe run did."""
@@ -400,6 +440,9 @@ def hold_loop_balance(result: FluidResult, mesh, x: np.ndarray,
     return x + delta * y
 
 
+# ==============================================================================
+# THE CIRCUIT AS A GRAPH
+# ==============================================================================
 @dataclass
 class GasSegment:
     """One straight piece of the circuit between two nodes, and the cells it crosses.
@@ -498,6 +541,9 @@ def _cell_extents(mesh) -> np.ndarray:
                             for axis in range(3)])
 
 
+# ==============================================================================
+# THE FLUID LOOP
+# ==============================================================================
 #: Peaceman's equivalent radius of a cell of cross-section ``a x b``: 0.14 sqrt(a^2+b^2)
 PEACEMAN = 0.14
 

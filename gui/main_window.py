@@ -1,4 +1,42 @@
-"""Main window: assembles the panels, routes the runs, displays the results."""
+"""
+gui.main_window
+===============
+Main window: assembles the panels, routes the runs, displays the results.
+
+WHAT IT DOES
+------------
+``ThermalBatteryGUI`` builds the three-column window - the tabbed input pages,
+the 3D view and the results panel - wires every panel to a handler, owns the
+built mesh and the battery geometry, sends runs to ``SimulationController`` and
+puts the answers in the results panel.  ``main`` starts the application.
+
+HOW IT WORKS
+------------
+-> PAGES <-
+   Six input pages: the vessel (shape and layer materials), the plant (gas
+   circuit and buried pipes), the site, the mesh, the analysis and the solver.
+   Each scrolls instead of being cut by a short screen.
+-> MESH OWNERSHIP <-
+   The mesh is the window's, not a panel's: ``build_mesh`` asks the panels for
+   a battery and a tree, applies the geometry and paints the pipe network on
+   the very cells the run will solve.  ``model_signature`` digests everything
+   the mesh was made of, and a model edited after the build makes the mesh
+   stale; ``run`` rebuilds it first rather than answer another question.
+-> EDITS AND PREVIEWS <-
+   A short single-shot timer folds a burst of widget edits into one preview
+   redraw; a second timer marks the built mesh stale.
+-> RUN ROUTING <-
+   The window turns the panels into a ``RunConfig`` and starts the controller;
+   progress, log, failure and finished signals come back to the status bar, the
+   log tab and the results panel.  The automatic mesh search adopts the plan it
+   converged on.
+-> SHUTDOWN <-
+   ``closeEvent`` cancels a running job and waits for the worker, because a
+   ``QThread`` destroyed while it runs aborts the process.
+-> UNITS <-
+   The interface is in degC, the model in Kelvin; powers are W or kW, lengths
+   m, times s.
+"""
 from __future__ import annotations
 
 import sys

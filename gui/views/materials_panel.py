@@ -1,10 +1,35 @@
-"""Materials of the vessel's layers, and the site the vessel stands in.
+"""
+gui.views.materials_panel
+=========================
+Materials of the vessel's layers, and the site the vessel stands in.
 
-Two pages: the **materials** of the storage bed, the insulation and the shell - laid out
-by the window on the Vessel page, next to the shape they fill - and the **site**: the
-ambient air, the ground and the wind the outer surface exchanges with.  The site is not
-a material: it is the one place the ambient values are defined, and every analysis
-reads them from here.
+WHAT IT DOES
+------------
+``MaterialsPanel`` owns two pages: the **materials** of the storage bed, the
+insulation and the shell - laid out by the window on the Vessel page, next to
+the shape they fill - and the **site**: the ambient air, the ground and the
+wind the outer surface exchanges with.  The site is not a material: it is the
+one place the ambient values are defined, and every analysis reads them from
+here.
+
+HOW IT WORKS
+------------
+-> BED <-
+   The bed is a packed bed of the medium: its density and heat capacity are the
+   grains' at the packing fraction, with the air in the voids; its conductivity
+   is the Zehner-Bauer-Schlunder model with the radiation between the grains,
+   re-evaluated at the temperature of every cell as the bed heats.  The
+   insulation and the shell are solid.  The page's read-out shows the
+   conductivity at 20 degC and 500 degC, the density and the heat capacity.
+-> SITE <-
+   The outer surface exchanges with the air through a film computed from the
+   correlations - natural convection on the vessel plus the wind (ISO 6946,
+   4 + 4 v) - which the log reports after every build; the ground is held at its
+   temperature at the bottom of the soil.
+-> UNITS <-
+   The widgets show degC, percent and millimetres; ``conditions``,
+   ``packing_fraction`` and ``particle_diameter`` convert to kelvin, fraction
+   and metres.
 """
 from __future__ import annotations
 

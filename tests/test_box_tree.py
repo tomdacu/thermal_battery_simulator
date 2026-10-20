@@ -1,11 +1,18 @@
-"""The anisotropic tree of boxes (``src/core/box_tree.py``) and the mesh built on it.
-
-What is pinned: the face list of a uniform box tree is the octree's; after a refinement
-in plan and in height the 2:1 rule holds per direction and the faces tile every leaf
-face exactly; a uniform box tree and a uniform octree solve the same problem to the same
-field; a field that varies along one axis is exact on leaves graded in the other two;
-the balance closes on a graded, anisotropic tree.
 """
+tests.test_box_tree
+===================
+The anisotropic tree of boxes (``src/core/box_tree.py``) and the mesh built on it.
+
+WHAT IT DOES
+------------
+Pins: the face list of a uniform box tree is the octree's; after a refinement
+in plan and in height the 2:1 rule holds per direction and the faces tile
+every leaf face exactly; a uniform box tree and a uniform octree solve the
+same problem to the same field; a field that varies along one axis is exact on
+leaves graded in the other two; the balance closes on a graded, anisotropic
+tree.
+"""
+
 from __future__ import annotations
 
 import numpy as np

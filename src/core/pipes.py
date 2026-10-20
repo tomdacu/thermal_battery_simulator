@@ -1,31 +1,77 @@
-"""Heat-transfer pipes buried in the storage medium: geometry and rasterisation.
+"""
+src.core.pipes
+==============
+Geometry and rasterisation of the heat-transfer pipes buried in the storage medium.
 
+WHAT IT DOES
+------------
+Builds pipe layouts - vertical banks in a silo, rings, serpentines and arbitrary
+polylines - and rasterises a polyline onto the grid, returning for every cell it
+crosses the length of pipe inside that cell and the wetted area
+``pi * d * length``.  The module also keeps the mesh view (:func:`cell_centres`,
+:func:`cell_sizes`, :func:`cell_of`, :func:`rasterize_pipe`) that lets a run be
+rasterised on the structured ``Mesh3D`` and on the octree-based ``AdaptiveMesh``
+alike.
+
+WHY
+---
 Polar Night Energy's architecture (their published description) is a closed air loop
-through pipes buried in the sand: the electric resistors heat the *air*, the air heats
-the bed through the pipe walls, and on discharge the same loop delivers the heat to an
-exchanger.  The pipes are the only heat-transfer surface, so their **wetted area** is a
-physical quantity and must not be read off the voxel mask: the mask is a staircase and
-its surface is a mesh artefact.
+through pipes buried in the sand: the electric resistors heat the *air*, the air
+heats the bed through the pipe walls, and on discharge the same loop delivers the
+heat to an exchanger.  The pipes are the only heat-transfer surface, so their
+**wetted area** is a physical quantity and must not be read off the voxel mask: the
+mask is a staircase and its surface is a mesh artefact.  The wetted area is
+therefore the geometric ``pi d L`` of the centrelines.
 
-This module therefore does two things:
+HOW IT WORKS
+------------
+-> PIPE RUNS <-
+   A :class:`PipeRun` is a polyline of vertices [m] and a diameter [m], plus the
+   cells it crosses and the length of centreline inside each.  ``perimeter`` is
+   ``pi d``, ``area`` is the per-cell ``pi d L_c`` and ``total_area`` the
+   ``pi d L_total`` of the whole run.
 
-* builds pipe layouts (vertical banks in a silo, rings, serpentines, arbitrary
-  polylines);
-* rasterises a polyline onto the grid returning, for every cell it crosses, the
-  **length of pipe inside that cell** and the wetted area ``pi * d * length``.
+-> WETTED AREA <-
+   The wetted area of cell ``c`` is ``pi d L_c``, with ``L_c`` the length of
+   *centreline* inside that cell, so ``sum_c pi d L_c = pi d L_total`` to machine
+   precision.  That is the invariant the fluid solve relies on: distributing the
+   exchange over the cells must not create or destroy surface.
 
-The sum of the areas equals ``pi * d * total length`` to machine precision, which is
-the invariant the fluid solve relies on: distributing the exchange over the cells must
-not create or destroy surface.  Stated per cell: the wetted area of cell ``c`` is
-``pi d L_c`` with ``L_c`` the length of *centreline* inside that cell, and
-``sum_c pi d L_c = pi d L_total``.  No area is ever counted from the mask - the mask
-paints material, it does not measure surface.
+-> NO MASK SURFACE <-
+   No area is ever counted from the mask - the mask paints material, it does not
+   measure surface.  The wetted area of a run is the geometric ``pi d L`` even where
+   the voxel staircase would give a different number.
 
-A run is rasterised on either mesh - the structured ``Mesh3D`` and the octree-based
-``AdaptiveMesh`` - through the mesh view this module keeps (:func:`cell_centres`,
-:func:`cell_sizes`, :func:`cell_of`): the cells are the mesh's own, and the invariant is
-the same one, because the length per cell is measured on the centreline and never on the
-grid.
+-> RASTERISATION <-
+   A polyline is sampled at ``substeps`` points per local cell size, so the sampling
+   cannot skip a cell, and each piece contributes its length to the cell that holds
+   its midpoint.  A run is returned by elevation (the default) or in the order the
+   centreline meets the cells (``order="path"``).
+
+-> TWO MESHES <-
+   A run is rasterised through the mesh view this module keeps.  On ``Mesh3D`` each
+   helper is the structured query the rasterisers were written with, so nothing that
+   reads a structured mesh moves by an ulp; on a tree it is a leaf lookup.  The cells
+   are the mesh's own, and the length per cell is measured on the centreline and
+   never on the grid, so the invariant is the same one on both.
+
+INPUTS
+------
+A mesh (``Mesh3D`` or ``AdaptiveMesh``), the polyline vertices [m], the diameter
+[m] and, for a layout, the pitch, radius and elevation range [m].
+
+OUTPUTS
+-------
+A :class:`PipeRun` per centreline - flat cell indices plus the length [m] inside
+each - or a :class:`BankLayout` with its pitches [m], bundle size [m], bed volume
+[m^3] and wetted area [m^2].
+
+LIMITS
+------
+In the rasteriser the diameter enters only the wetted area: the walk follows the
+centreline and is not widened to the tube volume.  The module does not model the
+wall thickness, the bore or the gas flow; those belong to
+:mod:`src.core.pipe_network` and :mod:`src.solver.fluid`.
 """
 from __future__ import annotations
 
@@ -48,8 +94,10 @@ class PipeRun:
     name: str
     points: np.ndarray                 # (n, 3) polyline vertices [m]
     diameter: float                    # [m]
+    #: flat position of every crossed cell [-], aligned with ``length``
     cells: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    length: np.ndarray = field(default_factory=lambda: np.empty(0))   # [m] per cell
+    #: centreline length inside each of ``cells`` [m], in the same order
+    length: np.ndarray = field(default_factory=lambda: np.empty(0))
 
     @property
     def perimeter(self) -> float:
@@ -74,7 +122,10 @@ class PipeRun:
         return self.perimeter * self.total_length
 
 
-# ------------------------------------------------------ the rasteriser's mesh view
+# ==============================================================================
+# THE RASTERISER'S MESH VIEW
+# ==============================================================================
+
 # The protocol carries the physics per cell and deliberately no index arithmetic and no
 # per-axis sizes (see the module docstring of ``src/core/mesh_api.py``).  A rasteriser -
 # this module, :meth:`src.core.pipe_network.PipeNetwork.paint` - needs exactly the three
@@ -323,13 +374,13 @@ def pipe_surface_power_w_cm2(power_w: float, area_m2: float) -> float:
     return float(power_w) / area_cm2
 
 
-#: pitches published for tube bundles in a granular bed, in multiples of the outer
-#: diameter: horizontal 2.0, vertical 2.0-2.5, equilateral (triangular) sqrt(3)
+#: pitches published for tube bundles in a granular bed, as multiples of the outer
+#: diameter [-]: horizontal 2.0, vertical 2.0-2.5, equilateral (triangular) sqrt(3)
 PITCH_HORIZONTAL = 2.0
 PITCH_VERTICAL = 2.5
 PITCH_TRIANGULAR = 3.0 ** 0.5
 
-#: header (collector) height limits: below 1 m no care is needed, 1-3 m needs flow
+#: header (collector) height limits [m]: below 1 m no care is needed, 1-3 m needs flow
 #: distribution care, above 3 m the bundle must be split into parallel modules
 HEADER_SAFE = 1.0
 HEADER_LIMIT = 3.0
@@ -339,12 +390,19 @@ HEADER_LIMIT = 3.0
 class BankLayout:
     """A bundle of vertical pipes and the numbers a designer needs."""
 
+    #: the pipes of the bundle, in rasterisation order
     runs: list[PipeRun]
+    #: spacing between neighbours inside a row [m]
     horizontal_pitch: float
+    #: spacing between rows [m]
     vertical_pitch: float
+    #: width of the bundle [m]
     bundle_width: float
+    #: header height of the bundle [m]
     bundle_height: float
+    #: bed volume the bundle is sized against [m^3]
     bed_volume: float
+    #: design-rule remarks for the caller to print
     notes: list[str] = field(default_factory=list)
 
     @property
